@@ -5,11 +5,11 @@ use bevy_ecs::{
     event::{Event, EventCursor, Events},
     hierarchy::ChildOf,
     reflect::AppTypeRegistry,
-    system::Resource,
+    resource::Resource,
     world::{Mut, World},
 };
+use bevy_platform_support::collections::{HashMap, HashSet};
 use bevy_reflect::Reflect;
-use bevy_utils::{HashMap, HashSet};
 use thiserror::Error;
 use uuid::Uuid;
 

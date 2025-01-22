@@ -14,13 +14,13 @@ use bevy_ecs::{
     system::{In, Local},
     world::{EntityRef, EntityWorldMut, FilteredEntityRef, World},
 };
+use bevy_platform_support::collections::HashMap;
 use bevy_reflect::{
     prelude::ReflectDefault,
     serde::{ReflectSerializer, TypedReflectDeserializer},
     GetPath as _, NamedField, OpaqueInfo, PartialReflect, ReflectDeserialize, ReflectSerialize,
     TypeInfo, TypeRegistration, TypeRegistry, VariantInfo,
 };
-use bevy_utils::HashMap;
 use serde::{de::DeserializeSeed as _, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -1512,7 +1512,7 @@ mod tests {
         );
     }
     use super::*;
-    use bevy_ecs::{component::Component, system::Resource};
+    use bevy_ecs::{component::Component, resource::Resource};
     use bevy_reflect::Reflect;
 
     #[test]
