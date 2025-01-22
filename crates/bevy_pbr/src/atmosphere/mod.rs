@@ -33,13 +33,15 @@ mod node;
 pub mod resources;
 
 use bevy_app::{App, Plugin};
-use bevy_asset::load_internal_asset;
+use bevy_asset::{load_internal_asset, Asset, AssetApp, Assets, Handle};
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
-    component::{require, Component},
-    query::{Changed, QueryItem, With},
+    component::{require, Component, ComponentId},
+    entity::Entity,
+    query::{Changed, QueryItem, QueryState, With},
     schedule::IntoSystemConfigs,
     system::{lifetimeless::Read, Query},
+    world::DeferredWorld,
 };
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
@@ -143,13 +145,16 @@ impl Plugin for AtmospherePlugin {
             Shader::from_wgsl
         );
 
+        app.init_asset::<Atmosphere>();
+        app.world()
+            .resource_mut::<Assets<Atmosphere>>()
+            .insert(Atmosphere::EARTH_HANDLE, Atmosphere::EARTH);
+
         app.register_type::<Atmosphere>()
-            .register_type::<AtmosphereSettings>()
+            .register_type::<LutBasedAtmosphereSettings>()
             .add_plugins((
-                ExtractComponentPlugin::<Atmosphere>::default(),
-                ExtractComponentPlugin::<AtmosphereSettings>::default(),
-                UniformComponentPlugin::<Atmosphere>::default(),
-                UniformComponentPlugin::<AtmosphereSettings>::default(),
+                ExtractComponentPlugin::<LutBasedAtmosphereSettings>::default(),
+                UniformComponentPlugin::<LutBasedAtmosphereSettings>::default(),
             ));
     }
 
@@ -232,6 +237,40 @@ impl Plugin for AtmospherePlugin {
     }
 }
 
+#[derive(Component)]
+pub struct Planet {
+    /// Radius of the planet
+    ///
+    /// units: m
+    pub bottom_radius: f32,
+
+    /// Radius at which we consider the atmosphere to 'end' for our
+    /// calculations (from center of planet)
+    ///
+    /// units: m
+    pub top_radius: f32,
+
+    /// An approximation of the average albedo (or color, roughly) of the
+    /// planet's surface. This is used when calculating multiscattering.
+    ///
+    /// units: N/A
+    pub ground_albedo: Vec3,
+}
+
+impl Planet {
+    pub const EARTH: Self = Self {
+        bottom_radius: 6_360_000.0,
+        top_radius: 6_460_000.0,
+        ground_albedo: Vec3::splat(0.3),
+    };
+}
+
+impl Default for Planet {
+    fn default() -> Self {
+        Self::EARTH
+    }
+}
+
 /// This component describes the atmosphere of a planet, and when added to a camera
 /// will enable atmospheric scattering for that camera. This is only compatible with
 /// HDR cameras.
@@ -252,26 +291,8 @@ impl Plugin for AtmospherePlugin {
 /// participating in Rayleigh and Mie scattering falls off roughly exponentially
 /// from the planet's surface, ozone only exists in a band centered at a fairly
 /// high altitude.
-#[derive(Clone, Component, Reflect, ShaderType)]
-#[require(AtmosphereSettings)]
+#[derive(Clone, Reflect, ShaderType, Asset)]
 pub struct Atmosphere {
-    /// Radius of the planet
-    ///
-    /// units: m
-    pub bottom_radius: f32,
-
-    /// Radius at which we consider the atmosphere to 'end' for our
-    /// calculations (from center of planet)
-    ///
-    /// units: m
-    pub top_radius: f32,
-
-    /// An approximation of the average albedo (or color, roughly) of the
-    /// planet's surface. This is used when calculating multiscattering.
-    ///
-    /// units: N/A
-    pub ground_albedo: Vec3,
-
     /// The rate of falloff of rayleigh particulate with respect to altitude:
     /// optical density = exp(-rayleigh_density_exp_scale * altitude in meters).
     ///
@@ -331,10 +352,10 @@ pub struct Atmosphere {
 }
 
 impl Atmosphere {
+    const EARTH_HANDLE: Handle<Atmosphere> =
+        Handle::weak_from_u128(0x7A9B1D4114306F28C5B8A8DB5D555686);
+
     pub const EARTH: Atmosphere = Atmosphere {
-        bottom_radius: 6_360_000.0,
-        top_radius: 6_460_000.0,
-        ground_albedo: Vec3::splat(0.3),
         rayleigh_density_exp_scale: 1.0 / 8_000.0,
         rayleigh_scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
         mie_density_exp_scale: 1.0 / 1_200.0,
@@ -346,6 +367,10 @@ impl Atmosphere {
         ozone_absorption: Vec3::new(0.650e-6, 1.881e-6, 0.085e-6),
     };
 
+    pub fn earth() -> Handle<Self> {
+        Self::EARTH_HANDLE.clone()
+    }
+
     pub fn with_density_multiplier(mut self, mult: f32) -> Self {
         self.rayleigh_scattering *= mult;
         self.mie_scattering *= mult;
@@ -355,22 +380,70 @@ impl Atmosphere {
     }
 }
 
-impl Default for Atmosphere {
-    fn default() -> Self {
-        Self::EARTH
+#[derive(Component)]
+#[require(Planet)]
+pub struct AtmosphericScattering {
+    atmosphere: Handle<Atmosphere>,
+    core_settings: CoreAtmosphereSettings,
+}
+
+pub enum AtmosphereSettings {
+    LutBased {
+        lut_settings: LutBasedAtmosphereSettings,
+    },
+    RayMarched {
+        core_settings: CoreAtmosphereSettings,
+    },
+}
+
+impl AtmosphereSettings {
+    pub fn core_settings(&self) -> &CoreAtmosphereSettings {
+        match self {
+            AtmosphereSettings::LutBased {
+                ref core_settings, ..
+            } => core_settings,
+            AtmosphereSettings::RayMarched {
+                ref core_settings, ..
+            } => core_settings,
+        }
+    }
+
+    pub fn core_settings_mut(&mut self) -> &mut CoreAtmosphereSettings {
+        match self {
+            AtmosphereSettings::LutBased {
+                ref mut core_settings,
+                ..
+            } => core_settings,
+            AtmosphereSettings::RayMarched {
+                ref mut core_settings,
+                ..
+            } => core_settings,
+        }
     }
 }
 
-impl ExtractComponent for Atmosphere {
-    type QueryData = Read<Atmosphere>;
+pub struct CoreAtmosphereSettings {
+    /// The size of the transmittance LUT
+    pub transmittance_lut_size: UVec2,
 
-    type QueryFilter = With<Camera3d>;
+    /// The size of the multiscattering LUT
+    pub multiscattering_lut_size: UVec2,
 
-    type Out = Atmosphere;
+    /// The number of points to sample along each ray when
+    /// computing the transmittance LUT
+    pub transmittance_lut_samples: u32,
 
-    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
-        Some(item.clone())
-    }
+    /// The number of rays to sample when computing each
+    /// pixel of the multiscattering LUT
+    pub multiscattering_lut_dirs: u32,
+
+    /// The number of points to sample along each ray when
+    /// computing the multiscattering LUT.
+    pub multiscattering_lut_samples: u32,
+
+    /// A conversion factor between scene units and meters, used to
+    /// ensure correctness at different length scales.
+    pub scene_units_to_m: f32,
 }
 
 /// This component controls the resolution of the atmosphere LUTs, and
@@ -392,30 +465,12 @@ impl ExtractComponent for Atmosphere {
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
 #[derive(Clone, Component, Reflect, ShaderType)]
-pub struct AtmosphereSettings {
-    /// The size of the transmittance LUT
-    pub transmittance_lut_size: UVec2,
-
-    /// The size of the multiscattering LUT
-    pub multiscattering_lut_size: UVec2,
-
+pub struct LutBasedAtmosphereSettings {
     /// The size of the sky-view LUT.
     pub sky_view_lut_size: UVec2,
 
     /// The size of the aerial-view LUT.
     pub aerial_view_lut_size: UVec3,
-
-    /// The number of points to sample along each ray when
-    /// computing the transmittance LUT
-    pub transmittance_lut_samples: u32,
-
-    /// The number of rays to sample when computing each
-    /// pixel of the multiscattering LUT
-    pub multiscattering_lut_dirs: u32,
-
-    /// The number of points to sample when integrating along each
-    /// multiscattering ray
-    pub multiscattering_lut_samples: u32,
 
     /// The number of points to sample along each ray when
     /// computing the sky-view LUT.
@@ -432,13 +487,9 @@ pub struct AtmosphereSettings {
     ///
     /// units: m
     pub aerial_view_lut_max_distance: f32,
-
-    /// A conversion factor between scene units and meters, used to
-    /// ensure correctness at different length scales.
-    pub scene_units_to_m: f32,
 }
 
-impl Default for AtmosphereSettings {
+impl Default for LutBasedAtmosphereSettings {
     fn default() -> Self {
         Self {
             transmittance_lut_size: UVec2::new(256, 128),
@@ -456,12 +507,12 @@ impl Default for AtmosphereSettings {
     }
 }
 
-impl ExtractComponent for AtmosphereSettings {
-    type QueryData = Read<AtmosphereSettings>;
+impl ExtractComponent for LutBasedAtmosphereSettings {
+    type QueryData = Read<LutBasedAtmosphereSettings>;
 
     type QueryFilter = (With<Camera3d>, With<Atmosphere>);
 
-    type Out = AtmosphereSettings;
+    type Out = LutBasedAtmosphereSettings;
 
     fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
         Some(item.clone())
