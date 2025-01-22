@@ -154,10 +154,10 @@ impl Plugin for AtmospherePlugin {
             .insert(Atmosphere::EARTH_HANDLE, Atmosphere::EARTH);
 
         app.register_type::<Atmosphere>()
-            .register_type::<LutBasedAtmosphereSettings>()
+            .register_type::<AuxLuts>()
             .add_plugins((
-                ExtractComponentPlugin::<LutBasedAtmosphereSettings>::default(),
-                UniformComponentPlugin::<LutBasedAtmosphereSettings>::default(),
+                ExtractComponentPlugin::<AuxLuts>::default(),
+                UniformComponentPlugin::<AuxLuts>::default(),
             ));
     }
 
@@ -384,48 +384,33 @@ impl Atmosphere {
 }
 
 #[derive(Component)]
-#[require(Planet)]
-pub struct AtmosphericScattering {
-    atmosphere: Handle<Atmosphere>,
-    core_settings: CoreAtmosphereSettings,
-}
+#[require(Planet, AtmosphericScatteringMode)]
+pub struct AtmosphericScattering(pub Handle<Atmosphere>);
 
-pub enum AtmosphereSettings {
+#[derive(Component)]
+pub enum AtmosphericScatteringMode {
     LutBased {
-        lut_settings: LutBasedAtmosphereSettings,
+        core_lut_settings: AtmosphereCoreLutSettings,
+        aux_lut_settings: AtmosphereAuxLutSettings,
     },
     RayMarched {
-        core_settings: CoreAtmosphereSettings,
+        core_lut_settings: AtmosphereCoreLutSettings,
+        ray_march_settings: AtmosphereRayMarchSettings,
     },
 }
 
-impl AtmosphereSettings {
-    pub fn core_settings(&self) -> &CoreAtmosphereSettings {
-        match self {
-            AtmosphereSettings::LutBased {
-                ref core_settings, ..
-            } => core_settings,
-            AtmosphereSettings::RayMarched {
-                ref core_settings, ..
-            } => core_settings,
-        }
-    }
+impl AtmosphericScatteringMode {}
 
-    pub fn core_settings_mut(&mut self) -> &mut CoreAtmosphereSettings {
-        match self {
-            AtmosphereSettings::LutBased {
-                ref mut core_settings,
-                ..
-            } => core_settings,
-            AtmosphereSettings::RayMarched {
-                ref mut core_settings,
-                ..
-            } => core_settings,
+impl Default for AtmosphericScatteringMode {
+    fn default() -> Self {
+        Self::LutBased {
+            core_lut_settings: Default::default(),
+            aux_lut_settings: Default::default(),
         }
     }
 }
 
-pub struct CoreAtmosphereSettings {
+pub struct AtmosphereCoreLutSettings {
     /// The size of the transmittance LUT
     pub transmittance_lut_size: UVec2,
 
@@ -449,6 +434,19 @@ pub struct CoreAtmosphereSettings {
     pub scene_units_to_m: f32,
 }
 
+impl Default for AtmosphereCoreLutSettings {
+    fn default() -> Self {
+        Self {
+            transmittance_lut_size: Default::default(),
+            multiscattering_lut_size: Default::default(),
+            transmittance_lut_samples: Default::default(),
+            multiscattering_lut_dirs: Default::default(),
+            multiscattering_lut_samples: Default::default(),
+            scene_units_to_m: Default::default(),
+        }
+    }
+}
+
 /// This component controls the resolution of the atmosphere LUTs, and
 /// how many samples are used when computing them.
 ///
@@ -467,8 +465,8 @@ pub struct CoreAtmosphereSettings {
 /// The aerial-view lut is a 3d LUT fit to the view frustum, which stores the luminance
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
-#[derive(Clone, Component, Reflect, ShaderType)]
-pub struct LutBasedAtmosphereSettings {
+#[derive(Clone, Reflect, ShaderType)]
+pub struct AtmosphereAuxLutSettings {
     /// The size of the sky-view LUT.
     pub sky_view_lut_size: UVec2,
 
@@ -492,20 +490,29 @@ pub struct LutBasedAtmosphereSettings {
     pub aerial_view_lut_max_distance: f32,
 }
 
-impl Default for LutBasedAtmosphereSettings {
+impl Default for AtmosphereAuxLutSettings {
     fn default() -> Self {
         Self {
-            transmittance_lut_size: UVec2::new(256, 128),
-            transmittance_lut_samples: 40,
-            multiscattering_lut_size: UVec2::new(32, 32),
-            multiscattering_lut_dirs: 64,
-            multiscattering_lut_samples: 20,
             sky_view_lut_size: UVec2::new(400, 200),
             sky_view_lut_samples: 16,
             aerial_view_lut_size: UVec3::new(32, 32, 32),
             aerial_view_lut_samples: 10,
             aerial_view_lut_max_distance: 3.2e4,
-            scene_units_to_m: 1.0,
+        }
+    }
+}
+
+pub struct AtmosphereRayMarchSettings {
+    sample_count: u32,
+    jitter_strength: f32,
+}
+
+//TODO: find good values
+impl Default for AtmosphereRayMarchSettings {
+    fn default() -> Self {
+        Self {
+            sample_count: 16,
+            jitter_strength: 0.2,
         }
     }
 }
@@ -533,25 +540,5 @@ impl Sun {
 impl Default for Sun {
     fn default() -> Self {
         Self::SOL
-    }
-}
-
-impl ExtractComponent for LutBasedAtmosphereSettings {
-    type QueryData = Read<LutBasedAtmosphereSettings>;
-
-    type QueryFilter = (With<Camera3d>, With<Atmosphere>);
-
-    type Out = LutBasedAtmosphereSettings;
-
-    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
-        Some(item.clone())
-    }
-}
-
-fn configure_camera_depth_usages(
-    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<Atmosphere>)>,
-) {
-    for mut camera in &mut cameras {
-        camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();
     }
 }
