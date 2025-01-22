@@ -34,6 +34,7 @@ pub mod resources;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Asset, AssetApp, Assets, Handle};
+use bevy_color::Color;
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
     component::{require, Component, ComponentId},
@@ -65,6 +66,8 @@ use resources::{
     RenderSkyBindGroupLayouts,
 };
 use tracing::warn;
+
+use crate::{light_consts::lux, DirectionalLight};
 
 use self::{
     node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
@@ -504,6 +507,32 @@ impl Default for LutBasedAtmosphereSettings {
             aerial_view_lut_max_distance: 3.2e4,
             scene_units_to_m: 1.0,
         }
+    }
+}
+
+#[derive(Component)]
+#[require(DirectionalLight(Sun::default_sun))]
+pub struct Sun {
+    angular_size: f32,
+}
+
+impl Sun {
+    pub const SOL: Self = Self {
+        angular_size: 0.0174533,
+    };
+
+    fn default_sun() -> DirectionalLight {
+        DirectionalLight {
+            color: Color::WHITE,
+            illuminance: lux::RAW_SUNLIGHT,
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for Sun {
+    fn default() -> Self {
+        Self::SOL
     }
 }
 
