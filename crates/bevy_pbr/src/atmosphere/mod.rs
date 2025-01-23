@@ -245,13 +245,13 @@ pub struct Planet {
     /// Radius of the planet
     ///
     /// units: m
-    pub bottom_radius: f32,
+    pub radius: f32,
 
     /// Radius at which we consider the atmosphere to 'end' for our
     /// calculations (from center of planet)
     ///
     /// units: m
-    pub top_radius: f32,
+    pub space_altitude: f32,
 
     /// An approximation of the average albedo (or color, roughly) of the
     /// planet's surface. This is used when calculating multiscattering.
@@ -262,8 +262,8 @@ pub struct Planet {
 
 impl Planet {
     pub const EARTH: Self = Self {
-        bottom_radius: 6_360_000.0,
-        top_radius: 6_460_000.0,
+        radius: 6_360_000.0,
+        space_altitude: 100_000.0,
         ground_albedo: Vec3::splat(0.3),
     };
 }
@@ -355,10 +355,9 @@ pub struct Atmosphere {
 }
 
 impl Atmosphere {
-    const EARTH_HANDLE: Handle<Atmosphere> =
-        Handle::weak_from_u128(0x7A9B1D4114306F28C5B8A8DB5D555686);
+    const EARTH_HANDLE: Handle<Self> = Handle::weak_from_u128(0x7A9B1D4114306F28C5B8A8DB5D555686);
 
-    pub const EARTH: Atmosphere = Atmosphere {
+    pub const EARTH: Self = Self {
         rayleigh_density_exp_scale: 1.0 / 8_000.0,
         rayleigh_scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
         mie_density_exp_scale: 1.0 / 1_200.0,
@@ -399,7 +398,33 @@ pub enum AtmosphericScatteringMode {
     },
 }
 
-impl AtmosphericScatteringMode {}
+impl AtmosphericScatteringMode {
+    pub fn core_lut_settings(&self) -> &AtmosphereCoreLutSettings {
+        match self {
+            AtmosphericScatteringMode::LutBased {
+                ref core_lut_settings,
+                ..
+            } => core_lut_settings,
+            AtmosphericScatteringMode::RayMarched {
+                ref core_lut_settings,
+                ..
+            } => core_lut_settings,
+        }
+    }
+
+    pub fn core_lut_settings_mut(&mut self) -> &mut AtmosphereCoreLutSettings {
+        match self {
+            AtmosphericScatteringMode::LutBased {
+                ref mut core_lut_settings,
+                ..
+            } => core_lut_settings,
+            AtmosphericScatteringMode::RayMarched {
+                ref mut core_lut_settings,
+                ..
+            } => core_lut_settings,
+        }
+    }
+}
 
 impl Default for AtmosphericScatteringMode {
     fn default() -> Self {
@@ -437,12 +462,12 @@ pub struct AtmosphereCoreLutSettings {
 impl Default for AtmosphereCoreLutSettings {
     fn default() -> Self {
         Self {
-            transmittance_lut_size: Default::default(),
-            multiscattering_lut_size: Default::default(),
-            transmittance_lut_samples: Default::default(),
-            multiscattering_lut_dirs: Default::default(),
-            multiscattering_lut_samples: Default::default(),
-            scene_units_to_m: Default::default(),
+            transmittance_lut_size: UVec2::new(256, 128),
+            multiscattering_lut_size: UVec2::new(32, 32),
+            transmittance_lut_samples: 40,
+            multiscattering_lut_dirs: 64,
+            multiscattering_lut_samples: 20,
+            scene_units_to_m: 1.0,
         }
     }
 }
@@ -502,6 +527,7 @@ impl Default for AtmosphereAuxLutSettings {
     }
 }
 
+#[derive(Clone, Reflect, ShaderType)]
 pub struct AtmosphereRayMarchSettings {
     sample_count: u32,
     jitter_strength: f32,

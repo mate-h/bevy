@@ -15,7 +15,7 @@ use super::{
         AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset,
         RenderSkyPipelineId,
     },
-    Atmosphere, AtmosphereSettings,
+    Atmosphere, AtmosphereMode,
 };
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
@@ -29,10 +29,10 @@ pub(super) struct AtmosphereLutsNode {}
 
 impl ViewNode for AtmosphereLutsNode {
     type ViewQuery = (
-        Read<AtmosphereSettings>,
+        Read<AtmosphereMode>,
         Read<AtmosphereBindGroups>,
         Read<DynamicUniformIndex<Atmosphere>>,
-        Read<DynamicUniformIndex<AtmosphereSettings>>,
+        Read<DynamicUniformIndex<AtmosphereMode>>,
         Read<AtmosphereTransformsOffset>,
         Read<ViewUniformOffset>,
         Read<ViewLightsUniformOffset>,
@@ -161,7 +161,7 @@ impl ViewNode for RenderSkyNode {
         Read<AtmosphereBindGroups>,
         Read<ViewTarget>,
         Read<DynamicUniformIndex<Atmosphere>>,
-        Read<DynamicUniformIndex<AtmosphereSettings>>,
+        Read<DynamicUniformIndex<AtmosphereMode>>,
         Read<AtmosphereTransformsOffset>,
         Read<ViewUniformOffset>,
         Read<ViewLightsUniformOffset>,

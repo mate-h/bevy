@@ -4,7 +4,7 @@ use std::f32::consts::PI;
 
 use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
-    pbr::{light_consts::lux, Atmosphere, AtmosphereSettings, CascadeShadowConfigBuilder},
+    pbr::{light_consts::lux, Atmosphere, AtmosphereMode, CascadeShadowConfigBuilder},
     prelude::*,
     render::camera::Exposure,
 };
@@ -31,7 +31,7 @@ fn setup_camera_fog(mut commands: Commands) {
         // The scene is in units of 10km, so we need to scale up the
         // aerial view lut distance and set the scene scale accordingly.
         // Most usages of this feature will not need to adjust this.
-        AtmosphereSettings {
+        AtmosphereMode {
             aerial_view_lut_max_distance: 3.2e5,
             scene_units_to_m: 1e+4,
             ..Default::default()
