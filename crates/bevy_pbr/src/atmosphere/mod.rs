@@ -34,7 +34,7 @@ pub mod resources;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Asset, AssetApp, Assets, Handle};
-use bevy_color::Color;
+use bevy_color::{Color, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
     component::{require, Component, ComponentId},
@@ -255,22 +255,40 @@ pub struct Planet {
 
     /// An approximation of the average albedo (or color, roughly) of the
     /// planet's surface. This is used when calculating multiscattering.
+    /// The alpha channel is ignored.
     ///
     /// units: N/A
-    pub ground_albedo: Vec3,
+    pub ground_albedo: LinearRgba,
 }
 
 impl Planet {
     pub const EARTH: Self = Self {
         radius: 6_360_000.0,
         space_altitude: 100_000.0,
-        ground_albedo: Vec3::splat(0.3),
+        ground_albedo: LinearRgba::rgb(0.3, 0.3, 0.3),
     };
 }
 
 impl Default for Planet {
     fn default() -> Self {
         Self::EARTH
+    }
+}
+
+#[derive(ShaderType)]
+struct GpuPlanet {
+    pub ground_albedo: Vec3,
+    pub lower_radius: f32,
+    pub upper_radius: f32,
+}
+
+impl From<Planet> for GpuPlanet {
+    fn from(planet: Planet) -> Self {
+        Self {
+            ground_albedo: planet.ground_albedo.to_vec3(),
+            lower_radius: planet.radius,
+            upper_radius: planet.radius + planet.space_altitude,
+        }
     }
 }
 
@@ -435,6 +453,7 @@ impl Default for AtmosphericScatteringMode {
     }
 }
 
+#[derive(Clone, Reflect, ShaderType)]
 pub struct AtmosphereCoreLutSettings {
     /// The size of the transmittance LUT
     pub transmittance_lut_size: UVec2,
@@ -544,7 +563,7 @@ impl Default for AtmosphereRayMarchSettings {
 }
 
 #[derive(Component)]
-#[require(DirectionalLight(Sun::default_sun))]
+#[require(DirectionalLight(Self::default_sun))]
 pub struct Sun {
     angular_size: f32,
 }

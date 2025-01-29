@@ -403,6 +403,11 @@ pub(super) fn queue_render_sky_pipelines(
     }
 }
 
+pub struct AtmosphereCoreLuts {
+    transmittance_lut: CachedTexture,
+    multiscattering_lut: CachedTexture,
+}
+
 #[derive(Component)]
 pub struct AtmosphereTextures {
     pub transmittance_lut: CachedTexture,
