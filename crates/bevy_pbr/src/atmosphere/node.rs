@@ -15,7 +15,7 @@ use super::{
         AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset,
         RenderSkyPipelineId,
     },
-    Atmosphere, AtmosphereMode,
+    AtmosphereMode, ScatteringProfile,
 };
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
@@ -31,7 +31,7 @@ impl ViewNode for AtmosphereLutsNode {
     type ViewQuery = (
         Read<AtmosphereMode>,
         Read<AtmosphereBindGroups>,
-        Read<DynamicUniformIndex<Atmosphere>>,
+        Read<DynamicUniformIndex<ScatteringProfile>>,
         Read<DynamicUniformIndex<AtmosphereMode>>,
         Read<AtmosphereTransformsOffset>,
         Read<ViewUniformOffset>,
@@ -160,7 +160,7 @@ impl ViewNode for RenderSkyNode {
     type ViewQuery = (
         Read<AtmosphereBindGroups>,
         Read<ViewTarget>,
-        Read<DynamicUniformIndex<Atmosphere>>,
+        Read<DynamicUniformIndex<ScatteringProfile>>,
         Read<DynamicUniformIndex<AtmosphereMode>>,
         Read<AtmosphereTransformsOffset>,
         Read<ViewUniformOffset>,

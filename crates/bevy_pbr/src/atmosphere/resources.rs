@@ -21,7 +21,7 @@ use bevy_render::{
 
 use crate::{GpuLights, LightMeta};
 
-use super::{shaders, Atmosphere, AtmosphereMode};
+use super::{shaders, AtmosphereMode, ScatteringProfile};
 
 #[derive(Resource)]
 pub(crate) struct AtmosphereBindGroupLayouts {
@@ -45,7 +45,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, uniform_buffer::<Atmosphere>(true)),
+                    (0, uniform_buffer::<ScatteringProfile>(true)),
                     (1, uniform_buffer::<AtmosphereMode>(true)),
                     (
                         // transmittance lut storage texture
@@ -64,7 +64,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, uniform_buffer::<Atmosphere>(true)),
+                    (0, uniform_buffer::<ScatteringProfile>(true)),
                     (1, uniform_buffer::<AtmosphereMode>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
                     (6, sampler(SamplerBindingType::Filtering)),
@@ -85,7 +85,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, uniform_buffer::<Atmosphere>(true)),
+                    (0, uniform_buffer::<ScatteringProfile>(true)),
                     (1, uniform_buffer::<AtmosphereMode>(true)),
                     (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
@@ -110,7 +110,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, uniform_buffer::<Atmosphere>(true)),
+                    (0, uniform_buffer::<ScatteringProfile>(true)),
                     (1, uniform_buffer::<AtmosphereMode>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
                     (4, uniform_buffer::<GpuLights>(true)),
@@ -147,7 +147,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::FRAGMENT,
                 (
-                    (0, uniform_buffer::<Atmosphere>(true)),
+                    (0, uniform_buffer::<ScatteringProfile>(true)),
                     (1, uniform_buffer::<AtmosphereMode>(true)),
                     (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
@@ -176,7 +176,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::FRAGMENT,
                 (
-                    (0, uniform_buffer::<Atmosphere>(true)),
+                    (0, uniform_buffer::<ScatteringProfile>(true)),
                     (1, uniform_buffer::<AtmosphereMode>(true)),
                     (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
@@ -384,7 +384,7 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
 }
 
 pub(super) fn queue_render_sky_pipelines(
-    views: Query<(Entity, &Camera, &Msaa), With<Atmosphere>>,
+    views: Query<(Entity, &Camera, &Msaa), With<ScatteringProfile>>,
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<RenderSkyBindGroupLayouts>,
     mut specializer: ResMut<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>,
@@ -417,7 +417,7 @@ pub struct AtmosphereTextures {
 }
 
 pub(super) fn prepare_atmosphere_textures(
-    views: Query<(Entity, &AtmosphereMode), With<Atmosphere>>,
+    views: Query<(Entity, &AtmosphereMode), With<ScatteringProfile>>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
     mut commands: Commands,
@@ -537,7 +537,7 @@ impl AtmosphereTransformsOffset {
 }
 
 pub(super) fn prepare_atmosphere_transforms(
-    views: Query<(Entity, &ExtractedView), (With<Atmosphere>, With<Camera3d>)>,
+    views: Query<(Entity, &ExtractedView), (With<ScatteringProfile>, With<Camera3d>)>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut atmo_uniforms: ResMut<AtmosphereTransforms>,
@@ -592,7 +592,7 @@ pub(crate) struct AtmosphereBindGroups {
 pub(super) fn prepare_atmosphere_bind_groups(
     views: Query<
         (Entity, &AtmosphereTextures, &ViewDepthTexture, &Msaa),
-        (With<Camera3d>, With<Atmosphere>),
+        (With<Camera3d>, With<ScatteringProfile>),
     >,
     render_device: Res<RenderDevice>,
     layouts: Res<AtmosphereBindGroupLayouts>,
@@ -601,7 +601,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
     view_uniforms: Res<ViewUniforms>,
     lights_uniforms: Res<LightMeta>,
     atmosphere_transforms: Res<AtmosphereTransforms>,
-    atmosphere_uniforms: Res<ComponentUniforms<Atmosphere>>,
+    atmosphere_uniforms: Res<ComponentUniforms<ScatteringProfile>>,
     settings_uniforms: Res<ComponentUniforms<AtmosphereMode>>,
 
     mut commands: Commands,

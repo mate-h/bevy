@@ -148,12 +148,12 @@ impl Plugin for AtmospherePlugin {
             Shader::from_wgsl
         );
 
-        app.init_asset::<Atmosphere>();
+        app.init_asset::<ScatteringProfile>();
         app.world()
-            .resource_mut::<Assets<Atmosphere>>()
-            .insert(Atmosphere::EARTH_HANDLE, Atmosphere::EARTH);
+            .resource_mut::<Assets<ScatteringProfile>>()
+            .insert(ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
-        app.register_type::<Atmosphere>()
+        app.register_type::<ScatteringProfile>()
             .register_type::<AuxLuts>()
             .add_plugins((
                 ExtractComponentPlugin::<AuxLuts>::default(),
@@ -313,7 +313,7 @@ impl From<Planet> for GpuPlanet {
 /// from the planet's surface, ozone only exists in a band centered at a fairly
 /// high altitude.
 #[derive(Clone, Reflect, ShaderType, Asset)]
-pub struct Atmosphere {
+pub struct ScatteringProfile {
     /// The rate of falloff of rayleigh particulate with respect to altitude:
     /// optical density = exp(-rayleigh_density_exp_scale * altitude in meters).
     ///
@@ -372,7 +372,7 @@ pub struct Atmosphere {
     pub ozone_absorption: Vec3,
 }
 
-impl Atmosphere {
+impl ScatteringProfile {
     const EARTH_HANDLE: Handle<Self> = Handle::weak_from_u128(0x7A9B1D4114306F28C5B8A8DB5D555686);
 
     pub const EARTH: Self = Self {
@@ -401,59 +401,17 @@ impl Atmosphere {
 }
 
 #[derive(Component)]
-#[require(Planet, AtmosphericScatteringMode)]
-pub struct AtmosphericScattering(pub Handle<Atmosphere>);
+#[require(AtmosphereCoreLutSettings)]
+pub struct Atmosphere(pub Handle<ScatteringProfile>);
 
-#[derive(Component)]
-pub enum AtmosphericScatteringMode {
-    LutBased {
-        core_lut_settings: AtmosphereCoreLutSettings,
-        aux_lut_settings: AtmosphereAuxLutSettings,
-    },
-    RayMarched {
-        core_lut_settings: AtmosphereCoreLutSettings,
-        ray_march_settings: AtmosphereRayMarchSettings,
-    },
+#[derive(Component, Default)]
+pub enum AtmosphericScattering {
+    #[default]
+    LutBased(AtmosphereAuxLutSettings),
+    RayMarched(AtmosphereRayMarchSettings),
 }
 
-impl AtmosphericScatteringMode {
-    pub fn core_lut_settings(&self) -> &AtmosphereCoreLutSettings {
-        match self {
-            AtmosphericScatteringMode::LutBased {
-                ref core_lut_settings,
-                ..
-            } => core_lut_settings,
-            AtmosphericScatteringMode::RayMarched {
-                ref core_lut_settings,
-                ..
-            } => core_lut_settings,
-        }
-    }
-
-    pub fn core_lut_settings_mut(&mut self) -> &mut AtmosphereCoreLutSettings {
-        match self {
-            AtmosphericScatteringMode::LutBased {
-                ref mut core_lut_settings,
-                ..
-            } => core_lut_settings,
-            AtmosphericScatteringMode::RayMarched {
-                ref mut core_lut_settings,
-                ..
-            } => core_lut_settings,
-        }
-    }
-}
-
-impl Default for AtmosphericScatteringMode {
-    fn default() -> Self {
-        Self::LutBased {
-            core_lut_settings: Default::default(),
-            aux_lut_settings: Default::default(),
-        }
-    }
-}
-
-#[derive(Clone, Reflect, ShaderType)]
+#[derive(Clone, Reflect, Component, ShaderType)]
 pub struct AtmosphereCoreLutSettings {
     /// The size of the transmittance LUT
     pub transmittance_lut_size: UVec2,
