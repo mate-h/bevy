@@ -151,7 +151,7 @@ impl Plugin for AtmospherePlugin {
         app.init_asset::<ScatteringProfile>();
         app.world()
             .resource_mut::<Assets<ScatteringProfile>>()
-            .insert(ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
+            .insert(&ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
         app.register_type::<ScatteringProfile>()
             .register_type::<AuxLuts>()
@@ -404,11 +404,16 @@ impl ScatteringProfile {
 #[require(AtmosphereCoreLutSettings)]
 pub struct Atmosphere(pub Handle<ScatteringProfile>);
 
-#[derive(Component, Default)]
+#[derive(Component)]
 pub enum AtmosphericScattering {
-    #[default]
     LutBased(AtmosphereAuxLutSettings),
     RayMarched(AtmosphereRayMarchSettings),
+}
+
+impl Default for AtmosphericScattering {
+    fn default() -> Self {
+        Self::LutBased(Default::default())
+    }
 }
 
 #[derive(Clone, Reflect, Component, ShaderType)]
@@ -523,6 +528,7 @@ impl Default for AtmosphereRayMarchSettings {
 #[derive(Component)]
 #[require(DirectionalLight(Self::default_sun))]
 pub struct Sun {
+    /// The angular size (or diameter) of the sun when viewed from the surface of a planet.
     angular_size: f32,
 }
 
