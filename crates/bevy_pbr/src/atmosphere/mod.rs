@@ -194,6 +194,7 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<AtmosphereSamplers>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
+            .init_resource::<SceneUnits>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
             .add_systems(
                 Render,
