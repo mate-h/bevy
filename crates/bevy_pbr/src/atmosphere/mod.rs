@@ -36,14 +36,7 @@ use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Asset, AssetApp, Assets, Handle};
 use bevy_color::{Color, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::core_3d::graph::Node3d;
-use bevy_ecs::{
-    component::{require, Component, ComponentId},
-    entity::Entity,
-    query::{Changed, QueryItem, QueryState, With},
-    schedule::IntoSystemConfigs,
-    system::{lifetimeless::Read, Query},
-    world::DeferredWorld,
-};
+use bevy_ecs::{component::require, resource::Resource};
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
@@ -154,10 +147,10 @@ impl Plugin for AtmospherePlugin {
             .insert(&ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
         app.register_type::<ScatteringProfile>()
-            .register_type::<AuxLuts>()
+            .register_type::<AtmosphereAuxLutSettings>()
             .add_plugins((
-                ExtractComponentPlugin::<AuxLuts>::default(),
-                UniformComponentPlugin::<AuxLuts>::default(),
+                ExtractComponentPlugin::<AtmosphereAuxLutSettings>::default(),
+                UniformComponentPlugin::<AtmosphereAuxLutSettings>::default(),
             ));
     }
 
@@ -240,6 +233,24 @@ impl Plugin for AtmospherePlugin {
     }
 }
 
+#[derive(Copy, Clone, Debug, Resource)]
+pub struct SceneUnits {
+    pub to_meters: f32,
+}
+
+impl SceneUnits {
+    pub const METERS: Self = Self { to_meters: 1.0 };
+    pub const CENTIMETERS: Self = Self { to_meters: 1.0e+2 };
+    pub const MILLIMETERS: Self = Self { to_meters: 1.0e+3 };
+    pub const KILOMETERS: Self = Self { to_meters: 1.0e-3 };
+}
+
+impl Default for SceneUnits {
+    fn default() -> Self {
+        Self::METERS
+    }
+}
+
 #[derive(Component)]
 pub struct Planet {
     /// Radius of the planet
@@ -247,8 +258,8 @@ pub struct Planet {
     /// units: m
     pub radius: f32,
 
-    /// Radius at which we consider the atmosphere to 'end' for our
-    /// calculations (from center of planet)
+    /// Altitude at which we consider the atmosphere to 'end' for our
+    /// calculations
     ///
     /// units: m
     pub space_altitude: f32,
@@ -277,9 +288,9 @@ impl Default for Planet {
 
 #[derive(ShaderType)]
 struct GpuPlanet {
-    pub ground_albedo: Vec3,
-    pub lower_radius: f32,
-    pub upper_radius: f32,
+    ground_albedo: Vec3,
+    lower_radius: f32,
+    upper_radius: f32,
 }
 
 impl From<Planet> for GpuPlanet {
@@ -404,7 +415,19 @@ impl ScatteringProfile {
 #[require(AtmosphereCoreLutSettings)]
 pub struct Atmosphere(pub Handle<ScatteringProfile>);
 
-#[derive(Component)]
+impl Default for Atmosphere {
+    fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl Atmosphere {
+    pub fn earth() -> Self {
+        Self(ScatteringProfile::earth())
+    }
+}
+
+#[derive(Component, Default)]
 pub enum AtmosphericScattering {
     LutBased(AtmosphereAuxLutSettings),
     RayMarched(AtmosphereRayMarchSettings),
@@ -438,7 +461,7 @@ pub struct AtmosphereCoreLutSettings {
 
     /// A conversion factor between scene units and meters, used to
     /// ensure correctness at different length scales.
-    pub scene_units_to_m: f32,
+    pub scene_units_to_m: f32, //TODO: where to put this?
 }
 
 impl Default for AtmosphereCoreLutSettings {
@@ -526,7 +549,7 @@ impl Default for AtmosphereRayMarchSettings {
 }
 
 #[derive(Component)]
-#[require(DirectionalLight(Self::default_sun))]
+#[require(DirectionalLight(Self::default_light))]
 pub struct Sun {
     /// The angular size (or diameter) of the sun when viewed from the surface of a planet.
     angular_size: f32,
@@ -537,7 +560,7 @@ impl Sun {
         angular_size: 0.0174533,
     };
 
-    fn default_sun() -> DirectionalLight {
+    pub fn default_light() -> DirectionalLight {
         DirectionalLight {
             color: Color::WHITE,
             illuminance: lux::RAW_SUNLIGHT,
