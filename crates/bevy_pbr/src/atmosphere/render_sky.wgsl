@@ -5,7 +5,8 @@
         sample_transmittance_lut, sample_transmittance_lut_segment,
         sample_sky_view_lut, direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
-        view_radius, sample_sun_illuminance, ndc_to_camera_dist
+        view_radius, sample_sun_illuminance, ndc_to_camera_dist,
+        raymarch_atmosphere
     },
 };
 #import bevy_render::view::View;
@@ -42,6 +43,12 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
         let t = ndc_to_camera_dist(vec3(uv_to_ndc(in.uv), depth));
         inscattering = sample_aerial_view_lut(in.uv, t);
         transmittance = sample_transmittance_lut_segment(r, mu, t);
+        // Raymarched reference for comparison during debugging
+        if (in.uv.x < 0.5) {
+            let raymarch_result = raymarch_atmosphere(r, ray_dir_ws.xyz, t, 16.0);
+            transmittance = raymarch_result.transmittance;
+            inscattering = raymarch_result.inscattering;
+        }
     }
     return RenderSkyOutput(vec4(inscattering, 0.0), vec4(transmittance, 1.0));
 }

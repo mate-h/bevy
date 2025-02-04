@@ -2,14 +2,15 @@
     mesh_view_types::Lights,
     atmosphere::{
         types::{Atmosphere, AtmosphereSettings},
-        bindings::{atmosphere, view, settings},
+        bindings::{atmosphere, view, settings, lights},
         functions::{
             sample_atmosphere, get_local_up, AtmosphereSample,
             sample_local_inscattering, get_local_r, view_radius,
             max_atmosphere_distance, direction_atmosphere_to_world,
             sky_view_lut_uv_to_zenith_azimuth, zenith_azimuth_to_ray_dir,
-            MIDPOINT_RATIO
+            MIDPOINT_RATIO, sample_transmittance_lut
         },
+        bruneton_functions::ray_intersects_ground,
     }
 }
 
@@ -66,6 +67,17 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         if all(throughput < vec3(0.001)) {
             break;
         }
+    }
+
+    // include reflected luminance from planet ground 
+    if ray_intersects_ground(r, mu) {
+        let light = &lights.directional_lights[0];
+        let transmittance_to_ground = throughput;
+        let local_up = get_local_up(r, t_max, ray_dir_ws);
+        let mu_light = dot((*light).direction_to_light, local_up);
+        let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
+        let ground_luminance = transmittance_to_light * transmittance_to_ground * max(mu_light, 0.0) * atmosphere.ground_albedo;
+        total_inscattering += ground_luminance;
     }
 
     textureStore(sky_view_lut_out, idx.xy, vec4(total_inscattering, 1.0));

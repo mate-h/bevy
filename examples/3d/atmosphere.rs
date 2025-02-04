@@ -28,7 +28,10 @@ fn setup_camera_fog(mut commands: Commands) {
         },
         Transform::from_xyz(-1.2, 0.15 + offset, 0.0).looking_at(Vec3::Y * (0.1 + offset), Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
-        Atmosphere::EARTH,
+        Atmosphere {
+            ground_albedo: Vec3::splat(1.0),
+            ..Atmosphere::EARTH
+        },
         // The scene is in units of 10km, so we need to scale up the
         // aerial view lut distance and set the scene scale accordingly.
         // Most usages of this feature will not need to adjust this.
@@ -120,7 +123,7 @@ fn setup_terrain_scene(
     // ));
 
     let plane_mesh = meshes.add(Mesh::from(Plane3d {
-        half_size: Vec2::splat(20.0),
+        half_size: Vec2::splat(1.0),
         normal: Dir3::Y,
     }));
 
@@ -133,6 +136,7 @@ fn setup_terrain_scene(
             perceptual_roughness: 1.0,
             ..default()
         })),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 }
 
