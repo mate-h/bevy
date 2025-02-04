@@ -18,6 +18,7 @@ fn main() {
 }
 
 fn setup_camera_fog(mut commands: Commands) {
+    let offset = 0.0;
     commands.spawn((
         Camera3d::default(),
         // HDR is required for atmospheric scattering to be properly applied to the scene
@@ -25,7 +26,7 @@ fn setup_camera_fog(mut commands: Commands) {
             hdr: true,
             ..default()
         },
-        Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
+        Transform::from_xyz(-1.2, 0.15 + offset, 0.0).looking_at(Vec3::Y * (0.1 + offset), Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
         Atmosphere::EARTH,
         // The scene is in units of 10km, so we need to scale up the
@@ -78,7 +79,7 @@ fn setup_terrain_scene(
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
-        Transform::from_xyz(1.0, -0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(1.0, 0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         cascade_shadow_config,
     ));
 
@@ -108,18 +109,34 @@ fn setup_terrain_scene(
     ));
 
     // Terrain
+    // commands.spawn((
+    //     Terrain,
+    //     SceneRoot(
+    //         asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/terrain/terrain.glb")),
+    //     ),
+    //     Transform::from_xyz(-1.0, 0.0, -0.5)
+    //         .with_scale(Vec3::splat(0.5))
+    //         .with_rotation(Quat::from_rotation_y(PI / 2.0)),
+    // ));
+
+    let plane_mesh = meshes.add(Mesh::from(Plane3d {
+        half_size: Vec2::splat(20.0),
+        normal: Dir3::Y,
+    }));
+
+    // Large plane
     commands.spawn((
-        Terrain,
-        SceneRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/terrain/terrain.glb")),
-        ),
-        Transform::from_xyz(-1.0, 0.0, -0.5)
-            .with_scale(Vec3::splat(0.5))
-            .with_rotation(Quat::from_rotation_y(PI / 2.0)),
+        Mesh3d(plane_mesh.clone()),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            metallic: 0.0,
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
     ));
 }
 
 fn dynamic_scene(mut suns: Query<&mut Transform, With<DirectionalLight>>, time: Res<Time>) {
-    suns.iter_mut()
-        .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+    // suns.iter_mut()
+    //     .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
 }
