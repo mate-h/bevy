@@ -304,9 +304,7 @@ impl From<Planet> for GpuPlanet {
     }
 }
 
-/// This component describes the atmosphere of a planet, and when added to a camera
-/// will enable atmospheric scattering for that camera. This is only compatible with
-/// HDR cameras.
+/// An asset that describes how a volume scatters light.
 ///
 /// Most atmospheric particles scatter and absorb light in two main ways:
 ///
@@ -459,10 +457,6 @@ pub struct AtmosphereCoreLutSettings {
     /// The number of points to sample along each ray when
     /// computing the multiscattering LUT.
     pub multiscattering_lut_samples: u32,
-
-    /// A conversion factor between scene units and meters, used to
-    /// ensure correctness at different length scales.
-    pub scene_units_to_m: f32, //TODO: where to put this?
 }
 
 impl Default for AtmosphereCoreLutSettings {
@@ -473,7 +467,6 @@ impl Default for AtmosphereCoreLutSettings {
             transmittance_lut_samples: 40,
             multiscattering_lut_dirs: 64,
             multiscattering_lut_samples: 20,
-            scene_units_to_m: 1.0,
         }
     }
 }
