@@ -375,18 +375,7 @@ fn get_density(medium: GpuMedium, altitude: f32) -> f32 {
             let scale_height = medium.density_params.x;
             return exp(-altitude / scale_height);
         }
-        case 1u: { // SplitExponential
-            let scale_height_lower = medium.density_params.x;
-            let center_altitude = medium.density_params.y;
-            let scale_height_upper = medium.density_params.z;
-            
-            if altitude < center_altitude {
-                return exp(-altitude / scale_height_lower);
-            } else {
-                return exp(-(altitude - center_altitude) / scale_height_upper);
-            }
-        }
-        case 2u: { // Tent
+        case 1u: { // Tent
             let center_altitude = medium.density_params.x;
             let half_width = medium.density_params.y * 0.5;
             let exponent = medium.density_params.z;
@@ -417,10 +406,11 @@ fn get_phase_function(medium: GpuMedium, cos_theta: f32) -> f32 {
         case 3u: { // DualLobe
             let g1 = medium.phase_params.x;
             let g2 = medium.phase_params.y;
+            let w = medium.phase_params.z;
             return mix(
                 henyey_greenstein(cos_theta, g1),
                 henyey_greenstein(cos_theta, g2),
-                0.5
+                w
             );
         }
         default: {

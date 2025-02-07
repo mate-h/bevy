@@ -245,25 +245,6 @@ pub enum DensityProfile {
         /// units: m
         scale_height: f32,
     },
-    /// Split exponential density profile
-    SplitExponential {
-        /// The rate of falloff of particulate with respect to altitude
-        /// below the center altitude.
-        ///
-        /// units: m
-        scale_height_lower: f32,
-
-        /// The altitude at which the density profile changes.
-        ///
-        /// units: m
-        center_altitude: f32,
-
-        /// The rate of falloff of particulate with respect to altitude
-        /// above the center altitude.
-        ///
-        /// units: m
-        scale_height_upper: f32,
-    },
     /// Tent-shaped density profile using absolute distance from the center altitude.
     Tent {
         /// The altitude at which the density profile reaches its maximum.
@@ -293,10 +274,11 @@ pub enum PhaseFunction {
     /// Henyey-Greenstein phase function for aerosols
     HenyeyGreenstein(f32),
     /// Cornette-Shanks phase function for aerosols improved over Henyey-Greenstein
+    /// also known as Schlick phase function
     CornetteShanks(f32),
     /// Dual Lobe phase function used for simulating backscattering
     /// in water vapor in clouds or ice crystals.
-    DualLobe(f32, f32),
+    DualLobe(f32, f32, f32),
 }
 
 /// CPU representation of a medium or particulate that interacts with light
@@ -321,6 +303,15 @@ pub struct Medium {
     pub phase_function: PhaseFunction,
 }
 
+impl Medium {
+    pub const EMPTY: Self = Self {
+        scattering: Vec3::ZERO,
+        absorption: Vec3::ZERO,
+        density_profile: DensityProfile::Exponential { scale_height: 1.0 },
+        phase_function: PhaseFunction::Rayleigh,
+    };
+}
+
 /// GPU representation of a medium
 #[derive(Clone, ShaderType)]
 pub struct GpuMedium {
@@ -334,23 +325,18 @@ impl From<Medium> for GpuMedium {
     fn from(medium: Medium) -> Self {
         let density_params = match medium.density_profile {
             DensityProfile::Exponential { scale_height } => Vec4::new(scale_height, 0.0, 0.0, 0.0),
-            DensityProfile::SplitExponential {
-                scale_height_lower,
-                center_altitude,
-                scale_height_upper,
-            } => Vec4::new(scale_height_lower, center_altitude, scale_height_upper, 1.0),
             DensityProfile::Tent {
                 center_altitude,
                 layer_width,
                 exponent,
-            } => Vec4::new(center_altitude, layer_width, exponent, 2.0),
+            } => Vec4::new(center_altitude, layer_width, exponent, 1.0),
         };
 
         let phase_params = match medium.phase_function {
             PhaseFunction::Rayleigh => Vec4::ZERO,
             PhaseFunction::HenyeyGreenstein(g) => Vec4::new(g, 0.0, 0.0, 1.0),
             PhaseFunction::CornetteShanks(g) => Vec4::new(g, 0.0, 0.0, 2.0),
-            PhaseFunction::DualLobe(g1, g2) => Vec4::new(g1, g2, 0.0, 3.0),
+            PhaseFunction::DualLobe(g1, g2, w) => Vec4::new(g1, g2, w, 3.0),
         };
 
         Self {
@@ -446,7 +432,7 @@ impl Atmosphere {
                 density_profile: DensityProfile::Exponential {
                     scale_height: 1_200.0,
                 },
-                phase_function: PhaseFunction::HenyeyGreenstein(0.8),
+                phase_function: PhaseFunction::CornetteShanks(0.8),
             },
             // Ozone layer
             Medium {
@@ -459,6 +445,34 @@ impl Atmosphere {
                 },
                 phase_function: PhaseFunction::Rayleigh,
             },
+        ],
+    };
+
+    pub const MARS: Self = Self {
+        bottom_radius: 3_389_500.0,
+        top_radius: 3_509_500.0,
+        ground_albedo: Vec3::splat(0.1),
+        layers: [
+            // CO2 (primary atmospheric component on Mars)
+            Medium {
+                scattering: Vec3::new(0.019918e-03, 0.01357e-03, 0.00575e-03),
+                absorption: Vec3::ZERO,
+                density_profile: DensityProfile::Exponential {
+                    scale_height: 10_430.0,
+                },
+                phase_function: PhaseFunction::Rayleigh,
+            },
+            // Dust (Martian aerosols)
+            Medium {
+                scattering: Vec3::splat(5.361771e-05),
+                absorption: Vec3::splat(5.530838e-07),
+                density_profile: DensityProfile::Exponential {
+                    scale_height: 3_095.0,
+                },
+                phase_function: PhaseFunction::CornetteShanks(0.85),
+            },
+            // Empty third layer (Mars has no ozone layer)
+            Medium::EMPTY,
         ],
     };
 
