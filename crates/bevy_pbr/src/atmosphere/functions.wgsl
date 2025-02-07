@@ -3,7 +3,7 @@
 #import bevy_render::maths::{PI, HALF_PI, PI_2, fast_acos, fast_acos_4, fast_atan2}
 
 #import bevy_pbr::atmosphere::{
-    types::Atmosphere,
+    types::{Atmosphere,Scatterer},
     bindings::{
         atmosphere, settings, view, lights, transmittance_lut, transmittance_lut_sampler, 
         multiscattering_lut, multiscattering_lut_sampler, sky_view_lut, sky_view_lut_sampler,
@@ -174,100 +174,69 @@ fn sample_aerial_view_lut(uv: vec2<f32>, t: f32) -> vec3<f32> {
     return exp(sample.rgb) * fade;
 }
 
-// PHASE FUNCTIONS
-
-// -(L . V) == (L . -V). -V here is our ray direction, which points away from the view 
-// instead of towards it (which would be the *view direction*, V)
-
-// evaluates the rayleigh phase function, which describes the likelihood
-// of a rayleigh scattering event scattering light from the light direction towards the view
-fn rayleigh(neg_LdotV: f32) -> f32 {
-    return FRAC_3_16_PI * (1 + (neg_LdotV * neg_LdotV));
-}
-
-// evaluates the henyey-greenstein phase function, which describes the likelihood
-// of a mie scattering event scattering light from the light direction towards the view
-fn henyey_greenstein(neg_LdotV: f32) -> f32 {
-    let g = atmosphere.mie_asymmetry;
-    let denom = 1.0 + g * g - 2.0 * g * neg_LdotV;
-    return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
-}
-
 // ATMOSPHERE SAMPLING
 
 struct AtmosphereSample {
-    /// units: m^-1
-    rayleigh_scattering: vec3<f32>,
-
-    /// units: m^-1
-    mie_scattering: f32,
-
-    /// the sum of scattering and absorption. Since the phase function doesn't
-    /// matter for this, we combine rayleigh and mie extinction to a single 
-    //  value.
-    //
-    /// units: m^-1
-    extinction: vec3<f32>
+    // Total scattering coefficient (sum of all scatterers)
+    scattering: vec3<f32>,
+    // Total extinction coefficient (scattering + absorption)
+    extinction: vec3<f32>,
 }
 
 /// Samples atmosphere optical densities at a given radius
 fn sample_atmosphere(r: f32) -> AtmosphereSample {
-    let altitude = clamp(r, atmosphere.bottom_radius, atmosphere.top_radius) - atmosphere.bottom_radius;
-
-    // atmosphere values at altitude
-    let mie_density = exp(-atmosphere.mie_density_exp_scale * altitude);
-    let rayleigh_density = exp(-atmosphere.rayleigh_density_exp_scale * altitude);
-    var ozone_density: f32 = max(0.0, 1.0 - (abs(altitude - atmosphere.ozone_layer_altitude) / (atmosphere.ozone_layer_width * 0.5)));
-
-    let mie_scattering = mie_density * atmosphere.mie_scattering;
-    let mie_absorption = mie_density * atmosphere.mie_absorption;
-    let mie_extinction = mie_scattering + mie_absorption;
-
-    let rayleigh_scattering = rayleigh_density * atmosphere.rayleigh_scattering;
-    // no rayleigh absorption
-    // rayleigh extinction is the sum of scattering and absorption
-
-    // ozone doesn't contribute to scattering
-    let ozone_absorption = ozone_density * atmosphere.ozone_absorption;
-
+    let altitude = r - atmosphere.bottom_radius;
     var sample: AtmosphereSample;
-    sample.rayleigh_scattering = rayleigh_scattering;
-    sample.mie_scattering = mie_scattering;
-    sample.extinction = rayleigh_scattering + mie_extinction + ozone_absorption;
-
+    
+    // Initialize with zeros
+    sample.scattering = vec3(0.0);
+    sample.extinction = vec3(0.0);
+    
+    // Sum contributions from all scatterers
+    for (var i = 0u; i < 3u; i++) {
+        let s = atmosphere.scatterers[i];
+        let density = get_density(s, altitude);
+        sample.scattering += density * s.scattering;
+        sample.extinction += density * (s.scattering + s.absorption);
+    }
+    
     return sample;
 }
 
 /// evaluates L_scat, equation 3 in the paper, which gives the total single-order scattering towards the view at a single point
 fn sample_local_inscattering(local_atmosphere: AtmosphereSample, ray_dir: vec3<f32>, local_r: f32, local_up: vec3<f32>) -> vec3<f32> {
     var inscattering = vec3(0.0);
+    
     for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
         let light = &lights.directional_lights[light_i];
-
         let mu_light = dot((*light).direction_to_light, local_up);
-
-        // -(L . V) == (L . -V). -V here is our ray direction, which points away from the view
-        // instead of towards it (as is the convention for V)
         let neg_LdotV = dot((*light).direction_to_light, ray_dir);
-
-        // Phase functions give the proportion of light
-        // scattered towards the camera for each scattering type
-        let rayleigh_phase = rayleigh(neg_LdotV);
-        let mie_phase = henyey_greenstein(neg_LdotV);
-        let scattering_coeff = local_atmosphere.rayleigh_scattering * rayleigh_phase + local_atmosphere.mie_scattering * mie_phase;
+        
+        // Calculate total scattering coefficient including phase function
+        var total_scattering = vec3(0.0);
+        let altitude = local_r - atmosphere.bottom_radius;
+        
+        for (var i = 0u; i < 3u; i++) {
+            let s = atmosphere.scatterers[i];
+            let density = get_density(s, altitude);
+            let phase = get_phase_function(s, neg_LdotV);
+            total_scattering += density * s.scattering * phase;
+        }
 
         let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
         let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
-
-        // Transmittance from scattering event to light source
-        let scattering_factor = shadow_factor * scattering_coeff;
-
-        // Additive factor from the multiscattering LUT
+        
+        // Single scattering
+        let scattering_factor = shadow_factor * total_scattering;
+        
+        // Multiple scattering
+        // Note: local_atmosphere.scattering already includes density
         let psi_ms = sample_multiscattering_lut(local_r, mu_light);
-        let multiscattering_factor = psi_ms * (local_atmosphere.rayleigh_scattering + local_atmosphere.mie_scattering);
-
+        let multiscattering_factor = psi_ms * local_atmosphere.scattering;
+        
         inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
     }
+    
     return inscattering * view.exposure;
 }
 
@@ -372,4 +341,56 @@ fn zenith_azimuth_to_ray_dir(zenith: f32, azimuth: f32) -> vec3<f32> {
     let sin_azimuth = sin(azimuth);
     let cos_azimuth = cos(azimuth);
     return vec3(sin_azimuth * sin_zenith, mu, -cos_azimuth * sin_zenith);
+}
+
+fn get_density(s: Scatterer, altitude: f32) -> f32 {
+    switch s.density_profile.profile_type {
+        case 0u: { // Exponential
+            return exp(-s.density_profile.scale * altitude);
+        }
+        case 1u: { // Split exponential
+            if (altitude < s.density_profile.split_altitude) {
+                return exp(-s.density_profile.scale * altitude);
+            } else {
+                let h = altitude - s.density_profile.split_altitude;
+                return exp(-s.density_profile.scale * s.density_profile.split_altitude) 
+                     * exp(-s.density_profile.scale_high * h);
+            }
+        }
+        case 2u: { // Piecewise linear
+            for (var i = 0u; i < s.density_profile.num_points - 1u; i++) {
+                let vec_idx = i / 2u;
+                let pair_idx = i % 2u;
+                
+                let point = s.density_profile.control_points[vec_idx].altitude_density;
+                let next_point = s.density_profile.control_points[vec_idx + 1u].altitude_density;
+                
+                let alt1 = select(point.x, point.z, pair_idx == 1u);
+                let den1 = select(point.y, point.w, pair_idx == 1u);
+                let alt2 = select(next_point.x, next_point.z, pair_idx == 1u);
+                let den2 = select(next_point.y, next_point.w, pair_idx == 1u);
+                
+                if (altitude >= alt1 && altitude <= alt2) {
+                    let t = (altitude - alt1) / (alt2 - alt1);
+                    return mix(den1, den2, t);
+                }
+            }
+            return 0.0;
+        }
+        default: {
+            return 0.0;
+        }
+    }
+}
+
+fn get_phase_function(s: Scatterer, cos_theta: f32) -> f32 {
+    if (s.asymmetry == 0.0) {
+        // Rayleigh phase function
+        return 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
+    } else {
+        // Mie phase function (Cornette-Shanks)
+        let g = s.asymmetry;
+        let g2 = g * g;
+        return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+    }
 }

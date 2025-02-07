@@ -106,7 +106,7 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
         optical_depth += sample_optical_depth;
 
         let mu_light = dot(light_dir, local_up);
-        let scattering_no_phase = local_atmosphere.rayleigh_scattering + local_atmosphere.mie_scattering;
+        let scattering_no_phase = local_atmosphere.scattering;
 
         let ms = scattering_no_phase;
         let ms_int = (ms - ms * sample_transmittance) / local_atmosphere.extinction;

@@ -41,7 +41,7 @@ use bevy_ecs::{
     schedule::IntoSystemConfigs,
     system::{lifetimeless::Read, Query},
 };
-use bevy_math::{UVec2, UVec3, Vec3};
+use bevy_math::{UVec2, UVec3, Vec3, Vec4};
 use bevy_reflect::Reflect;
 use bevy_render::{
     extract_component::UniformComponentPlugin,
@@ -252,8 +252,65 @@ impl Plugin for AtmospherePlugin {
 /// participating in Rayleigh and Mie scattering falls off roughly exponentially
 /// from the planet's surface, ozone only exists in a band centered at a fairly
 /// high altitude.
+// Add this new enum to define different density function types
 #[derive(Clone, Component, Reflect, ShaderType)]
-#[require(AtmosphereSettings)]
+pub struct ControlPoint {
+    altitude_density: Vec4, // Pack two (altitude, density) pairs per vec4
+}
+
+impl ControlPoint {
+    pub const ZERO: Self = Self {
+        altitude_density: Vec4::ZERO,
+    };
+
+    pub const fn new(altitude: f32, density: f32) -> Self {
+        Self {
+            altitude_density: Vec4::new(altitude, density, 0.0, 0.0),
+        }
+    }
+}
+
+#[derive(Clone, Component, Reflect, ShaderType)]
+pub struct DensityProfile {
+    profile_type: u32,
+    scale: f32,                        // For exponential profiles
+    scale_high: f32,                   // For split exponential
+    split_altitude: f32,               // For split exponential
+    control_points: [ControlPoint; 6], // Up to 6 points
+    num_points: u32,                   // Number of active control points
+}
+
+impl DensityProfile {
+    pub const ZERO: Self = Self {
+        profile_type: 0,
+        scale: 0.0,
+        scale_high: 0.0,
+        split_altitude: 0.0,
+        control_points: [ControlPoint::ZERO; 6],
+        num_points: 0,
+    };
+}
+
+#[derive(Clone, Component, Reflect, ShaderType)]
+pub struct Scatterer {
+    pub density_profile: DensityProfile,
+    pub asymmetry: f32,
+
+    // Scattering properties
+    pub scattering: Vec3,
+    pub absorption: Vec3,
+}
+
+impl Scatterer {
+    pub const ZERO: Self = Self {
+        density_profile: DensityProfile::ZERO,
+        asymmetry: 0.0,
+        scattering: Vec3::ZERO,
+        absorption: Vec3::ZERO,
+    };
+}
+
+#[derive(Clone, Component, Reflect, ShaderType)]
 pub struct Atmosphere {
     /// Radius of the planet
     ///
@@ -272,62 +329,12 @@ pub struct Atmosphere {
     /// units: N/A
     pub ground_albedo: Vec3,
 
-    /// The rate of falloff of rayleigh particulate with respect to altitude:
-    /// optical density = exp(-rayleigh_density_exp_scale * altitude in meters).
+    /// An array of scatterers, which describe the atmosphere.
     ///
-    /// THIS VALUE MUST BE POSITIVE
-    ///
-    /// units: N/A
-    pub rayleigh_density_exp_scale: f32,
-
-    /// The scattering optical density of rayleigh particulate, or how
-    /// much light it scatters per meter
-    ///
-    /// units: m^-1
-    pub rayleigh_scattering: Vec3,
-
-    /// The rate of falloff of mie particulate with respect to altitude:
-    /// optical density = exp(-mie_density_exp_scale * altitude in meters)
-    ///
-    /// THIS VALUE MUST BE POSITIVE
-    ///
-    /// units: N/A
-    pub mie_density_exp_scale: f32,
-
-    /// The scattering optical density of mie particulate, or how much light
-    /// it scatters per meter.
-    ///
-    /// units: m^-1
-    pub mie_scattering: f32,
-
-    /// The absorbing optical density of mie particulate, or how much light
-    /// it absorbs per meter.
-    ///
-    /// units: m^-1
-    pub mie_absorption: f32,
-
-    /// The "asymmetry" of mie scattering, or how much light tends to scatter
-    /// forwards, rather than backwards or to the side.
-    ///
-    /// domain: (-1, 1)
-    /// units: N/A
-    pub mie_asymmetry: f32, //the "asymmetry" value of the phase function, unitless. Domain: (-1, 1)
-
-    /// The altitude at which the ozone layer is centered.
-    ///
-    /// units: m
-    pub ozone_layer_altitude: f32,
-
-    /// The width of the ozone layer
-    ///
-    /// units: m
-    pub ozone_layer_width: f32,
-
-    /// The optical density of ozone, or how much of each wavelength of
-    /// light it absorbs per meter.
-    ///
-    /// units: m^-1
-    pub ozone_absorption: Vec3,
+    /// First scatterer is typically Rayleigh (air/CO2)
+    /// Second scatterer is typically Mie (aerosols/dust)
+    /// Third scatterer is typically Ozone (absorption)
+    pub scatterers: [Scatterer; 3],
 }
 
 impl Atmosphere {
@@ -335,22 +342,57 @@ impl Atmosphere {
         bottom_radius: 6_360_000.0,
         top_radius: 6_460_000.0,
         ground_albedo: Vec3::splat(0.3),
-        rayleigh_density_exp_scale: 1.0 / 8_000.0,
-        rayleigh_scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
-        mie_density_exp_scale: 1.0 / 1_200.0,
-        mie_scattering: 3.996e-6,
-        mie_absorption: 0.444e-6,
-        mie_asymmetry: 0.8,
-        ozone_layer_altitude: 25_000.0,
-        ozone_layer_width: 30_000.0,
-        ozone_absorption: Vec3::new(0.650e-6, 1.881e-6, 0.085e-6),
+
+        scatterers: [
+            // Rayleigh scattering (air molecules)
+            Scatterer {
+                density_profile: DensityProfile {
+                    profile_type: 0,
+                    scale: 1.0 / 8_000.0,
+                    ..DensityProfile::ZERO
+                },
+                scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
+                absorption: Vec3::ZERO,
+                asymmetry: 0.0,
+            },
+            // Mie scattering (aerosols)
+            Scatterer {
+                density_profile: DensityProfile {
+                    profile_type: 0,
+                    scale: 1.0 / 1_200.0,
+                    ..DensityProfile::ZERO
+                },
+                scattering: Vec3::splat(3.996e-6),
+                absorption: Vec3::splat(0.444e-6),
+                asymmetry: 0.8,
+            },
+            // Ozone
+            Scatterer {
+                density_profile: DensityProfile {
+                    profile_type: 2,
+                    control_points: [
+                        ControlPoint::new(0.0, 0.022),
+                        ControlPoint::new(8_000.0, 0.0),
+                        ControlPoint::new(21_500.0, 1.0),
+                        ControlPoint::new(39_000.0, 0.034),
+                        ControlPoint::new(40_000.0, 0.0),
+                        ControlPoint::new(45_000.0, 0.0),
+                    ],
+                    num_points: 6,
+                    ..DensityProfile::ZERO
+                },
+                scattering: Vec3::ZERO,
+                absorption: Vec3::new(0.650e-6, 1.881e-6, 0.085e-6),
+                asymmetry: 0.0,
+            },
+        ],
     };
 
     pub fn with_density_multiplier(mut self, mult: f32) -> Self {
-        self.rayleigh_scattering *= mult;
-        self.mie_scattering *= mult;
-        self.mie_absorption *= mult;
-        self.ozone_absorption *= mult;
+        for scatterer in self.scatterers.iter_mut() {
+            scatterer.scattering *= mult;
+            scatterer.absorption *= mult;
+        }
         self
     }
 }

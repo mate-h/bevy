@@ -1,25 +1,33 @@
 #define_import_path bevy_pbr::atmosphere::types
 
+struct ControlPoint {
+    altitude_density: vec4<f32>,
+}
+
+struct DensityProfile {
+    profile_type: u32,
+    scale: f32,
+    scale_high: f32,
+    split_altitude: f32,
+    control_points: array<ControlPoint, 6>,
+    num_points: u32,
+}
+
+struct Scatterer {
+    density_profile: DensityProfile,
+    asymmetry: f32,
+    scattering: vec3<f32>,
+    absorption: vec3<f32>,
+}
+
 struct Atmosphere {
-    // Radius of the planet
-    bottom_radius: f32, // units: m
-
-    // Radius at which we consider the atmosphere to 'end' for out calculations (from center of planet)
-    top_radius: f32, // units: m
-
+    // Planet properties
+    bottom_radius: f32,
+    top_radius: f32,
     ground_albedo: vec3<f32>,
 
-    rayleigh_density_exp_scale: f32,
-    rayleigh_scattering: vec3<f32>,
-
-    mie_density_exp_scale: f32,
-    mie_scattering: f32, // units: m^-1
-    mie_absorption: f32, // units: m^-1
-    mie_asymmetry: f32, // the "asymmetry" value of the phase function, unitless. Domain: (-1, 1)
-
-    ozone_layer_altitude: f32, // units: m
-    ozone_layer_width: f32, // units: m
-    ozone_absorption: vec3<f32>, // ozone absorption. units: m^-1
+    // Array of scatterers (fixed size 3)
+    scatterers: array<Scatterer, 3>,
 }
 
 struct AtmosphereSettings {
