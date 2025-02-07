@@ -307,7 +307,11 @@ impl Medium {
     pub const EMPTY: Self = Self {
         scattering: Vec3::ZERO,
         absorption: Vec3::ZERO,
-        density_profile: DensityProfile::Exponential { scale_height: 1.0 },
+        density_profile: DensityProfile::Tent {
+            center_altitude: 0.0,
+            layer_width: 0.0,
+            exponent: 1.0,
+        },
         phase_function: PhaseFunction::Rayleigh,
     };
 }

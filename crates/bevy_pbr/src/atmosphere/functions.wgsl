@@ -378,8 +378,10 @@ fn get_density(medium: GpuMedium, altitude: f32) -> f32 {
         case 1u: { // Tent
             let center_altitude = medium.density_params.x;
             let half_width = medium.density_params.y * 0.5;
+            if (half_width <= 0.0) {
+                return 0.0;
+            }
             let exponent = medium.density_params.z;
-            
             let dist = abs(altitude - center_altitude);
             return pow(max(0.0, 1.0 - dist / half_width), exponent);
         }
