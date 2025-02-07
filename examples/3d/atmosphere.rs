@@ -9,15 +9,61 @@ use bevy::{
     render::camera::Exposure,
 };
 
+/// The current settings that the user can toggle.
+#[derive(Resource)]
+struct AtmosphereUserSettings {
+    /// Current atmosphere type
+    atmosphere_type: AtmosphereType,
+    /// Current view position (ground or space)
+    view_type: ViewType,
+}
+
+#[derive(Default)]
+enum AtmosphereType {
+    #[default]
+    Earth,
+    Mars,
+}
+
+#[derive(Default)]
+enum ViewType {
+    #[default]
+    Ground,
+    Space,
+}
+
+impl Default for AtmosphereUserSettings {
+    fn default() -> Self {
+        Self {
+            atmosphere_type: AtmosphereType::Earth,
+            view_type: ViewType::Ground,
+        }
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_systems(Startup, (setup_camera_fog, setup_terrain_scene))
-        .add_systems(Update, dynamic_scene)
+        .init_resource::<AtmosphereUserSettings>()
+        .add_systems(Startup, (setup_camera_fog, setup_terrain_scene, setup_ui))
+        .add_systems(
+            Update,
+            (dynamic_scene, adjust_atmosphere_settings, update_ui_text),
+        )
         .run();
 }
 
-fn setup_camera_fog(mut commands: Commands) {
+fn setup_camera_fog(mut commands: Commands, settings: ResMut<AtmosphereUserSettings>) {
+    let (position, target) = match settings.view_type {
+        ViewType::Ground => (Vec3::new(-1.2, 0.15, 0.0), Vec3::Y * 0.1),
+        ViewType::Space => (Vec3::new(-1.2, 7.0, 0.0), Vec3::Y * 6.8),
+    };
+
+    let atmosphere = match settings.atmosphere_type {
+        AtmosphereType::Earth => Atmosphere::EARTH,
+        AtmosphereType::Mars => Atmosphere::MARS,
+    };
+
     commands.spawn((
         Camera3d::default(),
         // HDR is required for atmospheric scattering to be properly applied to the scene
@@ -25,9 +71,8 @@ fn setup_camera_fog(mut commands: Commands) {
             hdr: true,
             ..default()
         },
-        Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
-        // This is the component that enables atmospheric scattering for a camera
-        Atmosphere::EARTH,
+        Transform::from_translation(position).looking_at(target, Vec3::Y),
+        atmosphere,
         // The scene is in units of 10km, so we need to scale up the
         // aerial view lut distance and set the scene scale accordingly.
         // Most usages of this feature will not need to adjust this.
@@ -119,7 +164,76 @@ fn setup_terrain_scene(
     ));
 }
 
+fn setup_ui(mut commands: Commands, settings: Res<AtmosphereUserSettings>) {
+    commands.spawn((
+        create_text(&settings),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+    ));
+}
+
+fn create_text(settings: &AtmosphereUserSettings) -> Text {
+    format!(
+        "{}\n{}",
+        if matches!(settings.atmosphere_type, AtmosphereType::Earth) {
+            "Press M to switch to Mars atmosphere"
+        } else {
+            "Press M to switch to Earth atmosphere"
+        },
+        if matches!(settings.view_type, ViewType::Ground) {
+            "Press V to switch to Space view"
+        } else {
+            "Press V to switch to Ground view"
+        },
+    )
+    .into()
+}
+
+fn adjust_atmosphere_settings(
+    mut commands: Commands,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<AtmosphereUserSettings>,
+    camera: Query<Entity, With<Camera3d>>,
+) {
+    let mut rebuild_camera = false;
+
+    if keyboard_input.just_pressed(KeyCode::KeyM) {
+        settings.atmosphere_type = match settings.atmosphere_type {
+            AtmosphereType::Earth => AtmosphereType::Mars,
+            AtmosphereType::Mars => AtmosphereType::Earth,
+        };
+        rebuild_camera = true;
+    }
+
+    if keyboard_input.just_pressed(KeyCode::KeyV) {
+        settings.view_type = match settings.view_type {
+            ViewType::Ground => ViewType::Space,
+            ViewType::Space => ViewType::Ground,
+        };
+        rebuild_camera = true;
+    }
+
+    if rebuild_camera {
+        // Remove existing camera
+        if let Ok(camera_entity) = camera.get_single() {
+            commands.entity(camera_entity).despawn();
+        }
+        // Setup new camera with current settings
+        setup_camera_fog(commands, settings);
+    }
+}
+
 fn dynamic_scene(mut suns: Query<&mut Transform, With<DirectionalLight>>, time: Res<Time>) {
     suns.iter_mut()
         .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+}
+
+fn update_ui_text(mut text: Query<&mut Text>, settings: Res<AtmosphereUserSettings>) {
+    for mut text in text.iter_mut() {
+        *text = create_text(&settings);
+    }
 }
