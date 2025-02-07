@@ -36,7 +36,7 @@ fn setup_camera_fog(mut commands: Commands) {
         // aerial view lut distance and set the scene scale accordingly.
         // Most usages of this feature will not need to adjust this.
         AtmosphereSettings {
-            aerial_view_lut_max_distance: 3.2e5,
+            aerial_view_lut_max_distance: 3.2e4,
             scene_units_to_m: 1e+4,
             ..Default::default()
         },
@@ -44,7 +44,7 @@ fn setup_camera_fog(mut commands: Commands) {
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
         // bring the scene to a nicer brightness range.
-        Exposure::SUNLIGHT,
+        Exposure { ev100: 15.0 },
         // Tonemapper chosen just because it looked good with the scene, any
         // tonemapper would be fine :)
         Tonemapping::AcesFitted,
@@ -127,6 +127,11 @@ fn setup_terrain_scene(
         normal: Dir3::Y,
     }));
 
+    let plane_mesh_2 = meshes.add(Mesh::from(Plane3d {
+        half_size: Vec2::splat(1.0),
+        normal: Dir3::NEG_Y,
+    }));
+
     // Large plane
     commands.spawn((
         Mesh3d(plane_mesh.clone()),
@@ -138,9 +143,20 @@ fn setup_terrain_scene(
         })),
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
+
+    commands.spawn((
+        Mesh3d(plane_mesh_2.clone()),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            metallic: 0.0,
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
+        Transform::from_xyz(0.0, 0.25, 0.0),
+    ));
 }
 
 fn dynamic_scene(mut suns: Query<&mut Transform, With<DirectionalLight>>, time: Res<Time>) {
-    // suns.iter_mut()
-    //     .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+    suns.iter_mut()
+        .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
 }

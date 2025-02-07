@@ -421,15 +421,15 @@ fn raymarch_atmosphere(
     }
 
     // include reflected luminance from planet ground 
-    if ray_intersects_ground(r, mu) {
-        let light = &lights.directional_lights[0];
-        let transmittance_to_ground = result.transmittance;
-        let local_up = get_local_up(r, t_max, ray_dir);
-        let mu_light = dot((*light).direction_to_light, local_up);
-        let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
-        let ground_luminance = transmittance_to_light * transmittance_to_ground * max(mu_light, 0.0) * atmosphere.ground_albedo;
-        result.inscattering += ground_luminance;
-    }
+    // if ray_intersects_ground(r, mu) {
+    //     let light = &lights.directional_lights[0];
+    //     let transmittance_to_ground = result.transmittance;
+    //     let local_up = get_local_up(r, t_max, ray_dir);
+    //     let mu_light = dot((*light).direction_to_light, local_up);
+    //     let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
+    //     let ground_luminance = transmittance_to_light * transmittance_to_ground * max(mu_light, 0.0) * atmosphere.ground_albedo;
+    //     result.inscattering += ground_luminance;
+    // }
 
     return result;
 }
