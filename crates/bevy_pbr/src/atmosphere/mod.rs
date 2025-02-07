@@ -36,7 +36,7 @@ use bevy_app::{App, Plugin};
 use bevy_asset::load_internal_asset;
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
-    component::{require, Component},
+    component::Component,
     query::{Changed, QueryItem, With},
     schedule::IntoSystemConfigs,
     system::{lifetimeless::Read, Query},
@@ -148,7 +148,7 @@ impl Plugin for AtmospherePlugin {
             .add_plugins((
                 ExtractComponentPlugin::<Atmosphere>::default(),
                 ExtractComponentPlugin::<AtmosphereSettings>::default(),
-                UniformComponentPlugin::<Atmosphere>::default(),
+                UniformComponentPlugin::<AtmosphereUniforms>::default(),
                 UniformComponentPlugin::<AtmosphereSettings>::default(),
             ));
     }
@@ -232,6 +232,136 @@ impl Plugin for AtmospherePlugin {
     }
 }
 
+/// The density profile describes how the density of a medium
+/// changes with respect to altitude.
+#[derive(Clone, Reflect)]
+pub enum DensityProfile {
+    /// Exponential density profile using a scale height.
+    Exponential {
+        /// The rate of falloff of particulate with respect to altitude:
+        /// optical density = exp(-altitude / scale_height). This value
+        /// must be positive.
+        ///
+        /// units: m
+        scale_height: f32,
+    },
+    /// Split exponential density profile
+    SplitExponential {
+        /// The rate of falloff of particulate with respect to altitude
+        /// below the center altitude.
+        ///
+        /// units: m
+        scale_height_lower: f32,
+
+        /// The altitude at which the density profile changes.
+        ///
+        /// units: m
+        center_altitude: f32,
+
+        /// The rate of falloff of particulate with respect to altitude
+        /// above the center altitude.
+        ///
+        /// units: m
+        scale_height_upper: f32,
+    },
+    /// Tent-shaped density profile using absolute distance from the center altitude.
+    Tent {
+        /// The altitude at which the density profile reaches its maximum.
+        ///
+        /// units: m
+        center_altitude: f32,
+
+        /// The width of the density profile at the center altitude.
+        ///
+        /// units: m
+        layer_width: f32,
+
+        /// The exponent of the density profile used to shape the density
+        /// profile.
+        ///
+        /// units: N/A
+        exponent: f32,
+    },
+}
+
+/// The phase function describes how light is scattered by a medium
+/// given the angle between the incoming and outgoing light.
+#[derive(Clone, Reflect)]
+pub enum PhaseFunction {
+    /// Rayleigh phase function for molecules
+    Rayleigh,
+    /// Henyey-Greenstein phase function for aerosols
+    HenyeyGreenstein(f32),
+    /// Cornette-Shanks phase function for aerosols improved over Henyey-Greenstein
+    CornetteShanks(f32),
+    /// Dual Lobe phase function used for simulating backscattering
+    /// in water vapor in clouds or ice crystals.
+    DualLobe(f32, f32),
+}
+
+/// CPU representation of a medium or particulate that interacts with light
+#[derive(Clone, Reflect)]
+pub struct Medium {
+    /// The scattering optical density of the particulate, or how much light
+    /// it scatters per meter.
+    ///
+    /// units: m^-1
+    pub scattering: Vec3,
+
+    /// The absorbing optical density of the particulate, or how much light
+    /// it absorbs per meter.
+    ///
+    /// units: m^-1
+    pub absorption: Vec3,
+
+    /// The density profile of the medium
+    pub density_profile: DensityProfile,
+
+    /// The phase function of the medium
+    pub phase_function: PhaseFunction,
+}
+
+/// GPU representation of a medium
+#[derive(Clone, ShaderType)]
+pub struct GpuMedium {
+    pub scattering: Vec3,
+    pub absorption: Vec3,
+    pub density_params: Vec4,
+    pub phase_params: Vec4,
+}
+
+impl From<Medium> for GpuMedium {
+    fn from(medium: Medium) -> Self {
+        let density_params = match medium.density_profile {
+            DensityProfile::Exponential { scale_height } => Vec4::new(scale_height, 0.0, 0.0, 0.0),
+            DensityProfile::SplitExponential {
+                scale_height_lower,
+                center_altitude,
+                scale_height_upper,
+            } => Vec4::new(scale_height_lower, center_altitude, scale_height_upper, 1.0),
+            DensityProfile::Tent {
+                center_altitude,
+                layer_width,
+                exponent,
+            } => Vec4::new(center_altitude, layer_width, exponent, 2.0),
+        };
+
+        let phase_params = match medium.phase_function {
+            PhaseFunction::Rayleigh => Vec4::ZERO,
+            PhaseFunction::HenyeyGreenstein(g) => Vec4::new(g, 0.0, 0.0, 1.0),
+            PhaseFunction::CornetteShanks(g) => Vec4::new(g, 0.0, 0.0, 2.0),
+            PhaseFunction::DualLobe(g1, g2) => Vec4::new(g1, g2, 0.0, 3.0),
+        };
+
+        Self {
+            scattering: medium.scattering,
+            absorption: medium.absorption,
+            density_params,
+            phase_params,
+        }
+    }
+}
+
 /// This component describes the atmosphere of a planet, and when added to a camera
 /// will enable atmospheric scattering for that camera. This is only compatible with
 /// HDR cameras.
@@ -252,65 +382,7 @@ impl Plugin for AtmospherePlugin {
 /// participating in Rayleigh and Mie scattering falls off roughly exponentially
 /// from the planet's surface, ozone only exists in a band centered at a fairly
 /// high altitude.
-// Add this new enum to define different density function types
-#[derive(Clone, Component, Reflect, ShaderType)]
-pub struct ControlPoint {
-    altitude_density: Vec4, // Pack two (altitude, density) pairs per vec4
-}
-
-impl ControlPoint {
-    pub const ZERO: Self = Self {
-        altitude_density: Vec4::ZERO,
-    };
-
-    pub const fn new(altitude: f32, density: f32) -> Self {
-        Self {
-            altitude_density: Vec4::new(altitude, density, 0.0, 0.0),
-        }
-    }
-}
-
-#[derive(Clone, Component, Reflect, ShaderType)]
-pub struct DensityProfile {
-    profile_type: u32,
-    scale: f32,                        // For exponential profiles
-    scale_high: f32,                   // For split exponential
-    split_altitude: f32,               // For split exponential
-    control_points: [ControlPoint; 6], // Up to 6 points
-    num_points: u32,                   // Number of active control points
-}
-
-impl DensityProfile {
-    pub const ZERO: Self = Self {
-        profile_type: 0,
-        scale: 0.0,
-        scale_high: 0.0,
-        split_altitude: 0.0,
-        control_points: [ControlPoint::ZERO; 6],
-        num_points: 0,
-    };
-}
-
-#[derive(Clone, Component, Reflect, ShaderType)]
-pub struct Scatterer {
-    pub density_profile: DensityProfile,
-    pub asymmetry: f32,
-
-    // Scattering properties
-    pub scattering: Vec3,
-    pub absorption: Vec3,
-}
-
-impl Scatterer {
-    pub const ZERO: Self = Self {
-        density_profile: DensityProfile::ZERO,
-        asymmetry: 0.0,
-        scattering: Vec3::ZERO,
-        absorption: Vec3::ZERO,
-    };
-}
-
-#[derive(Clone, Component, Reflect, ShaderType)]
+#[derive(Clone, Component, Reflect)]
 pub struct Atmosphere {
     /// Radius of the planet
     ///
@@ -329,69 +401,71 @@ pub struct Atmosphere {
     /// units: N/A
     pub ground_albedo: Vec3,
 
-    /// An array of scatterers, which describe the atmosphere.
-    ///
-    /// First scatterer is typically Rayleigh (air/CO2)
-    /// Second scatterer is typically Mie (aerosols/dust)
-    /// Third scatterer is typically Ozone (absorption)
-    pub scatterers: [Scatterer; 3],
+    /// An atmosphere has multiple layers, each composed of a medium that interacts with light
+    pub layers: [Medium; 3],
+}
+
+#[derive(Clone, Component, ShaderType)]
+pub struct AtmosphereUniforms {
+    pub bottom_radius: f32,
+    pub top_radius: f32,
+    pub ground_albedo: Vec3,
+    pub layers: [GpuMedium; 3],
+}
+
+impl From<Atmosphere> for AtmosphereUniforms {
+    fn from(atmosphere: Atmosphere) -> Self {
+        Self {
+            bottom_radius: atmosphere.bottom_radius,
+            top_radius: atmosphere.top_radius,
+            ground_albedo: atmosphere.ground_albedo,
+            layers: atmosphere.layers.map(GpuMedium::from),
+        }
+    }
 }
 
 impl Atmosphere {
-    pub const EARTH: Atmosphere = Atmosphere {
+    pub const EARTH: Self = Self {
         bottom_radius: 6_360_000.0,
         top_radius: 6_460_000.0,
-        ground_albedo: Vec3::splat(0.3),
-
-        scatterers: [
+        ground_albedo: Vec3::splat(0.0),
+        layers: [
             // Rayleigh scattering (air molecules)
-            Scatterer {
-                density_profile: DensityProfile {
-                    profile_type: 0,
-                    scale: 1.0 / 8_000.0,
-                    ..DensityProfile::ZERO
-                },
+            Medium {
                 scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
                 absorption: Vec3::ZERO,
-                asymmetry: 0.0,
+                density_profile: DensityProfile::Exponential {
+                    scale_height: 8_000.0,
+                },
+                phase_function: PhaseFunction::Rayleigh,
             },
             // Mie scattering (aerosols)
-            Scatterer {
-                density_profile: DensityProfile {
-                    profile_type: 0,
-                    scale: 1.0 / 1_200.0,
-                    ..DensityProfile::ZERO
-                },
+            Medium {
                 scattering: Vec3::splat(3.996e-6),
                 absorption: Vec3::splat(0.444e-6),
-                asymmetry: 0.8,
-            },
-            // Ozone
-            Scatterer {
-                density_profile: DensityProfile {
-                    profile_type: 2,
-                    control_points: [
-                        ControlPoint::new(0.0, 0.022),
-                        ControlPoint::new(8_000.0, 0.0),
-                        ControlPoint::new(21_500.0, 1.0),
-                        ControlPoint::new(39_000.0, 0.034),
-                        ControlPoint::new(40_000.0, 0.0),
-                        ControlPoint::new(45_000.0, 0.0),
-                    ],
-                    num_points: 6,
-                    ..DensityProfile::ZERO
+                density_profile: DensityProfile::Exponential {
+                    scale_height: 1_200.0,
                 },
+                phase_function: PhaseFunction::HenyeyGreenstein(0.8),
+            },
+            // Ozone layer
+            Medium {
                 scattering: Vec3::ZERO,
                 absorption: Vec3::new(0.650e-6, 1.881e-6, 0.085e-6),
-                asymmetry: 0.0,
+                density_profile: DensityProfile::Tent {
+                    center_altitude: 25_000.0,
+                    layer_width: 30_000.0,
+                    exponent: 1.0,
+                },
+                phase_function: PhaseFunction::Rayleigh,
             },
         ],
     };
 
     pub fn with_density_multiplier(mut self, mult: f32) -> Self {
-        for scatterer in self.scatterers.iter_mut() {
-            scatterer.scattering *= mult;
-            scatterer.absorption *= mult;
+        for layer in self.layers.iter_mut() {
+            layer.scattering *= mult;
+            layer.absorption *= mult;
         }
         self
     }
@@ -408,10 +482,10 @@ impl ExtractComponent for Atmosphere {
 
     type QueryFilter = With<Camera3d>;
 
-    type Out = Atmosphere;
+    type Out = AtmosphereUniforms;
 
     fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
-        Some(item.clone())
+        Some(AtmosphereUniforms::from(item.clone()))
     }
 }
 
@@ -511,7 +585,7 @@ impl ExtractComponent for AtmosphereSettings {
 }
 
 fn configure_camera_depth_usages(
-    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<Atmosphere>)>,
+    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<AtmosphereUniforms>)>,
 ) {
     for mut camera in &mut cameras {
         camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();

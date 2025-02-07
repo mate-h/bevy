@@ -1,33 +1,20 @@
 #define_import_path bevy_pbr::atmosphere::types
 
-struct ControlPoint {
-    altitude_density: vec4<f32>,
-}
-
-struct DensityProfile {
-    profile_type: u32,
-    scale: f32,
-    scale_high: f32,
-    split_altitude: f32,
-    control_points: array<ControlPoint, 6>,
-    num_points: u32,
-}
-
-struct Scatterer {
-    density_profile: DensityProfile,
-    asymmetry: f32,
+struct GpuMedium {
     scattering: vec3<f32>,
     absorption: vec3<f32>,
+    density_params: vec4<f32>,
+    phase_params: vec4<f32>,
 }
 
-struct Atmosphere {
+struct AtmosphereUniforms {
     // Planet properties
     bottom_radius: f32,
     top_radius: f32,
     ground_albedo: vec3<f32>,
 
-    // Array of scatterers (fixed size 3)
-    scatterers: array<Scatterer, 3>,
+    // Array of layers (fixed size 3)
+    layers: array<GpuMedium, 3>,
 }
 
 struct AtmosphereSettings {

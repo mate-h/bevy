@@ -3,7 +3,7 @@
 #import bevy_render::maths::{PI, HALF_PI, PI_2, fast_acos, fast_acos_4, fast_atan2}
 
 #import bevy_pbr::atmosphere::{
-    types::{Atmosphere,Scatterer},
+    types::{Atmosphere,GpuMedium},
     bindings::{
         atmosphere, settings, view, lights, transmittance_lut, transmittance_lut_sampler, 
         multiscattering_lut, multiscattering_lut_sampler, sky_view_lut, sky_view_lut_sampler,
@@ -174,10 +174,35 @@ fn sample_aerial_view_lut(uv: vec2<f32>, t: f32) -> vec3<f32> {
     return exp(sample.rgb) * fade;
 }
 
+// PHASE FUNCTIONS
+
+// -(L . V) == (L . -V). -V here is our ray direction, which points away from the view 
+// instead of towards it (which would be the *view direction*, V)
+
+// evaluates the rayleigh phase function, which describes the likelihood
+// of a rayleigh scattering event scattering light from the light direction towards the view
+fn rayleigh(neg_LdotV: f32) -> f32 {
+    return FRAC_3_16_PI * (1 + (neg_LdotV * neg_LdotV));
+}
+
+// evaluates the henyey-greenstein phase function, which describes the likelihood
+// of a mie scattering event scattering light from the light direction towards the view
+fn henyey_greenstein(neg_LdotV: f32, g: f32) -> f32 {
+    let denom = 1.0 + g * g - 2.0 * g * neg_LdotV;
+    return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
+}
+
+// evaluates the cornette-shanks phase function
+fn cornette_shanks(neg_LdotV: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = 1.0 + g2 - 2.0 * g * neg_LdotV;
+    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * neg_LdotV, 1.5));
+}
+
 // ATMOSPHERE SAMPLING
 
 struct AtmosphereSample {
-    // Total scattering coefficient (sum of all scatterers)
+    // Total scattering coefficient (sum of scattering)
     scattering: vec3<f32>,
     // Total extinction coefficient (scattering + absorption)
     extinction: vec3<f32>,
@@ -192,9 +217,9 @@ fn sample_atmosphere(r: f32) -> AtmosphereSample {
     sample.scattering = vec3(0.0);
     sample.extinction = vec3(0.0);
     
-    // Sum contributions from all scatterers
+    // Sum contributions from all layers
     for (var i = 0u; i < 3u; i++) {
-        let s = atmosphere.scatterers[i];
+        let s = atmosphere.layers[i];
         let density = get_density(s, altitude);
         sample.scattering += density * s.scattering;
         sample.extinction += density * (s.scattering + s.absorption);
@@ -217,7 +242,7 @@ fn sample_local_inscattering(local_atmosphere: AtmosphereSample, ray_dir: vec3<f
         let altitude = local_r - atmosphere.bottom_radius;
         
         for (var i = 0u; i < 3u; i++) {
-            let s = atmosphere.scatterers[i];
+            let s = atmosphere.layers[i];
             let density = get_density(s, altitude);
             let phase = get_phase_function(s, neg_LdotV);
             total_scattering += density * s.scattering * phase;
@@ -343,39 +368,31 @@ fn zenith_azimuth_to_ray_dir(zenith: f32, azimuth: f32) -> vec3<f32> {
     return vec3(sin_azimuth * sin_zenith, mu, -cos_azimuth * sin_zenith);
 }
 
-fn get_density(s: Scatterer, altitude: f32) -> f32 {
-    switch s.density_profile.profile_type {
+fn get_density(medium: GpuMedium, altitude: f32) -> f32 {
+    let density_type = u32(medium.density_params.w);
+    switch density_type {
         case 0u: { // Exponential
-            return exp(-s.density_profile.scale * altitude);
+            let scale_height = medium.density_params.x;
+            return exp(-altitude / scale_height);
         }
-        case 1u: { // Split exponential
-            if (altitude < s.density_profile.split_altitude) {
-                return exp(-s.density_profile.scale * altitude);
+        case 1u: { // SplitExponential
+            let scale_height_lower = medium.density_params.x;
+            let center_altitude = medium.density_params.y;
+            let scale_height_upper = medium.density_params.z;
+            
+            if altitude < center_altitude {
+                return exp(-altitude / scale_height_lower);
             } else {
-                let h = altitude - s.density_profile.split_altitude;
-                return exp(-s.density_profile.scale * s.density_profile.split_altitude) 
-                     * exp(-s.density_profile.scale_high * h);
+                return exp(-(altitude - center_altitude) / scale_height_upper);
             }
         }
-        case 2u: { // Piecewise linear
-            for (var i = 0u; i < s.density_profile.num_points - 1u; i++) {
-                let vec_idx = i / 2u;
-                let pair_idx = i % 2u;
-                
-                let point = s.density_profile.control_points[vec_idx].altitude_density;
-                let next_point = s.density_profile.control_points[vec_idx + 1u].altitude_density;
-                
-                let alt1 = select(point.x, point.z, pair_idx == 1u);
-                let den1 = select(point.y, point.w, pair_idx == 1u);
-                let alt2 = select(next_point.x, next_point.z, pair_idx == 1u);
-                let den2 = select(next_point.y, next_point.w, pair_idx == 1u);
-                
-                if (altitude >= alt1 && altitude <= alt2) {
-                    let t = (altitude - alt1) / (alt2 - alt1);
-                    return mix(den1, den2, t);
-                }
-            }
-            return 0.0;
+        case 2u: { // Tent
+            let center_altitude = medium.density_params.x;
+            let half_width = medium.density_params.y * 0.5;
+            let exponent = medium.density_params.z;
+            
+            let dist = abs(altitude - center_altitude);
+            return pow(max(0.0, 1.0 - dist / half_width), exponent);
         }
         default: {
             return 0.0;
@@ -383,14 +400,31 @@ fn get_density(s: Scatterer, altitude: f32) -> f32 {
     }
 }
 
-fn get_phase_function(s: Scatterer, cos_theta: f32) -> f32 {
-    if (s.asymmetry == 0.0) {
-        // Rayleigh phase function
-        return 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
-    } else {
-        // Mie phase function (Cornette-Shanks)
-        let g = s.asymmetry;
-        let g2 = g * g;
-        return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+fn get_phase_function(medium: GpuMedium, cos_theta: f32) -> f32 {
+    let phase_type = u32(medium.phase_params.w);
+    switch phase_type {
+        case 0u: { // Rayleigh
+            return rayleigh(cos_theta);
+        }
+        case 1u: { // HenyeyGreenstein
+            let g = medium.phase_params.x;
+            return henyey_greenstein(cos_theta, g);
+        }
+        case 2u: { // CornetteShanks
+            let g = medium.phase_params.x;
+            return cornette_shanks(cos_theta, g);
+        }
+        case 3u: { // DualLobe
+            let g1 = medium.phase_params.x;
+            let g2 = medium.phase_params.y;
+            return mix(
+                henyey_greenstein(cos_theta, g1),
+                henyey_greenstein(cos_theta, g2),
+                0.5
+            );
+        }
+        default: {
+            return 0.0;
+        }
     }
 }
