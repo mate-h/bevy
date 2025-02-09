@@ -297,7 +297,7 @@ fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
     let t_top = distance_to_top_atmosphere_boundary(r, mu);
     let t_bottom = distance_to_bottom_atmosphere_boundary(r, mu);
     let hits = ray_intersects_ground(r, mu);
-    return mix(t_top, t_bottom, f32(hits));
+    return select(t_bottom, t_top, hits);
 }
 
 /// Assuming y=0 is the planet ground, returns the view radius in meters
