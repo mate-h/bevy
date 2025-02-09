@@ -1,14 +1,12 @@
 #define_import_path bevy_pbr::atmosphere::types
 
 struct Atmosphere {
-    // Radius of the planet
-    bottom_radius: f32, // units: m
+    profile: ScatteringProfile,
+    planet: Planet,
+    core_lut_settings: CoreLutSettings
+}
 
-    // Radius at which we consider the atmosphere to 'end' for out calculations (from center of planet)
-    top_radius: f32, // units: m
-
-    ground_albedo: vec3<f32>,
-
+struct ScatteringProfile {
     rayleigh_density_exp_scale: f32,
     rayleigh_scattering: vec3<f32>,
 
@@ -22,20 +20,27 @@ struct Atmosphere {
     ozone_absorption: vec3<f32>, // ozone absorption. units: m^-1
 }
 
-struct AtmosphereSettings {
+struct Planet {
+    ground_albedo: vec3<f32>,
+    lower_radius: f32,
+    upper_radius: f32,
+}
+
+struct CoreLutSettings {
     transmittance_lut_size: vec2<u32>,
-    multiscattering_lut_size: vec2<u32>,
-    sky_view_lut_size: vec2<u32>,
-    aerial_view_lut_size: vec3<u32>,
+    multiscattering_lut_size: vec2<u32>,   
     transmittance_lut_samples: u32,
     multiscattering_lut_dirs: u32,
     multiscattering_lut_samples: u32,
-    sky_view_lut_samples: u32,
-    aerial_view_lut_samples: u32,
-    aerial_view_lut_max_distance: f32,
-    scene_units_to_m: f32,
 }
 
+struct AuxLutSettings {
+    sky_view_lut_size: vec2<u32>,
+    sky_view_lut_samples: u32,
+    aerial_view_lut_samples: u32,
+    aerial_view_lut_size: vec3<u32>,
+    aerial_view_lut_max_distance: f32,
+}
 
 // "Atmosphere space" is just the view position with y=0 and oriented horizontally,
 // so the horizon stays a horizontal line in our luts

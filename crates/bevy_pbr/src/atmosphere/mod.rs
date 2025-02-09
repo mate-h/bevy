@@ -36,7 +36,10 @@ use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Asset, AssetApp, Assets, Handle};
 use bevy_color::{Color, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::core_3d::graph::Node3d;
-use bevy_ecs::{component::require, resource::Resource};
+use bevy_ecs::{
+    component::{require, Component},
+    resource::Resource,
+};
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
@@ -147,10 +150,10 @@ impl Plugin for AtmospherePlugin {
             .insert(&ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
         app.register_type::<ScatteringProfile>()
-            .register_type::<AtmosphereAuxLutSettings>()
+            .register_type::<LutBasedScatteringSettings>()
             .add_plugins((
-                ExtractComponentPlugin::<AtmosphereAuxLutSettings>::default(),
-                UniformComponentPlugin::<AtmosphereAuxLutSettings>::default(),
+                ExtractComponentPlugin::<LutBasedScatteringSettings>::default(),
+                UniformComponentPlugin::<LutBasedScatteringSettings>::default(),
             ));
     }
 
@@ -411,7 +414,7 @@ impl ScatteringProfile {
 }
 
 #[derive(Component)]
-#[require(AtmosphereCoreLutSettings)]
+#[require(AtmosphereSettings, Planet)]
 pub struct Atmosphere(pub Handle<ScatteringProfile>);
 
 impl Default for Atmosphere {
@@ -428,8 +431,8 @@ impl Atmosphere {
 
 #[derive(Component, Default)]
 pub enum AtmosphericScattering {
-    LutBased(AtmosphereAuxLutSettings),
-    RayMarched(AtmosphereRayMarchSettings),
+    LutBased(LutBasedScatteringSettings),
+    RayMarched(RayMarchedScatteringSettings),
 }
 
 impl Default for AtmosphericScattering {
@@ -439,7 +442,7 @@ impl Default for AtmosphericScattering {
 }
 
 #[derive(Clone, Reflect, Component, ShaderType)]
-pub struct AtmosphereCoreLutSettings {
+pub struct AtmosphereSettings {
     /// The size of the transmittance LUT
     pub transmittance_lut_size: UVec2,
 
@@ -459,7 +462,7 @@ pub struct AtmosphereCoreLutSettings {
     pub multiscattering_lut_samples: u32,
 }
 
-impl Default for AtmosphereCoreLutSettings {
+impl Default for AtmosphereSettings {
     fn default() -> Self {
         Self {
             transmittance_lut_size: UVec2::new(256, 128),
@@ -490,12 +493,9 @@ impl Default for AtmosphereCoreLutSettings {
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
 #[derive(Clone, Reflect, ShaderType)]
-pub struct AtmosphereAuxLutSettings {
+pub struct LutBasedScatteringSettings {
     /// The size of the sky-view LUT.
     pub sky_view_lut_size: UVec2,
-
-    /// The size of the aerial-view LUT.
-    pub aerial_view_lut_size: UVec3,
 
     /// The number of points to sample along each ray when
     /// computing the sky-view LUT.
@@ -504,6 +504,9 @@ pub struct AtmosphereAuxLutSettings {
     /// The number of points to sample for each slice along the z-axis
     /// of the aerial-view LUT.
     pub aerial_view_lut_samples: u32,
+
+    /// The size of the aerial-view LUT.
+    pub aerial_view_lut_size: UVec3,
 
     /// The maximum distance from the camera to evaluate the
     /// aerial view LUT. The slices along the z-axis of the
@@ -514,7 +517,7 @@ pub struct AtmosphereAuxLutSettings {
     pub aerial_view_lut_max_distance: f32,
 }
 
-impl Default for AtmosphereAuxLutSettings {
+impl Default for LutBasedScatteringSettings {
     fn default() -> Self {
         Self {
             sky_view_lut_size: UVec2::new(400, 200),
@@ -527,13 +530,13 @@ impl Default for AtmosphereAuxLutSettings {
 }
 
 #[derive(Clone, Reflect, ShaderType)]
-pub struct AtmosphereRayMarchSettings {
+pub struct RayMarchedScatteringSettings {
     sample_count: u32,
     jitter_strength: f32,
 }
 
 //TODO: find good values
-impl Default for AtmosphereRayMarchSettings {
+impl Default for RayMarchedScatteringSettings {
     fn default() -> Self {
         Self {
             sample_count: 16,
@@ -546,7 +549,7 @@ impl Default for AtmosphereRayMarchSettings {
 #[require(DirectionalLight(Self::default_light))]
 pub struct Sun {
     /// The angular size (or diameter) of the sun when viewed from the surface of a planet.
-    angular_size: f32,
+    pub angular_size: f32,
 }
 
 impl Sun {
