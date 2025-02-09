@@ -4,11 +4,6 @@
 
 #import bevy_pbr::atmosphere::{
     types::Atmosphere,
-    bindings::{
-        atmosphere, settings, view, lights, transmittance_lut, transmittance_lut_sampler, 
-        multiscattering_lut, multiscattering_lut_sampler, sky_view_lut, sky_view_lut_sampler,
-        aerial_view_lut, aerial_view_lut_sampler, atmosphere_transforms
-    },
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, transmittance_lut_uv_to_r_mu, 
         ray_intersects_ground, distance_to_top_atmosphere_boundary, 
@@ -50,7 +45,6 @@ const ROOT_2: f32 = 1.41421356; // √2
 const MIDPOINT_RATIO: f32 = 0.3;
 
 // LUT UV PARAMATERIZATIONS
-
 fn unit_to_sub_uvs(val: vec2<f32>, resolution: vec2<f32>) -> vec2<f32> {
     return (val + 0.5f / resolution) * (resolution / (resolution + 1.0f));
 }
@@ -59,9 +53,9 @@ fn sub_uvs_to_unit(val: vec2<f32>, resolution: vec2<f32>) -> vec2<f32> {
     return (val - 0.5f / resolution) * (resolution / (resolution - 1.0f));
 }
 
-fn multiscattering_lut_r_mu_to_uv(r: f32, mu: f32) -> vec2<f32> {
+fn multiscattering_lut_r_mu_to_uv(planet: Planet, ms_lut_size: vec2<u32>, r: f32, mu: f32) -> vec2<f32> {
     let u = 0.5 + 0.5 * mu;
-    let v = saturate((r - atmosphere.bottom_radius) / (atmosphere.top_radius - atmosphere.bottom_radius)); //TODO
+    let v = saturate((r - planet.bottom_radius) / planet.space_altitude); //TODO
     return unit_to_sub_uvs(vec2(u, v), vec2<f32>(settings.multiscattering_lut_size));
 }
 
@@ -75,6 +69,7 @@ fn multiscattering_lut_uv_to_r_mu(uv: vec2<f32>) -> vec2<f32> {
 fn sky_view_lut_r_mu_azimuth_to_uv(r: f32, mu: f32, azimuth: f32) -> vec2<f32> {
     let u = (azimuth * FRAC_2_PI) + 0.5;
 
+    // Horizon parameters
     let v_horizon = sqrt(r * r - atmosphere.bottom_radius * atmosphere.bottom_radius);
     let cos_beta = v_horizon / r;
     // Using fast_acos_4 for better precision at small angles
@@ -101,6 +96,8 @@ fn sky_view_lut_uv_to_zenith_azimuth(r: f32, uv: vec2<f32>) -> vec2<f32> {
     // Horizon parameters
     let v_horizon = sqrt(r * r - atmosphere.bottom_radius * atmosphere.bottom_radius);
     let cos_beta = v_horizon / r;
+    // Using fast_acos_4 for better precision at small angles
+    // to avoid artifacts at the horizon
     let beta = fast_acos_4(cos_beta);
     let horizon_zenith = PI - beta;
 
@@ -306,6 +303,14 @@ fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
 /// Assuming y=0 is the planet ground, returns the view radius in meters
 fn view_radius() -> f32 {
     return view.world_position.y * settings.scene_units_to_m + atmosphere.bottom_radius;
+}
+
+fn radius_to_altitude(planet: Planet, r: f32) {
+    return saturate((r - planet.bottom_radius) / planet.space_altitude);
+}
+
+fn altitude_to_radius(planet: Planet, alt: f32) {
+    return mix(planet.bottom_radius, planet.top_radius, alt / planet.space_altitude);
 }
 
 // We assume the `up` vector at the view position is the y axis, since the world is locally flat/level.

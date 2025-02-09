@@ -295,6 +295,7 @@ struct GpuPlanet {
     ground_albedo: Vec3,
     lower_radius: f32,
     upper_radius: f32,
+    space_altitude: f32,
 }
 
 impl From<Planet> for GpuPlanet {
@@ -303,6 +304,7 @@ impl From<Planet> for GpuPlanet {
             ground_albedo: planet.ground_albedo.to_vec3(),
             lower_radius: planet.radius,
             upper_radius: planet.radius + planet.space_altitude,
+            space_altitude: planet.space_altitude,
         }
     }
 }

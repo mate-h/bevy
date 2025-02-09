@@ -2,8 +2,9 @@
 
 struct Atmosphere {
     profile: ScatteringProfile,
+    core_lut_settings: CoreLutSettings,
     planet: Planet,
-    core_lut_settings: CoreLutSettings
+    scene_units_to_m: f32,
 }
 
 struct ScatteringProfile {
@@ -23,14 +24,16 @@ struct ScatteringProfile {
 struct Planet {
     ground_albedo: vec3<f32>,
     lower_radius: f32,
+    lower_radius_sq: f32,
     upper_radius: f32,
+    upper_radius_sq: f32,
+    space_altitude: f32,
 }
 
 struct CoreLutSettings {
     transmittance_lut_size: vec2<u32>,
     multiscattering_lut_size: vec2<u32>,   
     transmittance_lut_samples: u32,
-    multiscattering_lut_dirs: u32,
     multiscattering_lut_samples: u32,
 }
 
