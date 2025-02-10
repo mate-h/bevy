@@ -294,16 +294,23 @@ impl Default for Planet {
 struct GpuPlanet {
     ground_albedo: Vec3,
     lower_radius: f32,
+    lower_radius_sq: f32,
     upper_radius: f32,
+    upper_radius_sq: f32,
     space_altitude: f32,
 }
 
 impl From<Planet> for GpuPlanet {
     fn from(planet: Planet) -> Self {
+        let lower_radius = planet.radius;
+        let upper_radius = lower_radius + planet.space_altitude;
+
         Self {
             ground_albedo: planet.ground_albedo.to_vec3(),
-            lower_radius: planet.radius,
-            upper_radius: planet.radius + planet.space_altitude,
+            lower_radius,
+            lower_radius_sq: lower_radius * lower_radius,
+            upper_radius,
+            upper_radius_sq: upper_radius * upper_radius,
             space_altitude: planet.space_altitude,
         }
     }

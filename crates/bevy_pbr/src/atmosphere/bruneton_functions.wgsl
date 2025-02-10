@@ -55,28 +55,25 @@
 
 #define_import_path bevy_pbr::atmosphere::bruneton_functions
 
-#import bevy_pbr::atmosphere::{
-    types::Atmosphere,
-    bindings::atmosphere,
-}
+#import bevy_pbr::atmosphere::types::Planet
 
-// Mapping from view height (r) and zenith cos angle (mu) to UV coordinates in the transmittance LUT
-// Assuming r between ground and top atmosphere boundary, and mu= cos(zenith_angle)
-// Chosen to increase precision near the ground and to work around a discontinuity at the horizon
-// See Bruneton and Neyret 2008, "Precomputed Atmospheric Scattering" section 4
-fn transmittance_lut_r_mu_to_uv(r: f32, mu: f32) -> vec2<f32> {
-  // Distance along a horizontal ray from the ground to the top atmosphere boundary
-    let H = sqrt(atmosphere.top_radius * atmosphere.top_radius - atmosphere.bottom_radius * atmosphere.bottom_radius);
+/// Mapping from view height (r) and zenith cos angle (mu) to UV coordinates in the transmittance LUT
+/// Assuming r between ground and top atmosphere boundary, and mu= cos(zenith_angle)
+/// Chosen to increase precision near the ground and to work around a discontinuity at the horizon
+/// See Bruneton and Neyret 2008, "Precomputed Atmospheric Scattering" section 4
+fn transmittance_lut_r_mu_to_uv(planet: Planet, r: f32, mu: f32) -> vec2<f32> {
+    // Distance along a horizontal ray from the ground to the top atmosphere boundary
+    let H = sqrt(planet.top_radius_sq - planet.bottom_radius_sq);
 
-  // Distance from a point at height r to the horizon
-  // ignore the case where r <= atmosphere.bottom_radius
-    let rho = sqrt(max(r * r - atmosphere.bottom_radius * atmosphere.bottom_radius, 0.0));
+    // Distance from a point at height r to the horizon
+    // ignore the case where r <= atmosphere.bottom_radius
+    let rho = sqrt(max(r * r - planet.bottom_radius_sq, 0.0));
 
-  // Distance from a point at height r to the top atmosphere boundary at zenith angle mu
+    // Distance from a point at height r to the top atmosphere boundary at zenith angle mu
     let d = distance_to_top_atmosphere_boundary(r, mu);
 
-  // Minimum and maximum distance to the top atmosphere boundary from a point at height r
-    let d_min = atmosphere.top_radius - r; // length of the ray straight up to the top atmosphere boundary
+    // Minimum and maximum distance to the top atmosphere boundary from a point at height r
+    let d_min = planet.top_radius - r; // length of the ray straight up to the top atmosphere boundary
     let d_max = rho + H; // length of the ray to the top atmosphere boundary and grazing the horizon
 
     let u = (d - d_min) / (d_max - d_min);
@@ -84,30 +81,24 @@ fn transmittance_lut_r_mu_to_uv(r: f32, mu: f32) -> vec2<f32> {
     return vec2<f32>(u, v);
 }
 
-// Inverse of the mapping above, mapping from UV coordinates in the transmittance LUT to view height (r) and zenith cos angle (mu)
-fn transmittance_lut_uv_to_r_mu(uv: vec2<f32>) -> vec2<f32> {
-  // Distance to top atmosphere boundary for a horizontal ray at ground level
-    let H = sqrt(atmosphere.top_radius * atmosphere.top_radius - atmosphere.bottom_radius * atmosphere.bottom_radius);
+/// Inverse of the mapping above, mapping from UV coordinates in the transmittance LUT to view height (r) and zenith cos angle (mu)
+fn transmittance_lut_uv_to_r_mu(planet: Planet, uv: vec2<f32>) -> vec2<f32> {
+    // Distance to top atmosphere boundary for a horizontal ray at ground level
+    let H = sqrt(planet.top_radius_sq - planet.bottom_radius_sq);
 
-  // Distance to the horizon, from which we can compute r:
+    // Distance to the horizon, from which we can compute r:
     let rho = H * uv.y;
-    let r = sqrt(rho * rho + atmosphere.bottom_radius * atmosphere.bottom_radius);
+    let r = sqrt(rho * rho + planet.bottom_radius_sq);
 
-  // Distance to the top atmosphere boundary for the ray (r,mu), and its minimum
-  // and maximum values over all mu- obtained for (r,1) and (r,mu_horizon) -
-  // from which we can recover mu:
-    let d_min = atmosphere.top_radius - r;
+    // Distance to the top atmosphere boundary for the ray (r,mu), and its minimum
+    // and maximum values over all mu- obtained for (r,1) and (r,mu_horizon) -
+    // from which we can recover mu:
+    let d_min = planet.top_radius - r;
     let d_max = rho + H;
     let d = d_min + uv.x * (d_max - d_min);
 
-    var mu: f32;
-    if d == 0.0 {
-        mu = 1.0;
-    } else {
-        mu = (H * H - rho * rho - d * d) / (2.0 * r * d);
-    }
-
-    mu = clamp(mu, -1.0, 1.0);
+    var mu = (H * H - rho * rho - d * d) / (2.0 * r * d);
+    mu = select(clamp(mu, -1.0, 1.0), 1.0, d == 0.0);
 
     return vec2<f32>(r, mu);
 }
@@ -121,19 +112,19 @@ fn transmittance_lut_uv_to_r_mu(uv: vec2<f32>) -> vec2<f32> {
 /// Center of sphere, c = [0,0,0]
 /// Radius of sphere, r = atmosphere.top_radius
 /// This function solves the quadratic equation for line-sphere intersection simplified under these assumptions
-fn distance_to_top_atmosphere_boundary(r: f32, mu: f32) -> f32 {
-  // ignore the case where r > atmosphere.top_radius
-    let positive_discriminant = max(r * r * (mu * mu - 1.0) + atmosphere.top_radius * atmosphere.top_radius, 0.0);
+fn distance_to_top_atmosphere_boundary(planet: Planet, r: f32, mu: f32) -> f32 {
+    // ignore the case where r > atmosphere.top_radius
+    let positive_discriminant = max(r * r * (mu * mu - 1.0) + planet.top_radius_sq, 0.0);
     return max(-r * mu + sqrt(positive_discriminant), 0.0);
 }
 
 /// Simplified ray-sphere intersection
 /// as above for intersections with the ground
-fn distance_to_bottom_atmosphere_boundary(r: f32, mu: f32) -> f32 {
-    let positive_discriminant = max(r * r * (mu * mu - 1.0) + atmosphere.bottom_radius * atmosphere.bottom_radius, 0.0);
+fn distance_to_bottom_atmosphere_boundary(planet: Planet, r: f32, mu: f32) -> f32 {
+    let positive_discriminant = max(r * r * (mu * mu - 1.0) + planet.bottom_radius_sq, 0.0);
     return max(-r * mu - sqrt(positive_discriminant), 0.0);
 }
 
-fn ray_intersects_ground(r: f32, mu: f32) -> bool {
-    return mu < 0.0 && r * r * (mu * mu - 1.0) + atmosphere.bottom_radius * atmosphere.bottom_radius >= 0.0;
+fn ray_intersects_ground(planet: Planet, r: f32, mu: f32) -> bool {
+    return mu < 0.0 && r * r * (mu * mu - 1.0) + planet.bottom_radius * planet.bottom_radius >= 0.0;
 }
