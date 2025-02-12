@@ -50,7 +50,7 @@ fn henyey_greenstein_phase(neg_LdotV: f32, g: f32) -> f32 {
 
 // ATMOSPHERE SAMPLING
 
-struct AtmosphereSample {
+struct Medium {
     /// units: m^-1
     rayleigh_scattering: vec3<f32>,
 
@@ -66,8 +66,8 @@ struct AtmosphereSample {
 }
 
 /// Samples the atmosphere medium at a given radius and returns the optical density of each scattering component
-fn point_density(r: f32) -> AtmosphereSample {
-    let altitude = clamp(r, atmosphere.planet.bottom_radius, atmosphere.top_radius) - atmosphere.bottom_radius;
+fn sample_medium(r: f32) -> Medium {
+    let altitude = clamp(r, atmosphere.planet.bottom_radius, atmosphere.planet.top_radius) - atmosphere.planet.bottom_radius;
 
     // atmosphere values at altitude
     let mie_density = exp(-atmosphere.profile.mie_density_exp_scale * altitude);
@@ -94,7 +94,7 @@ fn point_density(r: f32) -> AtmosphereSample {
 }
 
 /// evaluates L_scat, equation 3 in the paper, which gives the total single-order scattering towards the view at a single point
-fn L_scattering(lights: Lights, local_atmosphere: AtmosphereSample, ray_dir: vec3<f32>, local_r: f32, local_up: vec3<f32>) -> vec3<f32> {
+fn L_scattering(medium: Medium, ray_dir_ws: vec3<f32>, local_r: f32, local_up: vec3<f32>) -> vec3<f32> {
     var inscattering = vec3(0.0);
     for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
         let light = &lights.directional_lights[light_i];
@@ -103,13 +103,13 @@ fn L_scattering(lights: Lights, local_atmosphere: AtmosphereSample, ray_dir: vec
 
         // -(L . V) == (L . -V). -V here is our ray direction, which points away from the view
         // instead of towards it (as is the convention for V)
-        let neg_LdotV = dot((*light).direction_to_light, ray_dir);
+        let neg_LdotV = dot((*light).direction_to_light, ray_dir_ws);
 
         // Phase functions give the proportion of light
         // scattered towards the camera for each scattering type
         let rayleigh_phase = rayleigh(neg_LdotV);
         let mie_phase = henyey_greenstein(neg_LdotV);
-        let scattering_coeff = local_atmosphere.rayleigh_scattering * rayleigh_phase + local_atmosphere.mie_scattering * mie_phase;
+        let scattering_coeff = medium.rayleigh_scattering * rayleigh_phase + medium.mie_scattering * mie_phase;
 
         let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
         let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
@@ -119,7 +119,7 @@ fn L_scattering(lights: Lights, local_atmosphere: AtmosphereSample, ray_dir: vec
 
         // Additive factor from the multiscattering LUT
         let psi_ms = sample_multiscattering_lut(local_r, mu_light);
-        let multiscattering_factor = psi_ms * (local_atmosphere.rayleigh_scattering + local_atmosphere.mie_scattering);
+        let multiscattering_factor = psi_ms * (medium.rayleigh_scattering + medium.mie_scattering);
 
         inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
     }
@@ -128,9 +128,9 @@ fn L_scattering(lights: Lights, local_atmosphere: AtmosphereSample, ray_dir: vec
 
 const SUN_ANGULAR_SIZE: f32 = 0.0174533; // angular diameter of sun in radians
 
-fn L_sun(planet: Planet, lights: Lights, transmittance: vec3<f32>, r: f32, ray_dir_ws: vec3<f32>) -> vec3<f32> {
+fn L_sun(transmittance: vec3<f32>, r: f32, ray_dir_ws: vec3<f32>) -> vec3<f32> {
     let mu_view = ray_dir_ws.y;
-    let shadow_factor = f32(!ray_intersects_ground(r, mu_view));
+    let shadow_factor = f32(!ray_intersects_ground(atmosphere.planet, r, mu_view));
     var sun_illuminance = vec3(0.0);
     for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
         let light = &lights.directional_lights[light_i];
@@ -146,6 +146,10 @@ fn L_sun(planet: Planet, lights: Lights, transmittance: vec3<f32>, r: f32, ray_d
 
 // MISC TRANSFORMS
 
+fn view_radius() -> f32 {
+    return view.position.y + atmosphere.planet.bottom_radius;
+}
+
 // Modified from skybox.wgsl. For this pass we don't need to apply a separate sky transform or consider camera viewport.
 // w component is the cosine of the view direction with the view forward vector, to correct step distance at the edges of the viewport
 fn uv_to_ray_dir_ws(uv: vec2<f32>) -> vec4<f32> {
@@ -157,20 +161,20 @@ fn uv_to_ray_dir_ws(uv: vec2<f32>) -> vec4<f32> {
     // fragment position.
     // Use the position on the near clipping plane to avoid -inf world position
     // because the far plane of an infinite reverse projection is at infinity.
-    let view_position_homogeneous = view.view_from_clip * vec4(
+    let near_clip_pos = view.view_from_clip * vec4(
         uv_to_ndc(uv),
         1.0,
         1.0,
     );
 
-    let view_ray_direction = view_position_homogeneous.xyz / view_position_homogeneous.w;
+    let ray_dir_vs = near_clip_pos.xyz / near_clip_pos.w;
     // Transforming the view space ray direction by the inverse view matrix, transforms the
     // direction to world space. Note that the w element is set to 0.0, as this is a
     // vector direction, not a position, That causes the matrix multiplication to ignore
     // the translations from the view matrix.
-    let ray_direction = (view.world_from_view * vec4(view_ray_direction, 0.0)).xyz;
+    let ray_dir_ws = (view.world_from_view * vec4(ray_dir_vs, 0.0)).xyz;
 
-    return vec4(normalize(ray_direction), -view_ray_direction.z);
+    return vec4(normalize(ray_dir_ws), -ray_dir_ws.z);
 }
 
 // Convert uv [0.0 .. 1.0] coordinate to ndc space xy [-1.0 .. 1.0]

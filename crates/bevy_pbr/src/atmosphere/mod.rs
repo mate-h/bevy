@@ -33,7 +33,7 @@ mod node;
 pub mod resources;
 
 use bevy_app::{App, Plugin};
-use bevy_asset::{load_internal_asset, Asset, AssetApp, Assets, Handle};
+use bevy_asset::{load_internal_asset, weak_handle, Asset, AssetApp, Assets, Handle};
 use bevy_color::{Color, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
@@ -397,7 +397,7 @@ pub struct ScatteringProfile {
 }
 
 impl ScatteringProfile {
-    const EARTH_HANDLE: Handle<Self> = Handle::weak_from_u128(0x7A9B1D4114306F28C5B8A8DB5D555686);
+    const EARTH_HANDLE: Handle<Self> = weak_handle!("e44ea1fe-143a-4712-8cae-aec86922f081");
 
     pub const EARTH: Self = Self {
         rayleigh_density_exp_scale: 1.0 / 8_000.0,
@@ -440,7 +440,7 @@ impl Atmosphere {
     }
 }
 
-#[derive(Component, Default)]
+#[derive(Component)]
 pub enum AtmosphericScattering {
     LutBased(LutBasedScatteringSettings),
     RayMarched(RayMarchedScatteringSettings),

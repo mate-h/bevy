@@ -3,6 +3,9 @@
     atmosphere::{
         types::{Atmosphere, AtmosphereSettings},
         bindings::{atmosphere, settings, view, lights, aerial_view_lut_out},
+        common::{
+              
+        },
         functions::{
             sample_transmittance_lut, sample_atmosphere, rayleigh, henyey_greenstein,
             sample_multiscattering_lut, AtmosphereSample, sample_local_inscattering,
@@ -39,15 +42,15 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             let local_r = get_local_r(r, mu, t_i);
             let local_up = get_local_up(r, t_i, ray_dir.xyz);
 
-            let local_atmosphere = sample_atmosphere(local_r);
-            let sample_optical_depth = local_atmosphere.extinction * dt;
+            let medium = sample_medium(local_r);
+            let sample_optical_depth = medium.extinction * dt;
             let sample_transmittance = exp(-sample_optical_depth);
 
             // evaluate one segment of the integral
-            var inscattering = sample_local_inscattering(local_atmosphere, ray_dir.xyz, local_r, local_up);
+            var inscattering = L_scattering(medium, ray_dir.xyz, local_r, local_up);
 
             // Analytical integration of the single scattering term in the radiance transfer equation
-            let s_int = (inscattering - inscattering * sample_transmittance) / local_atmosphere.extinction;
+            let s_int = (inscattering - inscattering * sample_transmittance) / medium.extinction;
             total_inscattering += throughput * s_int;
 
             throughput *= sample_transmittance;

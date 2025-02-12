@@ -90,7 +90,6 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
     let t_max = max_atmosphere_distance(r, mu_view);
 
     let dt = t_max / f32(settings.multiscattering_lut_samples);
-    var optical_depth = vec3<f32>(0.0);
 
     var l_2 = vec3(0.0);
     var f_ms = vec3(0.0);
@@ -100,13 +99,12 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
         let local_r = get_local_r(r, mu_view, t_i);
         let local_up = get_local_up(r, t_i, ray_dir);
 
-        let local_atmosphere = sample_atmosphere(local_r);
-        let sample_optical_depth = local_atmosphere.extinction * dt;
+        let medium = sample_medium(local_r);
+        let sample_optical_depth = medium.extinction * dt;
         let sample_transmittance = exp(-sample_optical_depth);
-        optical_depth += sample_optical_depth;
 
         let mu_light = dot(light_dir, local_up);
-        let scattering_no_phase = local_atmosphere.rayleigh_scattering + local_atmosphere.mie_scattering;
+        let scattering_no_phase = medium.rayleigh_scattering + medium.mie_scattering;
 
         let ms = scattering_no_phase;
         let ms_int = (ms - ms * sample_transmittance) / local_atmosphere.extinction;
@@ -127,11 +125,10 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
 
     //include reflected luminance from planet ground 
     if ray_intersects_ground(r, mu_view) {
-        let transmittance_to_ground = exp(-optical_depth);
         let local_up = get_local_up(r, t_max, ray_dir);
         let mu_light = dot(light_dir, local_up);
         let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
-        let ground_luminance = transmittance_to_light * transmittance_to_ground * max(mu_light, 0.0) * atmosphere.ground_albedo;
+        let ground_luminance = transmittance_to_light * throughput * max(mu_light, 0.0) * atmosphere.planet.ground_albedo;
         l_2 += ground_luminance;
     }
 

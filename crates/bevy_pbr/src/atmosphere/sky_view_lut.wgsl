@@ -30,7 +30,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     var zenith_azimuth = sky_view_lut_uv_to_zenith_azimuth(r, uv);
 
     let ray_dir_as = zenith_azimuth_to_ray_dir(zenith_azimuth.x, zenith_azimuth.y);
-    let ray_dir_ws = direction_atmosphere_to_world(ray_dir_as);
+    let ray_dir_ws = direction_atmosphere_to_world(atmosphere_transforms, ray_dir_as);
 
     let mu = ray_dir_ws.y;
     let t_max = max_atmosphere_distance(r, mu);

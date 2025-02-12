@@ -34,14 +34,14 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     var transmittance: vec3<f32>;
     var inscattering: vec3<f32>;
     if depth == 0.0 {
-        let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws.xyz);
-        transmittance = sample_transmittance_lut(r, mu);
-        inscattering += sample_sky_view_lut(r, ray_dir_as);
-        inscattering += sample_sun_illuminance(ray_dir_ws.xyz, transmittance);
+        let ray_dir_as = direction_world_to_atmosphere(atmosphere_transforms, ray_dir_ws.xyz);
+        transmittance = sample_transmittance_lut(transmittance_lut, transmittance_lut_sampler, r, mu);
+        inscattering += sample_sky_view_lut(sky_view_lut, sky_view_lut_sampler, r, ray_dir_as);
+        inscattering += L_sun(ray_dir_ws.xyz, r, transmittance);
     } else {
         let t = ndc_to_camera_dist(vec3(uv_to_ndc(in.uv), depth));
-        inscattering = sample_aerial_view_lut(in.uv, t);
-        transmittance = sample_transmittance_lut_segment(r, mu, t);
+        inscattering = sample_aerial_view_lut(aerial_view_lut, aerial_view_lut_sampler, in.uv, t);
+        transmittance = sample_transmittance_lut_segment(transmittance_lut, transmittance_lut_sampler, r, mu, t);
     }
     return RenderSkyOutput(vec4(inscattering, 0.0), vec4(transmittance, 1.0));
 }

@@ -4,7 +4,6 @@ struct Atmosphere {
     profile: ScatteringProfile,
     core_lut_settings: CoreLutSettings,
     planet: Planet,
-    scene_units_to_m: f32,
 }
 
 struct ScatteringProfile {
