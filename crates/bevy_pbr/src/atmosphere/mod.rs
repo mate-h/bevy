@@ -43,20 +43,20 @@ use bevy_ecs::{
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
-    extract_component::UniformComponentPlugin,
-    render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
-    renderer::RenderDevice,
-    settings::WgpuFeatures,
-};
-use bevy_render::{
-    extract_component::{ExtractComponent, ExtractComponentPlugin},
+    extract_component::ExtractComponentPlugin,
     render_graph::{RenderGraphApp, ViewNodeRunner},
     render_resource::{Shader, TextureFormat, TextureUsages},
     renderer::RenderAdapter,
     Render, RenderApp, RenderSet,
 };
+use bevy_render::{
+    extract_component::UniformComponentPlugin,
+    render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
+    renderer::RenderDevice,
+    settings::WgpuFeatures,
+};
 
-use bevy_core_pipeline::core_3d::{graph::Core3d, Camera3d};
+use bevy_core_pipeline::core_3d::graph::Core3d;
 use resources::{
     prepare_atmosphere_transforms, queue_render_sky_pipelines, AtmosphereTransforms,
     RenderSkyBindGroupLayouts,
@@ -78,6 +78,7 @@ mod shaders {
     use bevy_render::render_resource::Shader;
 
     pub const TYPES: Handle<Shader> = weak_handle!("ef7e147e-30a0-4513-bae3-ddde2a6c20c5");
+    pub const COMMON: Handle<Shader> = weak_handle!("b95e172a-bebb-435f-bc76-ebba2e2baf62");
     pub const FUNCTIONS: Handle<Shader> = weak_handle!("7ff93872-2ee9-4598-9f88-68b02fef605f");
     pub const BRUNETON_FUNCTIONS: Handle<Shader> =
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
@@ -99,6 +100,7 @@ pub struct AtmospherePlugin;
 impl Plugin for AtmospherePlugin {
     fn build(&self, app: &mut App) {
         load_internal_asset!(app, shaders::TYPES, "types.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::COMMON, "common.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::FUNCTIONS, "functions.wgsl", Shader::from_wgsl);
         load_internal_asset!(
             app,
