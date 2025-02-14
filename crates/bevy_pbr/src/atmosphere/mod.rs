@@ -199,7 +199,6 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<AtmosphereSamplers>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
-            .init_resource::<SceneUnits>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
             .add_systems(
                 Render,
@@ -236,24 +235,6 @@ impl Plugin for AtmospherePlugin {
                     Node3d::MainTransparentPass,
                 ),
             );
-    }
-}
-
-#[derive(Copy, Clone, Debug, Resource)]
-pub struct SceneUnits {
-    pub to_meters: f32,
-}
-
-impl SceneUnits {
-    pub const METERS: Self = Self { to_meters: 1.0 };
-    pub const CENTIMETERS: Self = Self { to_meters: 1.0e+2 };
-    pub const MILLIMETERS: Self = Self { to_meters: 1.0e+3 };
-    pub const KILOMETERS: Self = Self { to_meters: 1.0e-3 };
-}
-
-impl Default for SceneUnits {
-    fn default() -> Self {
-        Self::METERS
     }
 }
 
