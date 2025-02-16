@@ -59,7 +59,7 @@ use bevy_render::{
 use bevy_core_pipeline::core_3d::graph::Core3d;
 use resources::{
     prepare_atmosphere_transforms, queue_render_sky_pipelines, AtmosphereTransforms,
-    RenderSkyBindGroupLayouts,
+    RenderSkyLayout,
 };
 use tracing::warn;
 
@@ -68,7 +68,7 @@ use crate::{light_consts::lux, DirectionalLight};
 use self::{
     node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
     resources::{
-        prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereBindGroupLayouts,
+        prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereLayout,
         AtmosphereLutPipelines, AtmosphereSamplers,
     },
 };
@@ -152,10 +152,10 @@ impl Plugin for AtmospherePlugin {
             .insert(&ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
         app.register_type::<ScatteringProfile>()
-            .register_type::<LutBasedScatteringSettings>()
+            .register_type::<LutBasedAtmosphereSettings>()
             .add_plugins((
-                ExtractComponentPlugin::<LutBasedScatteringSettings>::default(),
-                UniformComponentPlugin::<LutBasedScatteringSettings>::default(),
+                ExtractComponentPlugin::<LutBasedAtmosphereSettings>::default(),
+                UniformComponentPlugin::<LutBasedAtmosphereSettings>::default(),
             ));
     }
 
@@ -194,12 +194,11 @@ impl Plugin for AtmospherePlugin {
         }
 
         render_app
-            .init_resource::<AtmosphereBindGroupLayouts>()
-            .init_resource::<RenderSkyBindGroupLayouts>()
-            .init_resource::<AtmosphereSamplers>()
+            .init_resource::<AtmosphereLayout>()
+            .init_resource::<RenderSkyLayout>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
-            .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
+            .init_resource::<SpecializedRenderPipelines<RenderSkyLayout>>()
             .add_systems(
                 Render,
                 (
@@ -423,8 +422,8 @@ impl Atmosphere {
 
 #[derive(Component)]
 pub enum AtmosphericScattering {
-    LutBased(LutBasedScatteringSettings),
-    RayMarched(RayMarchedScatteringSettings),
+    LutBased(LutBasedAtmosphereSettings),
+    RayMarched(RayMarchedAtmosphereSettings),
 }
 
 impl Default for AtmosphericScattering {
@@ -485,7 +484,7 @@ impl Default for AtmosphereSettings {
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
 #[derive(Clone, Reflect, ShaderType)]
-pub struct LutBasedScatteringSettings {
+pub struct LutBasedAtmosphereSettings {
     /// The size of the sky-view LUT.
     pub sky_view_lut_size: UVec2,
 
@@ -509,7 +508,7 @@ pub struct LutBasedScatteringSettings {
     pub aerial_view_lut_max_distance: f32,
 }
 
-impl Default for LutBasedScatteringSettings {
+impl Default for LutBasedAtmosphereSettings {
     fn default() -> Self {
         Self {
             sky_view_lut_size: UVec2::new(400, 200),
@@ -522,13 +521,13 @@ impl Default for LutBasedScatteringSettings {
 }
 
 #[derive(Clone, Reflect, ShaderType)]
-pub struct RayMarchedScatteringSettings {
+pub struct RayMarchedAtmosphereSettings {
     sample_count: u32,
     jitter_strength: f32,
 }
 
 //TODO: find good values
-impl Default for RayMarchedScatteringSettings {
+impl Default for RayMarchedAtmosphereSettings {
     fn default() -> Self {
         Self {
             sample_count: 16,
