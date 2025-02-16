@@ -58,7 +58,6 @@ use bevy_render::{
 };
 
 use bevy_core_pipeline::core_3d::{graph::Core3d, Camera3d};
-use bytemuck::{Pod, Zeroable};
 use resources::{
     prepare_atmosphere_buffer, prepare_atmosphere_transforms, queue_render_sky_pipelines,
     AtmosphereBuffer, AtmosphereTransforms, RenderSkyBindGroupLayouts,
@@ -257,7 +256,7 @@ impl Plugin for AtmospherePlugin {
 /// participating in Rayleigh and Mie scattering falls off roughly exponentially
 /// from the planet's surface, ozone only exists in a band centered at a fairly
 /// high altitude.
-#[derive(Clone, Component, Reflect, ShaderType, Pod, Zeroable, Copy)]
+#[derive(Clone, Component, Reflect, ShaderType, Copy)]
 #[repr(C)]
 #[require(AtmosphereSettings)]
 pub struct Atmosphere {
@@ -397,7 +396,7 @@ impl ExtractComponent for Atmosphere {
 /// The aerial-view lut is a 3d LUT fit to the view frustum, which stores the luminance
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
-#[derive(Clone, Component, Reflect, ShaderType, Pod, Zeroable, Copy)]
+#[derive(Clone, Component, Reflect, ShaderType, Copy)]
 #[repr(C)]
 pub struct AtmosphereSettings {
     /// The size of the transmittance LUT
