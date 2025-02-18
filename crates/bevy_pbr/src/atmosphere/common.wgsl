@@ -16,6 +16,17 @@
 //   frame. This enables the non-linear latitude parametrization the paper uses 
 //   to concentrate detail near the horizon 
 
+// BINDINGS
+
+@group(0) @binding(0) var<uniform> view: View;
+@group(0) @binding(1) var<uniform> lights: Lights;
+@group(0) @binding(0) var<storage> atmosphere: Atmosphere;
+@group(0) @binding(3) var atmo_sampler: sampler;
+
+@group(0) @binding(4) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(5) var multiscattering_lut: texture_2d<f32>;
+
+
 // CONSTANTS
 
 const FRAC_PI: f32 = 0.3183098862; // 1 / π
@@ -30,23 +41,6 @@ const ROOT_2: f32 = 1.41421356; // √2
 // the exponential falloff of atmospheric density.
 const MIDPOINT_RATIO: f32 = 0.3;
 
-// PHASE FUNCTIONS
-
-// -(L . V) == (L . -V). -V here is our ray direction, which points away from the view 
-// instead of towards it (which would be the *view direction*, V)
-
-// evaluates the rayleigh phase function, which describes the likelihood
-// of a rayleigh scattering event scattering light from the light direction towards the view
-fn rayleigh_phase(neg_LdotV: f32) -> f32 {
-    return FRAC_3_16_PI * (neg_LdotV * neg_LdotV + 1);
-}
-
-// evaluates the henyey-greenstein phase function, which describes the likelihood
-// of a mie scattering event scattering light from the light direction towards the view
-fn henyey_greenstein_phase(neg_LdotV: f32, g: f32) -> f32 {
-    let denom = 1.0 + g * g - 2.0 * g * neg_LdotV;
-    return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
-}
 
 // ATMOSPHERE SAMPLING
 
@@ -143,6 +137,7 @@ fn L_sun(transmittance: vec3<f32>, r: f32, ray_dir_ws: vec3<f32>) -> vec3<f32> {
     }
     return sun_illuminance * transmittance * view.exposure;
 }
+
 
 // MISC TRANSFORMS
 

@@ -131,6 +131,23 @@ fn sample_aerial_view_lut(settings: AuxLutSettings, lut: texture_3d<f32>, smp: s
     return exp(sample.rgb) * fade;
 }
 
+// PHASE FUNCTIONS 
+
+// -(L . V) == (L . -V). -V here is our ray direction, which points away from the view 
+// instead of towards it (which would be the *view direction*, V)
+
+// evaluates the rayleigh phase function, which describes the likelihood
+// of a rayleigh scattering event scattering light from the light direction towards the view
+fn rayleigh_phase(neg_LdotV: f32) -> f32 {
+    return FRAC_3_16_PI * (neg_LdotV * neg_LdotV + 1);
+}
+
+// evaluates the henyey-greenstein phase function, which describes the likelihood
+// of a mie scattering event scattering light from the light direction towards the view
+fn henyey_greenstein_phase(neg_LdotV: f32, g: f32) -> f32 {
+    let denom = 1.0 + g * g - 2.0 * g * neg_LdotV;
+    return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
+}
 
 // TRANSFORM UTILITIES
 
