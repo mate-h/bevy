@@ -30,6 +30,7 @@
 // input for lut-based
 @group(0) @binding(2) var<uniform> view: View;
 @group(0) @binding(3) var<uniform> lights: Lights;
+@group(0) @binding(4) var<uniform> core_lut_settings: CoreLutSettings;
 @group(0) @binding(4) var<uniform> aux_lut_settings: AuxLutSettings;
 
 // luts
