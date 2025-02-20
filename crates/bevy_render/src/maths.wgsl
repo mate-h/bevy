@@ -1,10 +1,16 @@
 #define_import_path bevy_render::maths
 
-const PI: f32 = 3.141592653589793;      // π
-const PI_2: f32 = 6.283185307179586;    // 2π
-const HALF_PI: f32 = 1.57079632679;     // π/2
-const FRAC_PI_3: f32 = 1.0471975512;    // π/3
-const E: f32 = 2.718281828459045;       // exp(1)
+const PI: f32 = 3.141592653589793;       // π
+const PI_2: f32 = 6.283185307179586;     // 2π
+const HALF_PI: f32 = 1.57079632679;      // π/2
+const FRAC_PI_3: f32 = 1.0471975512;     // π/3
+const E: f32 = 2.718281828459045;        // exp(1)
+
+const FRAC_PI: f32 = 0.3183098862;       // 1 / π
+const FRAC_2_PI: f32 = 0.15915494309;    // 1 / (2π)
+const FRAC_3_16_PI: f32 = 0.05968310365; // 3 / (16π)
+const FRAC_4_PI: f32 = 0.07957747154;    // 1 / (4π)
+const ROOT_2: f32 = 1.41421356;          // √2
 
 fn affine2_to_square(affine: mat3x2<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(
@@ -89,6 +95,16 @@ fn sphere_intersects_plane_half_space(
     return dot(plane, sphere_center) + sphere_radius > 0.0;
 }
 
+
+// Returns the Lambert equal-area projection of the unit square [0, 1]^2 onto the unit sphere
+fn unit_square_to_sphere(uv: vec2<f32>) -> vec3<f32> {
+    let phi = PI_2 * uv.y;
+    let sin_lambda = 2 * uv.x - 1;
+    let cos_lambda = sqrt(1 - sin_lambda * sin_lambda);
+
+    return vec3(cos_lambda * cos(phi), cos_lambda * sin(phi), sin_lambda);
+}
+
 // pow() but safe for NaNs/negatives
 fn powsafe(color: vec3<f32>, power: f32) -> vec3<f32> {
     return pow(abs(color), vec3(power)) * sign(color);
@@ -153,4 +169,32 @@ fn fast_atan2(y: f32, x: f32) -> f32 {
     t3 = select(-t3, t3, y > 0);
 
     return t3;
+}
+
+// Low discrepancy sequences: given an index, these functions return a "random" value in [0, 1)^N. They're not purely random,
+// but behave like blue noise and are very cheap to compute on-demand. This makes them extremely good at tasks such as monte
+// carlo integration, unless there are better options available like importance sampling.
+
+// For each constant R_N below, the first entry is the unique real solution R of x^(n + 1) = x + 1. The following entries are
+// R^2, R^3, .. R^N. For more info read: https://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
+
+const R_1: f32       =      1.618033988749894848204586;
+const R_2: vec2<f32> = vec2(1.324717957244746025960908, 1.754877666246692760049508);
+const R_3: vec3<f32> = vec3(1.220744084605759475361685, 1.490216120099953648116386, 1.819172513396164439699571);
+const R_4: vec4<f32> = vec4(1.167303978261418684256045, 1.362598577664934624179556, 1.590566740481628865257057, 1.856674883854502874852324);
+
+fn r1_seq(n: u32) -> f32 {
+    return fract(0.5 * f32(n) * R_1)
+}
+
+fn r2_seq(n: u32) -> vec2<f32> {
+    return fract(0.5 + f32(n) * R_2);
+}
+
+fn r3_seq(n: u32) -> vec3<f32> {
+    return fract(0.5 + f32(n) * R_3);
+}
+
+fn r4_seq(n: u32) -> vec4<f32> {
+    return fract(0.5 * f32(n) * R_4);
 }

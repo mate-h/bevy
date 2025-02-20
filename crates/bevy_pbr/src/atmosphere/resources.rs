@@ -21,7 +21,9 @@ use bevy_render::{
 
 use crate::{GpuLights, LightMeta};
 
-use super::{shaders, Atmosphere, AtmosphereSettings, Planet, ScatteringProfile};
+use super::{
+    shaders, Atmosphere, AtmosphereSettings, LutBasedAtmosphereSettings, Planet, ScatteringProfile,
+};
 
 #[derive(Resource)]
 pub(crate) struct AtmosphereLayout {
@@ -50,7 +52,7 @@ impl FromWorld for AtmosphereLayout {
                     (0, storage_buffer::<GpuAtmosphere>(true)),
                     (
                         // transmittance lut storage texture
-                        8,
+                        9,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -66,11 +68,11 @@ impl FromWorld for AtmosphereLayout {
                 ShaderStages::COMPUTE,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (3, sampler(SamplerBindingType::Filtering)),
-                    (4, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
+                    (1, sampler(SamplerBindingType::Filtering)),
+                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (
                         // multiscattering lut storage texture
-                        8,
+                        9,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -86,14 +88,15 @@ impl FromWorld for AtmosphereLayout {
                 ShaderStages::COMPUTE,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<ViewUniform>(true)),
-                    (2, uniform_buffer::<GpuLights>(true)),
-                    (3, sampler(SamplerBindingType::Filtering)),
-                    (4, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
-                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
+                    (1, sampler(SamplerBindingType::Filtering)),
+                    (2, uniform_buffer::<ViewUniform>(true)),
+                    (3, uniform_buffer::<GpuLights>(true)),
+                    (4, uniform_buffer::<LutBasedAtmosphereSettings>(true)),
+                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
+                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
                     (
                         // multiscattering lut storage texture
-                        8,
+                        9,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -109,14 +112,15 @@ impl FromWorld for AtmosphereLayout {
                 ShaderStages::COMPUTE,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
+                    (3, sampler(SamplerBindingType::Filtering)),
                     (1, uniform_buffer::<ViewUniform>(true)),
                     (2, uniform_buffer::<GpuLights>(true)),
-                    (3, sampler(SamplerBindingType::Filtering)),
+                    (4, uniform_buffer::<LutBasedAtmosphereSettings>(true)),
                     (4, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
                     (
                         // multiscattering lut storage texture
-                        8,
+                        9,
                         texture_storage_3d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -153,14 +157,15 @@ impl FromWorld for RenderSkyLayout {
                 ShaderStages::FRAGMENT,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<ViewUniform>(true)),
-                    (2, uniform_buffer::<GpuLights>(true)),
-                    (3, sampler(SamplerBindingType::Filtering)),
-                    (4, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
-                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
-                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // sky view lut
-                    (7, texture_3d(TextureSampleType::Float { filterable: true })), // aerial view lut
-                    (8, texture_2d(TextureSampleType::Depth)), //view depth texture
+                    (1, sampler(SamplerBindingType::Filtering)),
+                    (2, uniform_buffer::<ViewUniform>(true)),
+                    (3, uniform_buffer::<GpuLights>(true)),
+                    (4, uniform_buffer::<LutBasedAtmosphereSettings>(true)),
+                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
+                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
+                    (7, texture_2d(TextureSampleType::Float { filterable: true })), // sky view lut
+                    (8, texture_3d(TextureSampleType::Float { filterable: true })), // aerial view lut
+                    (9, texture_2d(TextureSampleType::Depth)), //view depth texture
                 ),
             ),
         );
@@ -171,14 +176,15 @@ impl FromWorld for RenderSkyLayout {
                 ShaderStages::FRAGMENT,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<ViewUniform>(true)),
-                    (2, uniform_buffer::<GpuLights>(true)),
-                    (3, sampler(SamplerBindingType::Filtering)),
-                    (4, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
-                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
-                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // sky view lut
-                    (7, texture_3d(TextureSampleType::Float { filterable: true })), // aerial view lut
-                    (8, texture_2d_multisampled(TextureSampleType::Depth)), //view depth texture
+                    (1, sampler(SamplerBindingType::Filtering)),
+                    (2, uniform_buffer::<ViewUniform>(true)),
+                    (3, uniform_buffer::<GpuLights>(true)),
+                    (4, uniform_buffer::<LutBasedAtmosphereSettings>(true)),
+                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
+                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
+                    (7, texture_2d(TextureSampleType::Float { filterable: true })), // sky view lut
+                    (8, texture_3d(TextureSampleType::Float { filterable: true })), // aerial view lut
+                    (9, texture_2d_multisampled(TextureSampleType::Depth)), //view depth texture
                 ),
             ),
         );

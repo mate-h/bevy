@@ -1,3 +1,6 @@
+// This file contains utility functions for atmospherics that are either dependent on specific bindings,
+// or shouldn't be exposed in the public api. 
+
 // NOTE FOR CONVENTIONS: 
 // r:
 //   radius, or distance from planet center 
@@ -16,24 +19,25 @@
 //   frame. This enables the non-linear latitude parametrization the paper uses 
 //   to concentrate detail near the horizon 
 
+#import bevy_render::maths::{PI_2, FRAC_2_PI, FRAC_PI}
+
 // BINDINGS
 
-@group(0) @binding(0) var<uniform> view: View;
-@group(0) @binding(1) var<uniform> lights: Lights;
+// core bindings
 @group(0) @binding(0) var<storage> atmosphere: Atmosphere;
-@group(0) @binding(3) var atmo_sampler: sampler;
+@group(0) @binding(1) var atmosphere_sampler: sampler;
 
-@group(0) @binding(4) var transmittance_lut: texture_2d<f32>;
-@group(0) @binding(5) var multiscattering_lut: texture_2d<f32>;
+// input for lut-based
+@group(0) @binding(2) var<uniform> view: View;
+@group(0) @binding(3) var<uniform> lights: Lights;
+@group(0) @binding(4) var<uniform> aux_lut_settings: AuxLutSettings;
 
+// luts
+@group(0) @binding(5) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(6) var multiscattering_lut: texture_2d<f32>;
+@group(0) @binding(7) var sky_view_lut: texture_2d<f32>;
+@group(0) @binding(8) var aerial_view_lut: texture_2d<f32>;
 
-// CONSTANTS
-
-const FRAC_PI: f32 = 0.3183098862; // 1 / π
-const FRAC_2_PI: f32 = 0.15915494309;  // 1 / (2π)
-const FRAC_3_16_PI: f32 = 0.0596831036594607509; // 3 / (16π)
-const FRAC_4_PI: f32 = 0.07957747154594767; // 1 / (4π)
-const ROOT_2: f32 = 1.41421356; // √2
 
 // During raymarching, each segment is sampled at a single point. This constant determines
 // where in the segment that sample is taken (0.0 = start, 0.5 = middle, 1.0 = end).
@@ -41,6 +45,76 @@ const ROOT_2: f32 = 1.41421356; // √2
 // the exponential falloff of atmospheric density.
 const MIDPOINT_RATIO: f32 = 0.3;
 
+// LUT PARAMETRIZATION
+fn sky_view_lut_r_mu_azimuth_to_uv(r: f32, mu: f32, azimuth: f32) -> vec2<f32> {
+    let u = (azimuth * FRAC_2_PI) + 0.5;
+
+    // Horizon parameters
+    let v_horizon = sqrt(r * r - atmosphere.planet.bottom_radius_sq);
+    let cos_beta = v_horizon / r;
+    // Using fast_acos_4 for better precision at small angles
+    // to avoid artifacts at the horizon
+    let beta = fast_acos_4(cos_beta);
+    let horizon_zenith = PI - beta;
+    let view_zenith = fast_acos_4(mu);
+
+    // Apply non-linear transformation to compress more texels 
+    // near the horizon where high-frequency details matter most
+    // l is latitude in [-π/2, π/2] and v is texture coordinate in [0,1]
+    let l = view_zenith - horizon_zenith;
+    let abs_l = abs(l);
+
+    let v = 0.5 + 0.5 * sign(l) * sqrt(abs_l / HALF_PI);
+
+    return vec2(u, v);
+}
+
+fn sky_view_lut_uv_to_zenith_azimuth(r: f32, uv: vec2<f32>) -> vec2<f32> {
+    let adj_uv = vec2(uv.x, 1.0 - uv.y);
+    let azimuth = (adj_uv.x - 0.5) * PI_2;
+
+    // Horizon parameters
+    let v_horizon = sqrt(r * r - atmosphere.planet.bottom_radius_sq);
+    let cos_beta = v_horizon / r;
+    // Using fast_acos_4 for better precision at small angles
+    // to avoid artifacts at the horizon
+    let beta = fast_acos_4(cos_beta);
+    let horizon_zenith = PI - beta;
+
+    // Inverse of horizon-detail mapping to recover original latitude from texture coordinate
+    let t = abs(2.0 * (adj_uv.y - 0.5));
+    let l = sign(adj_uv.y - 0.5) * HALF_PI * t * t;
+
+    return vec2(horizon_zenith - l, azimuth);
+}
+
+// LUT SAMPLING 
+
+fn sample_sky_view_lut(r: f32, ray_dir_as: vec3<f32>) -> vec3<f32> {
+    let mu = ray_dir_as.y;
+    let azimuth = fast_atan2(ray_dir_as.x, -ray_dir_as.z);
+    let uv = sky_view_lut_r_mu_azimuth_to_uv(r, mu, azimuth);
+    return textureSampleLevel(sky_view_lut, atmosphere_sampler, uv, 0.0).rgb;
+}
+
+// RGB channels: total inscattered light along the camera ray to the current sample.
+// A channel: average transmittance across all wavelengths to the current sample.
+fn sample_aerial_view_lut(lut: texture_3d<f32>, smp: sampler, pos_ndc: vec3<f32>) -> vec4<f32> {
+    let view_pos = view.view_from_clip * vec4(pos_ndc, 1.0); //TODO: use transform fns to get dist to camera
+    let dist = length(view_pos.xyz / view_pos.w);
+    let t_max = aux_lut_settings.aerial_view_lut_max_distance;
+    let num_slices = f32(aux_lut_settings.aerial_view_lut_size.z);
+    // Offset the W coordinate by -0.5 over the max distance in order to 
+    // align sampling position with slice boundaries, since each texel 
+    // stores the integral over its entire slice
+    let uvw = vec3(uv, saturate(dist / t_max - 0.5 / num_slices));
+    let sample = textureSampleLevel(lut, smp, uvw, 0.0);
+    // Treat the first slice specially since there is 0 scattering at the camera
+    let delta_slice = t_max / num_slices;
+    let fade = saturate(dist / delta_slice);
+    // Recover the values from log space
+    return exp(sample.rgb) * fade;
+}
 
 // ATMOSPHERE SAMPLING
 
@@ -122,6 +196,7 @@ fn L_scattering(medium: Medium, ray_dir_ws: vec3<f32>, local_r: f32, local_up: v
 
 const SUN_ANGULAR_SIZE: f32 = 0.0174533; // angular diameter of sun in radians
 
+// evaluates the luminance from 
 fn L_sun(transmittance: vec3<f32>, r: f32, ray_dir_ws: vec3<f32>) -> vec3<f32> {
     let mu_view = ray_dir_ws.y;
     let shadow_factor = f32(!ray_intersects_ground(atmosphere.planet, r, mu_view));
@@ -180,4 +255,22 @@ fn uv_to_ndc(uv: vec2<f32>) -> vec2<f32> {
 /// Convert ndc space xy coordinate [-1.0 .. 1.0] to uv [0.0 .. 1.0]
 fn ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
     return ndc * vec2(0.5, -0.5) + vec2(0.5);
+}
+
+fn ndc_to_camera_dist(ndc: vec3<f32>) -> f32 {
+    let view_pos = view.view_from_clip * vec4(ndc, 1.0);
+    let t = length(view_pos.xyz / view_pos.w) * settings.scene_units_to_m;
+    return t;
+}
+
+/// Converts a direction in world space to atmosphere space
+fn direction_world_to_atmosphere(tf: AtmosphereTransforms, dir_ws: vec3<f32>) -> vec3<f32> {
+    let dir_as = tf.atmosphere_from_world * vec4(dir_ws, 0.0);
+    return dir_as.xyz;
+}
+
+/// Converts a direction in atmosphere space to world space
+fn direction_atmosphere_to_world(tf: AtmosphereTransforms, dir_as: vec3<f32>) -> vec3<f32> {
+    let dir_ws = tf.world_from_atmosphere * vec4(dir_as, 0.0);
+    return dir_ws.xyz;
 }

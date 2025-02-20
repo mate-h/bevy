@@ -1,8 +1,7 @@
 #define_import_path bevy_pbr::atmosphere::types
 
 struct Atmosphere {
-    profile: ScatteringProfile,
-    core_lut_settings: CoreLutSettings,
+    scattering_profile: ScatteringProfile,
     planet: Planet,
 }
 
