@@ -15,21 +15,10 @@
     }
 }
 
-#import bevy_render::maths::{PI,PI_2}
+#import bevy_render::maths::{PI, PI_2, r2_seq, unit_square_to_sphere}
 
 
 @group(0) @binding(13) var multiscattering_lut_out: texture_storage_2d<rgba16float, write>;
-
-
-
-// Lambert equal-area projection. 
-fn uv_to_sphere(uv: vec2<f32>) -> vec3<f32> {
-    let phi = PI_2 * uv.y;
-    let sin_lambda = 2 * uv.x - 1;
-    let cos_lambda = sqrt(1 - sin_lambda * sin_lambda);
-
-    return vec3(cos_lambda * cos(phi), cos_lambda * sin(phi), sin_lambda);
-}
 
 // Shared memory arrays for workgroup communication
 var<workgroup> multi_scat_shared_mem: array<vec3<f32>, 64>;
@@ -43,7 +32,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let r_mu = multiscattering_lut_uv_to_r_mu(uv);
     let light_dir = normalize(vec3(0.0, r_mu.y, -1.0));
 
-    let ray_dir = uv_to_sphere(s2_sequence(global_id.z));
+    let ray_dir = unit_square_to_sphere(r2_seq(global_id.z));
     let ms_sample = sample_multiscattering_dir(r_mu.x, ray_dir, light_dir);
     
     // Calculate the contribution for this sample
