@@ -3,6 +3,7 @@
 struct Atmosphere {
     scattering_profile: ScatteringProfile,
     planet: Planet,
+    core_lut_settings: CoreLutSettings,
 }
 
 struct ScatteringProfile {

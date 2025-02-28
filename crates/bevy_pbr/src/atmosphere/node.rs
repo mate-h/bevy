@@ -1,8 +1,12 @@
-use bevy_ecs::{query::QueryItem, system::lifetimeless::Read, world::World};
+use bevy_ecs::{
+    query::{Changed, Or, QueryItem, QueryState},
+    system::lifetimeless::Read,
+    world::World,
+};
 use bevy_math::{UVec2, Vec3Swizzles};
 use bevy_render::{
     extract_component::DynamicUniformIndex,
-    render_graph::{NodeRunError, RenderGraphContext, RenderLabel, ViewNode},
+    render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel, ViewNode},
     render_resource::{ComputePass, ComputePassDescriptor, PipelineCache, RenderPassDescriptor},
     renderer::RenderContext,
     view::{ViewTarget, ViewUniformOffset},
@@ -12,8 +16,8 @@ use crate::ViewLightsUniformOffset;
 
 use super::{
     resources::{
-        AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset,
-        RenderSkyPipelineId,
+        AtmosphereBindGroups, AtmosphereBuffers, AtmosphereCoreLuts, AtmosphereLutPipelines,
+        AtmosphereTransformsOffset, RenderSkyPipelineId,
     },
     AtmosphereMode, ScatteringProfile,
 };
@@ -24,10 +28,36 @@ pub enum AtmosphereNode {
     RenderSky,
 }
 
-#[derive(Default)]
-pub(super) struct AtmosphereLutsNode {}
+pub(super) struct AtmosphereCoreLutsNode {
+    query_state: QueryState<
+        (Read<AtmosphereCoreLuts>, Read<AtmosphereBindGroups>),
+        Or<(Changed<AtmosphereCoreLuts>, Changed<AtmosphereBindGroups>)>,
+    >,
+}
 
-impl ViewNode for AtmosphereLutsNode {
+impl AtmosphereCoreLutsNode {
+    pub fn render_core_luts(core_luts: &AtmospherCoreLuts, )
+}
+
+impl Node for AtmosphereCoreLutsNode {
+    fn run<'w>(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        
+    }
+
+    fn update(&mut self, _world: &mut World) {
+        self.query_state.update_archetypes(world);
+    }
+}
+
+#[derive(Default)]
+pub(super) struct AtmosphereAuxLutsNode {}
+
+impl ViewNode for AtmosphereAuxLutsNode {
     type ViewQuery = (
         Read<AtmosphereMode>,
         Read<AtmosphereBindGroups>,

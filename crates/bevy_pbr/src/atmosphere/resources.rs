@@ -64,6 +64,14 @@ pub struct AtmosphereBuffers {
     core_lut_settings: DynamicUniformBuffer<AtmosphereSettings>,
 }
 
+impl AtmosphereBuffers {}
+
+#[derive(Resource)]
+pub struct AtmosphereIndices {
+    atmosphere: u32,
+    core_lut_settings: u32,
+}
+
 pub(super) fn extract_atmospheres(
     removed: Extract<RemovedComponents<Atmosphere>>,
     atmospheres: Extract<
