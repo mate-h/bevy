@@ -1,10 +1,12 @@
+use bevy_asset::prelude::AssetChanged;
 use bevy_core_pipeline::{
     core_3d::Camera3d, fullscreen_vertex_shader::fullscreen_shader_vertex_state,
 };
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::{Changed, With},
+    query::{Changed, Or, With},
+    removal_detection::RemovedComponents,
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
     world::{FromWorld, World},
@@ -17,13 +19,66 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
     texture::{CachedTexture, TextureCache},
     view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
+    Extract,
 };
 
 use crate::{GpuLights, LightMeta};
 
-use super::{
-    shaders, Atmosphere, AtmosphereSettings, LutBasedAtmosphereSettings, Planet, ScatteringProfile,
-};
+use super::{shaders, Atmosphere, AtmosphereSettings, Planet, ScatteringProfile};
+
+#[derive(ShaderType)]
+struct GpuPlanet {
+    ground_albedo: Vec3,
+    lower_radius: f32,
+    lower_radius_sq: f32,
+    upper_radius: f32,
+    upper_radius_sq: f32,
+    space_altitude: f32,
+}
+
+#[derive(ShaderType)]
+struct GpuAtmosphere {
+    profile: ScatteringProfile,
+    planet: GpuPlanet,
+}
+
+impl From<Planet> for GpuPlanet {
+    fn from(planet: Planet) -> Self {
+        let lower_radius = planet.radius;
+        let upper_radius = lower_radius + planet.space_altitude;
+
+        Self {
+            ground_albedo: planet.ground_albedo.to_vec3(),
+            lower_radius,
+            lower_radius_sq: lower_radius * lower_radius,
+            upper_radius,
+            upper_radius_sq: upper_radius * upper_radius,
+            space_altitude: planet.space_altitude,
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct AtmosphereBuffers {
+    atmospheres: DynamicStorageBuffer<GpuAtmosphere>,
+    core_lut_settings: DynamicUniformBuffer<AtmosphereSettings>,
+}
+
+pub(super) fn extract_atmospheres(
+    removed: Extract<RemovedComponents<Atmosphere>>,
+    atmospheres: Extract<
+        Query<
+            (&Atmosphere, &AtmosphereSettings, &Planet),
+            Or<(
+                Changed<Atmosphere>,
+                AssetChanged<Atmosphere>,
+                Changed<AtmosphereSettings>,
+                Changed<Planet>,
+            )>,
+        >,
+    >,
+) {
+}
 
 #[derive(Resource)]
 pub(crate) struct AtmosphereLayout {
@@ -50,6 +105,7 @@ impl FromWorld for AtmosphereLayout {
                 ShaderStages::COMPUTE,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
+                    (4, uniform_buffer::<AtmosphereSettings>(true)),
                     (
                         // transmittance lut storage texture
                         9,
@@ -69,6 +125,7 @@ impl FromWorld for AtmosphereLayout {
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
+                    (4, uniform_buffer::<AtmosphereSettings>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (
                         // multiscattering lut storage texture

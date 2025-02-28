@@ -30,14 +30,14 @@
 // input for lut-based
 @group(0) @binding(2) var<uniform> view: View;
 @group(0) @binding(3) var<uniform> lights: Lights;
-@group(0) @binding(4) var<uniform> core_lut_settings: CoreLutSettings;
-@group(0) @binding(4) var<uniform> aux_lut_settings: AuxLutSettings;
+@group(0) @binding(5) var<uniform> core_lut_settings: CoreLutSettings;
+@group(0) @binding(6) var<uniform> aux_lut_settings: AuxLutSettings;
 
 // luts
-@group(0) @binding(5) var transmittance_lut: texture_2d<f32>;
-@group(0) @binding(6) var multiscattering_lut: texture_2d<f32>;
-@group(0) @binding(7) var sky_view_lut: texture_2d<f32>;
-@group(0) @binding(8) var aerial_view_lut: texture_2d<f32>;
+@group(0) @binding(6) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(7) var multiscattering_lut: texture_2d<f32>;
+@group(0) @binding(8) var sky_view_lut: texture_2d<f32>;
+@group(0) @binding(9) var aerial_view_lut: texture_2d<f32>;
 
 
 // During raymarching, each segment is sampled at a single point. This constant determines
@@ -100,7 +100,7 @@ fn sample_sky_view_lut(r: f32, ray_dir_as: vec3<f32>) -> vec3<f32> {
 
 // RGB channels: total inscattered light along the camera ray to the current sample.
 // A channel: average transmittance across all wavelengths to the current sample.
-fn sample_aerial_view_lut(lut: texture_3d<f32>, smp: sampler, pos_ndc: vec3<f32>) -> vec4<f32> {
+fn sample_aerial_view_lut(pos_ndc: vec3<f32>) -> vec4<f32> {
     let view_pos = view.view_from_clip * vec4(pos_ndc, 1.0); //TODO: use transform fns to get dist to camera
     let dist = length(view_pos.xyz / view_pos.w);
     let t_max = aux_lut_settings.aerial_view_lut_max_distance;
@@ -109,7 +109,7 @@ fn sample_aerial_view_lut(lut: texture_3d<f32>, smp: sampler, pos_ndc: vec3<f32>
     // align sampling position with slice boundaries, since each texel 
     // stores the integral over its entire slice
     let uvw = vec3(uv, saturate(dist / t_max - 0.5 / num_slices));
-    let sample = textureSampleLevel(lut, smp, uvw, 0.0);
+    let sample = textureSampleLevel(aerial_view_lut, atmosphere_sampler, uvw, 0.0);
     // Treat the first slice specially since there is 0 scattering at the camera
     let delta_slice = t_max / num_slices;
     let fade = saturate(dist / delta_slice);

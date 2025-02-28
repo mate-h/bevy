@@ -33,12 +33,15 @@ mod node;
 pub mod resources;
 
 use bevy_app::{App, Plugin};
-use bevy_asset::{load_internal_asset, weak_handle, Asset, AssetApp, Assets, Handle};
-use bevy_color::{Color, ColorToComponents, LinearRgba};
+use bevy_asset::{
+    load_internal_asset, weak_handle, AsAssetId, Asset, AssetApp, AssetId, Assets, Handle,
+};
+use bevy_color::LinearRgba;
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
     component::{require, Component},
-    resource::Resource,
+    entity::Entity,
+    reflect::ReflectComponent,
 };
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
@@ -47,6 +50,7 @@ use bevy_render::{
     render_graph::{RenderGraphApp, ViewNodeRunner},
     render_resource::{Shader, TextureFormat, TextureUsages},
     renderer::RenderAdapter,
+    sync_world::SyncToRenderWorld,
     Render, RenderApp, RenderSet,
 };
 use bevy_render::{
@@ -63,13 +67,11 @@ use resources::{
 };
 use tracing::warn;
 
-use crate::{light_consts::lux, DirectionalLight};
-
 use self::{
     node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
     resources::{
         prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereLayout,
-        AtmosphereLutPipelines, AtmosphereSamplers,
+        AtmosphereLutPipelines,
     },
 };
 
@@ -78,7 +80,7 @@ mod shaders {
     use bevy_render::render_resource::Shader;
 
     pub const TYPES: Handle<Shader> = weak_handle!("ef7e147e-30a0-4513-bae3-ddde2a6c20c5");
-    pub const COMMON: Handle<Shader> = weak_handle!("b95e172a-bebb-435f-bc76-ebba2e2baf62");
+    pub const INTERNAL: Handle<Shader> = weak_handle!("b95e172a-bebb-435f-bc76-ebba2e2baf62");
     pub const FUNCTIONS: Handle<Shader> = weak_handle!("7ff93872-2ee9-4598-9f88-68b02fef605f");
     pub const BRUNETON_FUNCTIONS: Handle<Shader> =
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
@@ -97,10 +99,12 @@ mod shaders {
 #[doc(hidden)]
 pub struct AtmospherePlugin;
 
+type Thing = ReflectComponent;
+
 impl Plugin for AtmospherePlugin {
     fn build(&self, app: &mut App) {
         load_internal_asset!(app, shaders::TYPES, "types.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::COMMON, "common.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::INTERNAL, "internal.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::FUNCTIONS, "functions.wgsl", Shader::from_wgsl);
         load_internal_asset!(
             app,
@@ -108,8 +112,6 @@ impl Plugin for AtmospherePlugin {
             "bruneton_functions.wgsl",
             Shader::from_wgsl
         );
-
-        load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
 
         load_internal_asset!(
             app,
@@ -152,11 +154,11 @@ impl Plugin for AtmospherePlugin {
             .insert(&ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
         app.register_type::<ScatteringProfile>()
-            .register_type::<LutBasedAtmosphereSettings>()
-            .add_plugins((
-                ExtractComponentPlugin::<LutBasedAtmosphereSettings>::default(),
-                UniformComponentPlugin::<LutBasedAtmosphereSettings>::default(),
-            ));
+            .register_type::<Atmosphere>()
+            .register_type::<AtmosphereSettings>()
+            .register_type::<AtmosphericScattering>()
+            .register_type::<AtmosphericScatteringCameras>()
+            .register_type::<AtmosphericScatteringSettings>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -254,7 +256,7 @@ pub struct Planet {
     /// planet's surface. This is used when calculating multiscattering.
     /// The alpha channel is ignored.
     ///
-    /// units: N/A
+    /// units: n/a
     pub ground_albedo: LinearRgba,
 }
 
@@ -269,32 +271,6 @@ impl Planet {
 impl Default for Planet {
     fn default() -> Self {
         Self::EARTH
-    }
-}
-
-#[derive(ShaderType)]
-struct GpuPlanet {
-    ground_albedo: Vec3,
-    lower_radius: f32,
-    lower_radius_sq: f32,
-    upper_radius: f32,
-    upper_radius_sq: f32,
-    space_altitude: f32,
-}
-
-impl From<Planet> for GpuPlanet {
-    fn from(planet: Planet) -> Self {
-        let lower_radius = planet.radius;
-        let upper_radius = lower_radius + planet.space_altitude;
-
-        Self {
-            ground_albedo: planet.ground_albedo.to_vec3(),
-            lower_radius,
-            lower_radius_sq: lower_radius * lower_radius,
-            upper_radius,
-            upper_radius_sq: upper_radius * upper_radius,
-            space_altitude: planet.space_altitude,
-        }
     }
 }
 
@@ -323,7 +299,7 @@ pub struct ScatteringProfile {
     ///
     /// THIS VALUE MUST BE POSITIVE
     ///
-    /// units: N/A
+    /// units: m^-1
     pub rayleigh_density_exp_scale: f32,
 
     /// The scattering optical density of rayleigh particulate, or how
@@ -337,7 +313,7 @@ pub struct ScatteringProfile {
     ///
     /// THIS VALUE MUST BE POSITIVE
     ///
-    /// units: N/A
+    /// units: m^-1
     pub mie_density_exp_scale: f32,
 
     /// The scattering optical density of mie particulate, or how much light
@@ -356,8 +332,8 @@ pub struct ScatteringProfile {
     /// forwards, rather than backwards or to the side.
     ///
     /// domain: (-1, 1)
-    /// units: N/A
-    pub mie_asymmetry: f32, //the "asymmetry" value of the phase function, unitless. Domain: (-1, 1)
+    /// units: n/a
+    pub mie_asymmetry: f32,
 
     /// The altitude at which the ozone layer is centered.
     ///
@@ -402,10 +378,25 @@ impl ScatteringProfile {
         self.ozone_absorption *= mult;
         self
     }
+
+    // Given a conversion factor, convert the scattering profile's values to a new unit of length
+    //
+    // Example: to convert from meters to kilometers, choose a factor of 1e-3.
+    pub fn with_length_unit(mut self, factor: f32) -> Self {
+        self.rayleigh_density_exp_scale /= factor; //TODO: check if exp scale should change with units
+        self.rayleigh_scattering /= factor;
+        self.mie_density_exp_scale /= factor;
+        self.mie_scattering /= factor;
+        self.mie_absorption /= factor;
+        self.ozone_layer_altitude *= factor;
+        self.ozone_layer_width *= factor;
+        self.ozone_absorption /= factor;
+        self
+    }
 }
 
-#[derive(Component)]
-#[require(AtmosphereSettings, Planet)]
+#[derive(Component, Clone, Reflect)]
+#[require(AtmosphereSettings, Planet, SyncToRenderWorld)]
 pub struct Atmosphere(pub Handle<ScatteringProfile>);
 
 impl Default for Atmosphere {
@@ -414,21 +405,17 @@ impl Default for Atmosphere {
     }
 }
 
-impl Atmosphere {
-    pub fn earth() -> Self {
-        Self(ScatteringProfile::earth())
+impl AsAssetId for Atmosphere {
+    type Asset = ScatteringProfile;
+
+    fn as_asset_id(&self) -> AssetId<Self::Asset> {
+        self.0.id()
     }
 }
 
-#[derive(Component)]
-pub enum AtmosphericScattering {
-    LutBased(LutBasedAtmosphereSettings),
-    RayMarched(RayMarchedAtmosphereSettings),
-}
-
-impl Default for AtmosphericScattering {
-    fn default() -> Self {
-        Self::LutBased(Default::default())
+impl Atmosphere {
+    pub fn earth() -> Self {
+        Self(ScatteringProfile::earth())
     }
 }
 
@@ -452,6 +439,17 @@ pub struct AtmosphereSettings {
     /// computing the multiscattering LUT.
     pub multiscattering_lut_samples: u32,
 }
+
+#[derive(Component, Clone, Reflect)]
+#[reflect(Component)]
+#[require(AtmosphericScatteringSettings)]
+#[relationship(relationship_target = AtmosphericScatteringCameras)]
+pub struct AtmosphericScattering(pub Entity);
+
+#[derive(Component, Clone, Reflect)]
+#[reflect(Component)]
+#[relationship_target(relationship = AtmosphericScattering)]
+pub struct AtmosphericScatteringCameras(Vec<Entity>);
 
 impl Default for AtmosphereSettings {
     fn default() -> Self {
@@ -483,8 +481,8 @@ impl Default for AtmosphereSettings {
 /// The aerial-view lut is a 3d LUT fit to the view frustum, which stores the luminance
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
-#[derive(Clone, Reflect, ShaderType)]
-pub struct LutBasedAtmosphereSettings {
+#[derive(Clone, Component, Reflect, ShaderType)]
+pub struct AtmosphericScatteringSettings {
     /// The size of the sky-view LUT.
     pub sky_view_lut_size: UVec2,
 
@@ -508,7 +506,7 @@ pub struct LutBasedAtmosphereSettings {
     pub aerial_view_lut_max_distance: f32,
 }
 
-impl Default for LutBasedAtmosphereSettings {
+impl Default for AtmosphericScatteringSettings {
     fn default() -> Self {
         Self {
             sky_view_lut_size: UVec2::new(400, 200),
@@ -517,48 +515,5 @@ impl Default for LutBasedAtmosphereSettings {
             aerial_view_lut_samples: 10,
             aerial_view_lut_max_distance: 3.2e4,
         }
-    }
-}
-
-#[derive(Clone, Reflect, ShaderType)]
-pub struct RayMarchedAtmosphereSettings {
-    sample_count: u32,
-    jitter_strength: f32,
-}
-
-//TODO: find good values
-impl Default for RayMarchedAtmosphereSettings {
-    fn default() -> Self {
-        Self {
-            sample_count: 16,
-            jitter_strength: 0.2,
-        }
-    }
-}
-
-#[derive(Component)]
-#[require(DirectionalLight(Self::default_light))]
-pub struct Sun {
-    /// The angular size (or diameter) of the sun when viewed from the surface of a planet.
-    pub angular_size: f32,
-}
-
-impl Sun {
-    pub const SOL: Self = Self {
-        angular_size: 0.0174533,
-    };
-
-    pub fn default_light() -> DirectionalLight {
-        DirectionalLight {
-            color: Color::WHITE,
-            illuminance: lux::RAW_SUNLIGHT,
-            ..Default::default()
-        }
-    }
-}
-
-impl Default for Sun {
-    fn default() -> Self {
-        Self::SOL
     }
 }

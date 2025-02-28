@@ -4,7 +4,10 @@ use std::f32::consts::PI;
 
 use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
-    pbr::{light_consts::lux, Atmosphere, AtmosphereMode, CascadeShadowConfigBuilder},
+    pbr::{
+        light_consts::lux, Atmosphere, AtmosphericScattering, AtmosphericScatteringSettings,
+        CascadeShadowConfigBuilder, ScatteringProfile,
+    },
     prelude::*,
     render::camera::Exposure,
 };
@@ -17,7 +20,14 @@ fn main() {
         .run();
 }
 
-fn setup_camera_fog(mut commands: Commands) {
+fn setup_camera_fog(
+    mut commands: Commands,
+    scattering_profiles: ResMut<Assets<ScatteringProfile>>,
+) {
+    // should prefer `Atmosphere::earth()` in most cases, unless a custom atmosphere or length
+    // scale is desired.
+    let profile = scattering_profiles.add(ScatteringProfile::EARTH::with_length_unit(1e-4));
+    let atmosphere = commands.spawn(Atmosphere(profile)).id();
     commands.spawn((
         Camera3d::default(),
         // HDR is required for atmospheric scattering to be properly applied to the scene
@@ -27,13 +37,9 @@ fn setup_camera_fog(mut commands: Commands) {
         },
         Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
-        Atmosphere::EARTH,
-        // The scene is in units of 10km, so we need to scale up the
-        // aerial view lut distance and set the scene scale accordingly.
-        // Most usages of this feature will not need to adjust this.
-        AtmosphereMode {
+        AtmosphericScattering(atmosphere),
+        AtmosphericScatteringSettings {
             aerial_view_lut_max_distance: 3.2e5,
-            scene_units_to_m: 1e+4,
             ..Default::default()
         },
         // The directional light illuminance  used in this scene
