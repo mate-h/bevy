@@ -29,6 +29,8 @@
 //!
 //! [Unreal Engine Implementation]: https://github.com/sebh/UnrealEngineSkyAtmosphere
 
+mod core;
+mod lut_based;
 mod node;
 pub mod resources;
 
@@ -37,7 +39,6 @@ use bevy_asset::{
     load_internal_asset, weak_handle, AsAssetId, Asset, AssetApp, AssetId, Assets, Handle,
 };
 use bevy_color::LinearRgba;
-use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
     component::{require, Component},
     entity::Entity,
@@ -46,18 +47,15 @@ use bevy_ecs::{
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
-    extract_component::ExtractComponentPlugin,
-    render_graph::{RenderGraphApp, ViewNodeRunner},
+    render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
+    renderer::RenderDevice,
+    settings::WgpuFeatures,
+};
+use bevy_render::{
     render_resource::{Shader, TextureFormat, TextureUsages},
     renderer::RenderAdapter,
     sync_world::SyncToRenderWorld,
     Render, RenderApp, RenderSet,
-};
-use bevy_render::{
-    extract_component::UniformComponentPlugin,
-    render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
-    renderer::RenderDevice,
-    settings::WgpuFeatures,
 };
 
 use bevy_core_pipeline::core_3d::graph::Core3d;
@@ -67,12 +65,9 @@ use resources::{
 };
 use tracing::warn;
 
-use self::{
-    node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
-    resources::{
-        prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereLayout,
-        AtmosphereLutPipelines,
-    },
+use self::resources::{
+    prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereLayout,
+    AtmosphereLutPipelines,
 };
 
 mod shaders {
@@ -84,22 +79,10 @@ mod shaders {
     pub const FUNCTIONS: Handle<Shader> = weak_handle!("7ff93872-2ee9-4598-9f88-68b02fef605f");
     pub const BRUNETON_FUNCTIONS: Handle<Shader> =
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
-    pub const BINDINGS: Handle<Shader> = weak_handle!("bcc55ce5-0fc4-451e-8393-1b9efd2612c4");
-
-    pub const TRANSMITTANCE_LUT: Handle<Shader> =
-        weak_handle!("a4187282-8cb1-42d3-889c-cbbfb6044183");
-    pub const MULTISCATTERING_LUT: Handle<Shader> =
-        weak_handle!("bde3a71a-73e9-49fe-a379-a81940c67a1e");
-    pub const SKY_VIEW_LUT: Handle<Shader> = weak_handle!("f87e007a-bf4b-4f99-9ef0-ac21d369f0e5");
-    pub const AERIAL_VIEW_LUT: Handle<Shader> =
-        weak_handle!("a3daf030-4b64-49ae-a6a7-354489597cbe");
-    pub const RENDER_SKY: Handle<Shader> = weak_handle!("09422f46-d0f7-41c1-be24-121c17d6e834");
 }
 
 #[doc(hidden)]
 pub struct AtmospherePlugin;
-
-type Thing = ReflectComponent;
 
 impl Plugin for AtmospherePlugin {
     fn build(&self, app: &mut App) {
@@ -110,41 +93,6 @@ impl Plugin for AtmospherePlugin {
             app,
             shaders::BRUNETON_FUNCTIONS,
             "bruneton_functions.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            shaders::TRANSMITTANCE_LUT,
-            "transmittance_lut.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            shaders::MULTISCATTERING_LUT,
-            "multiscattering_lut.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            shaders::SKY_VIEW_LUT,
-            "sky_view_lut.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            shaders::AERIAL_VIEW_LUT,
-            "aerial_view_lut.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            shaders::RENDER_SKY,
-            "render_sky.wgsl",
             Shader::from_wgsl
         );
 
@@ -196,8 +144,6 @@ impl Plugin for AtmospherePlugin {
         }
 
         render_app
-            .init_resource::<AtmosphereLayout>()
-            .init_resource::<RenderSkyLayout>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyLayout>>()
@@ -209,31 +155,6 @@ impl Plugin for AtmospherePlugin {
                     prepare_atmosphere_textures.in_set(RenderSet::PrepareResources),
                     prepare_atmosphere_transforms.in_set(RenderSet::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSet::PrepareBindGroups),
-                ),
-            )
-            .add_render_graph_node::<ViewNodeRunner<AtmosphereLutsNode>>(
-                Core3d,
-                AtmosphereNode::RenderLuts,
-            )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    // END_PRE_PASSES -> RENDER_LUTS -> MAIN_PASS
-                    Node3d::EndPrepasses,
-                    AtmosphereNode::RenderLuts,
-                    Node3d::StartMainPass,
-                ),
-            )
-            .add_render_graph_node::<ViewNodeRunner<RenderSkyNode>>(
-                Core3d,
-                AtmosphereNode::RenderSky,
-            )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::MainOpaquePass,
-                    AtmosphereNode::RenderSky,
-                    Node3d::MainTransparentPass,
                 ),
             );
     }

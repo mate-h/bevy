@@ -1,63 +1,14 @@
-use bevy_ecs::{
-    query::{Changed, Or, QueryItem, QueryState},
-    system::lifetimeless::Read,
-    world::World,
-};
-use bevy_math::{UVec2, Vec3Swizzles};
-use bevy_render::{
-    extract_component::DynamicUniformIndex,
-    render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel, ViewNode},
-    render_resource::{ComputePass, ComputePassDescriptor, PipelineCache, RenderPassDescriptor},
-    renderer::RenderContext,
-    view::{ViewTarget, ViewUniformOffset},
-};
+use bevy_render::render_graph::ViewNode;
 
-use crate::ViewLightsUniformOffset;
-
-use super::{
-    resources::{
-        AtmosphereBindGroups, AtmosphereBuffers, AtmosphereCoreLuts, AtmosphereLutPipelines,
-        AtmosphereTransformsOffset, RenderSkyPipelineId,
-    },
-    AtmosphereMode, ScatteringProfile,
-};
-
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
-pub enum AtmosphereNode {
-    RenderLuts,
-    RenderSky,
-}
-
-pub(super) struct AtmosphereCoreLutsNode {
-    query_state: QueryState<
-        (Read<AtmosphereCoreLuts>, Read<AtmosphereBindGroups>),
-        Or<(Changed<AtmosphereCoreLuts>, Changed<AtmosphereBindGroups>)>,
-    >,
-}
-
-impl AtmosphereCoreLutsNode {
-    pub fn render_core_luts(core_luts: &AtmospherCoreLuts, )
-}
-
-impl Node for AtmosphereCoreLutsNode {
-    fn run<'w>(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        
-    }
-
-    fn update(&mut self, _world: &mut World) {
-        self.query_state.update_archetypes(world);
-    }
+pub enum Nodes {
+    Luts,
+    Apply,
 }
 
 #[derive(Default)]
-pub(super) struct AtmosphereAuxLutsNode {}
+pub struct LutsNode;
 
-impl ViewNode for AtmosphereAuxLutsNode {
+impl ViewNode for LutsNode {
     type ViewQuery = (
         Read<AtmosphereMode>,
         Read<AtmosphereBindGroups>,
@@ -184,9 +135,9 @@ impl ViewNode for AtmosphereAuxLutsNode {
 }
 
 #[derive(Default)]
-pub(super) struct RenderSkyNode;
+pub(super) struct ApplyNode;
 
-impl ViewNode for RenderSkyNode {
+impl ViewNode for ApplyNode {
     type ViewQuery = (
         Read<AtmosphereBindGroups>,
         Read<ViewTarget>,

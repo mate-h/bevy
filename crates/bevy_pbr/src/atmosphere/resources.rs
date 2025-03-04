@@ -26,38 +26,6 @@ use crate::{GpuLights, LightMeta};
 
 use super::{shaders, Atmosphere, AtmosphereSettings, Planet, ScatteringProfile};
 
-#[derive(ShaderType)]
-struct GpuPlanet {
-    ground_albedo: Vec3,
-    lower_radius: f32,
-    lower_radius_sq: f32,
-    upper_radius: f32,
-    upper_radius_sq: f32,
-    space_altitude: f32,
-}
-
-#[derive(ShaderType)]
-struct GpuAtmosphere {
-    profile: ScatteringProfile,
-    planet: GpuPlanet,
-}
-
-impl From<Planet> for GpuPlanet {
-    fn from(planet: Planet) -> Self {
-        let lower_radius = planet.radius;
-        let upper_radius = lower_radius + planet.space_altitude;
-
-        Self {
-            ground_albedo: planet.ground_albedo.to_vec3(),
-            lower_radius,
-            lower_radius_sq: lower_radius * lower_radius,
-            upper_radius,
-            upper_radius_sq: upper_radius * upper_radius,
-            space_altitude: planet.space_altitude,
-        }
-    }
-}
-
 #[derive(Resource)]
 pub struct AtmosphereBuffers {
     atmospheres: DynamicStorageBuffer<GpuAtmosphere>,
@@ -89,63 +57,17 @@ pub(super) fn extract_atmospheres(
 }
 
 #[derive(Resource)]
-pub(crate) struct AtmosphereLayout {
-    pub transmittance_lut: BindGroupLayout,
-    pub multiscattering_lut: BindGroupLayout,
+pub struct Layout {
     pub sky_view_lut: BindGroupLayout,
     pub aerial_view_lut: BindGroupLayout,
-    pub sampler: Sampler,
-}
-
-#[derive(Resource)]
-pub(crate) struct RenderSkyLayout {
     pub render_sky: BindGroupLayout,
     pub render_sky_msaa: BindGroupLayout,
     pub sampler: Sampler,
 }
 
-impl FromWorld for AtmosphereLayout {
+impl FromWorld for Layout {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
-        let transmittance_lut = render_device.create_bind_group_layout(
-            "transmittance_lut_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::COMPUTE,
-                (
-                    (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (4, uniform_buffer::<AtmosphereSettings>(true)),
-                    (
-                        // transmittance lut storage texture
-                        9,
-                        texture_storage_2d(
-                            TextureFormat::Rgba16Float,
-                            StorageTextureAccess::WriteOnly,
-                        ),
-                    ),
-                ),
-            ),
-        );
-
-        let multiscattering_lut = render_device.create_bind_group_layout(
-            "multiscattering_lut_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::COMPUTE,
-                (
-                    (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (1, sampler(SamplerBindingType::Filtering)),
-                    (4, uniform_buffer::<AtmosphereSettings>(true)),
-                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
-                    (
-                        // multiscattering lut storage texture
-                        9,
-                        texture_storage_2d(
-                            TextureFormat::Rgba16Float,
-                            StorageTextureAccess::WriteOnly,
-                        ),
-                    ),
-                ),
-            ),
-        );
 
         let sky_view_lut = render_device.create_bind_group_layout(
             "sky_view_lut_bind_group_layout",
@@ -195,27 +117,6 @@ impl FromWorld for AtmosphereLayout {
             ),
         );
 
-        let sampler = render_device.create_sampler(&SamplerDescriptor {
-            label: Some("atmosphere_sampler"),
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            lod_max_clamp: 0.0,
-            ..Default::default()
-        });
-
-        Self {
-            transmittance_lut,
-            multiscattering_lut,
-            sky_view_lut,
-            aerial_view_lut,
-            sampler,
-        }
-    }
-}
-
-impl FromWorld for RenderSkyLayout {
-    fn from_world(world: &mut World) -> Self {
-        let render_device = world.resource::<RenderDevice>();
         let render_sky = render_device.create_bind_group_layout(
             "render_sky_bind_group_layout",
             &BindGroupLayoutEntries::with_indices(
@@ -257,6 +158,8 @@ impl FromWorld for RenderSkyLayout {
         let sampler = world.resource::<AtmosphereLayout>().sampler.clone();
 
         Self {
+            sky_view_lut,
+            aerial_view_lut,
             render_sky,
             render_sky_msaa,
             sampler,
@@ -571,80 +474,6 @@ pub(super) fn prepare_atmosphere_textures(
                 sky_view_lut,
                 aerial_view_lut,
             }
-        });
-    }
-}
-
-#[derive(Resource, Default)]
-pub struct AtmosphereTransforms {
-    uniforms: DynamicUniformBuffer<AtmosphereTransform>,
-}
-
-impl AtmosphereTransforms {
-    #[inline]
-    pub fn uniforms(&self) -> &DynamicUniformBuffer<AtmosphereTransform> {
-        &self.uniforms
-    }
-}
-
-#[derive(ShaderType)]
-pub struct AtmosphereTransform {
-    world_from_atmosphere: Mat4,
-    atmosphere_from_world: Mat4,
-}
-
-#[derive(Component)]
-pub struct AtmosphereTransformsOffset {
-    index: u32,
-}
-
-impl AtmosphereTransformsOffset {
-    #[inline]
-    pub fn index(&self) -> u32 {
-        self.index
-    }
-}
-
-pub(super) fn prepare_atmosphere_transforms(
-    views: Query<(Entity, &ExtractedView), (With<ScatteringProfile>, With<Camera3d>)>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
-    mut atmo_uniforms: ResMut<AtmosphereTransforms>,
-    mut commands: Commands,
-) {
-    let atmo_count = views.iter().len();
-    let Some(mut writer) =
-        atmo_uniforms
-            .uniforms
-            .get_writer(atmo_count, &render_device, &render_queue)
-    else {
-        return;
-    };
-
-    for (entity, view) in &views {
-        let world_from_view = view.world_from_view.compute_matrix();
-        let camera_z = world_from_view.z_axis.truncate();
-        let camera_y = world_from_view.y_axis.truncate();
-        let atmo_z = camera_z
-            .with_y(0.0)
-            .try_normalize()
-            .unwrap_or_else(|| camera_y.with_y(0.0).normalize());
-        let atmo_y = Vec3::Y;
-        let atmo_x = atmo_y.cross(atmo_z).normalize();
-        let world_from_atmosphere = Mat4::from_cols(
-            atmo_x.extend(0.0),
-            atmo_y.extend(0.0),
-            atmo_z.extend(0.0),
-            world_from_view.w_axis,
-        );
-
-        let atmosphere_from_world = world_from_atmosphere.inverse();
-
-        commands.entity(entity).insert(AtmosphereTransformsOffset {
-            index: writer.write(&AtmosphereTransform {
-                world_from_atmosphere,
-                atmosphere_from_world,
-            }),
         });
     }
 }
