@@ -28,10 +28,10 @@
 @group(0) @binding(1) var atmosphere_sampler: sampler;
 
 // input for lut-based
-@group(0) @binding(2) var<uniform> view: View;
-@group(0) @binding(3) var<uniform> lights: Lights;
-@group(0) @binding(5) var<uniform> core_lut_settings: CoreLutSettings;
-@group(0) @binding(6) var<uniform> aux_lut_settings: AuxLutSettings;
+@group(0) @binding(3) var<uniform> view: View;
+@group(0) @binding(4) var<uniform> lights: Lights;
+@group(0) @binding(1) var<uniform> core_settings: CoreSettings;
+@group(0) @binding(5) var<uniform> lut_based_settings: LutBasedSettings;
 
 // luts
 @group(0) @binding(6) var transmittance_lut: texture_2d<f32>;
@@ -103,8 +103,8 @@ fn sample_sky_view_lut(r: f32, ray_dir_as: vec3<f32>) -> vec3<f32> {
 fn sample_aerial_view_lut(pos_ndc: vec3<f32>) -> vec4<f32> {
     let view_pos = view.view_from_clip * vec4(pos_ndc, 1.0); //TODO: use transform fns to get dist to camera
     let dist = length(view_pos.xyz / view_pos.w);
-    let t_max = aux_lut_settings.aerial_view_lut_max_distance;
-    let num_slices = f32(aux_lut_settings.aerial_view_lut_size.z);
+    let t_max = lut_based_settings.aerial_view_lut_max_distance;
+    let num_slices = f32(lut_based_settings.aerial_view_lut_size.z);
     // Offset the W coordinate by -0.5 over the max distance in order to 
     // align sampling position with slice boundaries, since each texel 
     // stores the integral over its entire slice

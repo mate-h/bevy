@@ -27,7 +27,7 @@ var<workgroup> l_shared_mem: array<vec3<f32>, 64>;
 @compute 
 @workgroup_size(1, 1, 64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    var uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(settings.multiscattering_lut_size);
+    var uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(core_settings.multiscattering_lut_size);
 
     let r_mu = multiscattering_lut_uv_to_r_mu(uv);
     let light_dir = normalize(vec3(0.0, r_mu.y, -1.0));
@@ -75,12 +75,12 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
     let mu_view = ray_dir.y;
     let t_max = max_atmosphere_distance(r, mu_view);
 
-    let dt = t_max / f32(settings.multiscattering_lut_samples);
+    let dt = t_max / f32(core_settings.multiscattering_lut_samples);
 
     var l_2 = vec3(0.0);
     var f_ms = vec3(0.0);
     var throughput = vec3(1.0);
-    for (var i: u32 = 0u; i < settings.multiscattering_lut_samples; i++) {
+    for (var i: u32 = 0u; i < core_settings.multiscattering_lut_samples; i++) {
         let t_i = dt * (f32(i) + 0.5);
         let local_r = get_local_r(r, mu_view, t_i);
         let local_up = get_local_up(r, t_i, ray_dir);

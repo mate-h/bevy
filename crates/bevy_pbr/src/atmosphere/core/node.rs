@@ -1,4 +1,8 @@
-use bevy_ecs::{query::QueryState, system::lifetimeless::Read, world::World};
+use bevy_ecs::{
+    query::QueryState,
+    system::lifetimeless::Read,
+    world::{FromWorld, World},
+};
 use bevy_render::{
     render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
     render_resource::{ComputePassDescriptor, PipelineCache},
@@ -12,6 +16,13 @@ pub struct LutsLabel;
 
 pub(super) struct LutsNode {
     query_state: QueryState<(Read<core::Settings>, Read<core::BindGroups>)>,
+}
+
+impl FromWorld for LutsNode {
+    fn from_world(world: &mut World) -> Self {
+        let query_state = world.query::<(Read<core::Settings>, Read<core::BindGroups>)>();
+        Self { query_state }
+    }
 }
 
 impl Node for LutsNode {

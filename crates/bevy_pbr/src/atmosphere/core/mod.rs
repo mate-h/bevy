@@ -77,7 +77,7 @@ impl Plugin for CoreAtmospherePlugin {
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
             )
-            .add_render_graph_node::<ViewNodeRunner<node::LutsNode>>(Core3d, node::LutsLabel)
+            .add_render_graph_node::<node::LutsNode>(Core3d, node::LutsLabel)
             .add_render_graph_edges(Core3d, (node::LutsLabel, CameraDriverLabel));
     }
 }

@@ -14,12 +14,12 @@
 @compute 
 @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
-    let uv: vec2<f32> = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(settings.transmittance_lut_size);
+    let uv: vec2<f32> = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(core_settings.transmittance_lut_size);
     // map UV coordinates to view height (r) and zenith cos angle (mu)
     let r_mu = transmittance_lut_uv_to_r_mu(uv);
 
     // compute the optical depth from view height r to the top atmosphere boundary
-    let optical_depth = ray_optical_depth(r_mu.x, r_mu.y, settings.transmittance_lut_samples);
+    let optical_depth = ray_optical_depth(r_mu.x, r_mu.y, core_settings.transmittance_lut_samples);
     let transmittance = exp(-optical_depth);
 
     textureStore(transmittance_lut_out, idx.xy, vec4(transmittance, 1.0));
