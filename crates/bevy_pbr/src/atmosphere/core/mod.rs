@@ -11,7 +11,7 @@ use bevy_ecs::{
     system::{Commands, Query, Res},
     world::{FromWorld, World},
 };
-use bevy_math::Vec3;
+use bevy_math::{UVec2, Vec3};
 use bevy_render::{
     graph::CameraDriverLabel,
     render_graph::{RenderGraphApp, ViewNodeRunner},
@@ -29,7 +29,7 @@ use bevy_render::{
     Render, RenderApp, RenderSet,
 };
 
-use super::{Atmosphere, AtmosphereSettings, Planet, ScatteringProfile};
+use super::{Atmosphere, Planet, ScatteringProfile};
 
 mod node;
 
@@ -41,6 +41,39 @@ mod shaders {
         weak_handle!("a4187282-8cb1-42d3-889c-cbbfb6044183");
     pub const MULTISCATTERING_LUT: Handle<Shader> =
         weak_handle!("bde3a71a-73e9-49fe-a379-a81940c67a1e");
+}
+
+#[derive(Clone, Reflect, Component, ShaderType)]
+pub struct Settings {
+    /// The size of the transmittance LUT
+    pub transmittance_lut_size: UVec2,
+
+    /// The size of the multiscattering LUT
+    pub multiscattering_lut_size: UVec2,
+
+    /// The number of points to sample along each ray when
+    /// computing the transmittance LUT
+    pub transmittance_lut_samples: u32,
+
+    /// The number of rays to sample when computing each
+    /// pixel of the multiscattering LUT
+    pub multiscattering_lut_dirs: u32,
+
+    /// The number of points to sample along each ray when
+    /// computing the multiscattering LUT.
+    pub multiscattering_lut_samples: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            transmittance_lut_size: UVec2::new(256, 128),
+            multiscattering_lut_size: UVec2::new(32, 32),
+            transmittance_lut_samples: 40,
+            multiscattering_lut_dirs: 64,
+            multiscattering_lut_samples: 20,
+        }
+    }
 }
 
 pub struct CoreAtmospherePlugin;
@@ -300,7 +333,7 @@ fn prepare_bind_groups(
         let transmittance_lut = render_device.create_bind_group(
             "transmittance_lut_bind_group",
             &layout.transmittance_lut,
-            &BindGroupEntries::with_indices((todo!())),
+            &BindGroupEntries::with_indices((,)),
         );
 
         let multiscattering_lut = render_device.create_bind_group(

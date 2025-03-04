@@ -1,3 +1,5 @@
+mod core;
+
 //! Procedural Atmospheric Scattering.
 //!
 //! This plugin implements [Hillaire's 2020 paper](https://sebh.github.io/publications/egsr2020.pdf)
@@ -340,26 +342,6 @@ impl Atmosphere {
     }
 }
 
-#[derive(Clone, Reflect, Component, ShaderType)]
-pub struct AtmosphereSettings {
-    /// The size of the transmittance LUT
-    pub transmittance_lut_size: UVec2,
-
-    /// The size of the multiscattering LUT
-    pub multiscattering_lut_size: UVec2,
-
-    /// The number of points to sample along each ray when
-    /// computing the transmittance LUT
-    pub transmittance_lut_samples: u32,
-
-    /// The number of rays to sample when computing each
-    /// pixel of the multiscattering LUT
-    pub multiscattering_lut_dirs: u32,
-
-    /// The number of points to sample along each ray when
-    /// computing the multiscattering LUT.
-    pub multiscattering_lut_samples: u32,
-}
 
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component)]
@@ -372,17 +354,7 @@ pub struct AtmosphericScattering(pub Entity);
 #[relationship_target(relationship = AtmosphericScattering)]
 pub struct AtmosphericScatteringCameras(Vec<Entity>);
 
-impl Default for AtmosphereSettings {
-    fn default() -> Self {
-        Self {
-            transmittance_lut_size: UVec2::new(256, 128),
-            multiscattering_lut_size: UVec2::new(32, 32),
-            transmittance_lut_samples: 40,
-            multiscattering_lut_dirs: 64,
-            multiscattering_lut_samples: 20,
-        }
-    }
-}
+
 
 /// This component controls the resolution of the atmosphere LUTs, and
 /// how many samples are used when computing them.
