@@ -51,10 +51,10 @@ impl Node for LutsNode {
 
         core_luts_pass.set_pipeline(&transmittance_lut_pipeline);
 
-        for (core_luts, core_lut_bind_groups) in &self.query_state.query_manual(world) {
+        for (core_settings, core_bind_groups) in &self.query_state.query_manual(world) {
             core_luts_pass.set_bind_group(
                 0,
-                core_lut_bind_groups.transmittance_lut,
+                &core_bind_groups.transmittance_lut,
                 &[todo!("uniform offsets!!!!!!")],
             );
 
@@ -63,10 +63,10 @@ impl Node for LutsNode {
 
         core_luts_pass.set_pipeline(&multiscattering_lut_pipeline);
 
-        for (core_luts, core_lut_bind_groups) in &self.query_state.query_manual(world) {
+        for (core_settings, core_bind_groups) in &self.query_state.query_manual(world) {
             core_luts_pass.set_bind_group(
                 0,
-                core_lut_bind_groups.transmittance_lut,
+                &core_bind_groups.multiscattering_lut,
                 &[todo!("uniform offsets!!!!!!")],
             );
 

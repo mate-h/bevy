@@ -12,6 +12,7 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_math::{UVec2, Vec3};
+use bevy_reflect::Reflect;
 use bevy_render::{
     graph::CameraDriverLabel,
     render_graph::{RenderGraphApp, ViewNodeRunner},
@@ -318,9 +319,9 @@ fn prepare_luts(
 }
 
 #[derive(Component)]
-struct BindGroups {
-    transmittance_lut: BindGroup,
-    multiscattering_lut: BindGroup,
+pub struct BindGroups {
+    pub transmittance_lut: BindGroup,
+    pub multiscattering_lut: BindGroup,
 }
 
 fn prepare_bind_groups(
