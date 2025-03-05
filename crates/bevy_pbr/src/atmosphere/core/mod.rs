@@ -1,11 +1,12 @@
 use bevy_app::{App, Plugin};
-use bevy_asset::load_internal_asset;
+use bevy_asset::{load_internal_asset, Assets};
 use bevy_color::ColorToComponents;
 use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
     query::With,
+    removal_detection::RemovedComponents,
     resource::Resource,
     schedule::IntoSystemConfigs,
     system::{Commands, Query, Res, ResMut},
@@ -19,14 +20,15 @@ use bevy_render::{
     render_resource::{
         binding_types::{sampler, storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
-        CachedComputePipelineId, ComputePipelineDescriptor, Extent3d, FilterMode, PipelineCache,
-        Sampler, SamplerBindingType, SamplerDescriptor, Shader, ShaderStages, ShaderType,
-        StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureSampleType, TextureUsages,
+        CachedComputePipelineId, ComputePipelineDescriptor, DynamicStorageBuffer,
+        DynamicUniformBuffer, Extent3d, FilterMode, PipelineCache, Sampler, SamplerBindingType,
+        SamplerDescriptor, Shader, ShaderStages, ShaderType, StorageTextureAccess,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
     },
     renderer::RenderDevice,
+    sync_world::RenderEntity,
     texture::{CachedTexture, TextureCache},
-    Render, RenderApp, RenderSet,
+    Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
 
 use super::{Atmosphere, Planet, ScatteringProfile};
@@ -70,6 +72,7 @@ impl Plugin for CoreAtmospherePlugin {
         render_app
             .init_resource::<Layout>()
             .init_resource::<Pipelines>()
+            .add_systems(ExtractSchedule, extract_atmospheres)
             .add_systems(
                 Render,
                 (
@@ -145,6 +148,42 @@ impl From<Planet> for GpuPlanet {
 struct GpuAtmosphere {
     profile: ScatteringProfile,
     planet: GpuPlanet,
+}
+
+#[derive(Resource)]
+pub struct Uniforms {
+    atmospheres: DynamicStorageBuffer<GpuAtmosphere>,
+    settings: DynamicUniformBuffer<Settings>,
+}
+
+#[derive(Resource)]
+pub struct UniformIndex(pub u32);
+
+pub fn extract_atmospheres(
+    atmospheres: Extract<Query<(RenderEntity, &Atmosphere, &Settings, &Planet)>>,
+    scattering_profiles: Extract<Assets<ScatteringProfile>>,
+    mut uniforms: ResMut<Uniforms>,
+    mut commands: Commands,
+) {
+    uniforms.atmospheres.clear();
+    uniforms.settings.clear();
+
+    for (render_entity, atmosphere, settings, planet) in &atmospheres {
+        let profile = scattering_profiles.get(atmosphere.0.id());
+        let gpu_atmosphere = GpuAtmosphere {
+            profile,
+            planet: planet.clone().into(),
+        };
+
+        //since we're extracting both at once, we can assume their indices are the same
+        let atmospheres_index = uniforms.atmospheres.push(gpu_atmosphere);
+        let settings_index = uniforms.settings.push(settings);
+        debug_assert_eq(atmospheres_index, settings_index);
+
+        commands
+            .entity(render_entity)
+            .insert((settings.clone(), UniformIndex(atmospheres_index)));
+    }
 }
 
 #[derive(Resource)]
