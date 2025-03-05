@@ -27,10 +27,10 @@
 @group(0) @binding(0) var<storage> atmosphere: Atmosphere;
 @group(0) @binding(1) var atmosphere_sampler: sampler;
 
-// input for lut-based
-@group(0) @binding(3) var<uniform> view: View;
-@group(0) @binding(4) var<uniform> lights: Lights;
-@group(0) @binding(1) var<uniform> core_settings: CoreSettings;
+// uniform bindings 
+@group(0) @binding(2) var<uniform> view: View;
+@group(0) @binding(3) var<uniform> lights: Lights;
+@group(0) @binding(4) var<uniform> core_settings: CoreSettings;
 @group(0) @binding(5) var<uniform> lut_based_settings: LutBasedSettings;
 
 // luts

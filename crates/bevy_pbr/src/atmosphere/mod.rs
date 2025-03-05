@@ -1,5 +1,3 @@
-mod core;
-
 //! Procedural Atmospheric Scattering.
 //!
 //! This plugin implements [Hillaire's 2020 paper](https://sebh.github.io/publications/egsr2020.pdf)
@@ -33,8 +31,6 @@ mod core;
 
 mod core;
 mod lut_based;
-mod node;
-pub mod resources;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{
@@ -45,11 +41,12 @@ use bevy_ecs::{
     component::{require, Component},
     entity::Entity,
     reflect::ReflectComponent,
+    schedule::IntoSystemConfigs,
 };
-use bevy_math::{UVec2, UVec3, Vec3};
+use bevy_math::Vec3;
 use bevy_reflect::Reflect;
 use bevy_render::{
-    render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
+    render_resource::{DownlevelFlags, ShaderType},
     renderer::RenderDevice,
     settings::WgpuFeatures,
 };
@@ -60,17 +57,7 @@ use bevy_render::{
     Render, RenderApp, RenderSet,
 };
 
-use bevy_core_pipeline::core_3d::graph::Core3d;
-use resources::{
-    prepare_atmosphere_transforms, queue_render_sky_pipelines, AtmosphereTransforms,
-    RenderSkyLayout,
-};
 use tracing::warn;
-
-use self::resources::{
-    prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereLayout,
-    AtmosphereLutPipelines,
-};
 
 mod shaders {
     use bevy_asset::{weak_handle, Handle};
@@ -82,6 +69,11 @@ mod shaders {
     pub const BRUNETON_FUNCTIONS: Handle<Shader> =
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
 }
+
+pub use core::{Luts as CoreAtmosphereLuts, Settings as AtmosphereSettings};
+pub use lut_based::{
+    Luts as LutBasedAtmosphereLuts, Settings as LutBasedAtmosphericScatteringSettings,
+};
 
 #[doc(hidden)]
 pub struct AtmospherePlugin;
@@ -99,16 +91,14 @@ impl Plugin for AtmospherePlugin {
         );
 
         app.init_asset::<ScatteringProfile>();
-        app.world()
+        app.world_mut()
             .resource_mut::<Assets<ScatteringProfile>>()
             .insert(&ScatteringProfile::EARTH_HANDLE, ScatteringProfile::EARTH);
 
         app.register_type::<ScatteringProfile>()
             .register_type::<Atmosphere>()
-            .register_type::<AtmosphereSettings>()
             .register_type::<AtmosphericScattering>()
-            .register_type::<AtmosphericScatteringCameras>()
-            .register_type::<AtmosphericScatteringSettings>();
+            .register_type::<AtmosphericScatteringCameras>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -145,20 +135,16 @@ impl Plugin for AtmospherePlugin {
             return;
         }
 
-        render_app
-            .init_resource::<AtmosphereLutPipelines>()
-            .init_resource::<AtmosphereTransforms>()
-            .init_resource::<SpecializedRenderPipelines<RenderSkyLayout>>()
-            .add_systems(
-                Render,
-                (
-                    configure_camera_depth_usages.in_set(RenderSet::ManageViews),
-                    queue_render_sky_pipelines.in_set(RenderSet::Queue),
-                    prepare_atmosphere_textures.in_set(RenderSet::PrepareResources),
-                    prepare_atmosphere_transforms.in_set(RenderSet::PrepareResources),
-                    prepare_atmosphere_bind_groups.in_set(RenderSet::PrepareBindGroups),
-                ),
-            );
+        render_app.add_systems(
+            Render,
+            (
+                configure_camera_depth_usages.in_set(RenderSet::ManageViews),
+                // queue_render_sky_pipelines.in_set(RenderSet::Queue),
+                // prepare_atmosphere_textures.in_set(RenderSet::PrepareResources),
+                // prepare_atmosphere_transforms.in_set(RenderSet::PrepareResources),
+                // prepare_atmosphere_bind_groups.in_set(RenderSet::PrepareBindGroups),
+            ),
+        );
     }
 }
 
@@ -306,7 +292,7 @@ impl ScatteringProfile {
     //
     // Example: to convert from meters to kilometers, choose a factor of 1e-3.
     pub fn with_length_unit(mut self, factor: f32) -> Self {
-        self.rayleigh_density_exp_scale /= factor; //TODO: check if exp scale should change with units
+        self.rayleigh_density_exp_scale /= factor;
         self.rayleigh_scattering /= factor;
         self.mie_density_exp_scale /= factor;
         self.mie_scattering /= factor;
@@ -342,7 +328,6 @@ impl Atmosphere {
     }
 }
 
-
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component)]
 #[require(AtmosphericScatteringSettings)]
@@ -354,59 +339,17 @@ pub struct AtmosphericScattering(pub Entity);
 #[relationship_target(relationship = AtmosphericScattering)]
 pub struct AtmosphericScatteringCameras(Vec<Entity>);
 
-
-
-/// This component controls the resolution of the atmosphere LUTs, and
-/// how many samples are used when computing them.
-///
-/// The transmittance LUT stores the transmittance from a point in the
-/// atmosphere to the outer edge of the atmosphere in any direction,
-/// parametrized by the point's radius and the cosine of the zenith angle
-/// of the ray.
-///
-/// The multiscattering LUT stores the factor representing luminance scattered
-/// towards the camera with scattering order >2, parametrized by the point's radius
-/// and the cosine of the zenith angle of the sun.
-///
-/// The sky-view lut is essentially the actual skybox, storing the light scattered
-/// towards the camera in every direction with a cubemap.
-///
-/// The aerial-view lut is a 3d LUT fit to the view frustum, which stores the luminance
-/// scattered towards the camera at each point (RGB channels), alongside the average
-/// transmittance to that point (A channel).
-#[derive(Clone, Component, Reflect, ShaderType)]
-pub struct AtmosphericScatteringSettings {
-    /// The size of the sky-view LUT.
-    pub sky_view_lut_size: UVec2,
-
-    /// The number of points to sample along each ray when
-    /// computing the sky-view LUT.
-    pub sky_view_lut_samples: u32,
-
-    /// The number of points to sample for each slice along the z-axis
-    /// of the aerial-view LUT.
-    pub aerial_view_lut_samples: u32,
-
-    /// The size of the aerial-view LUT.
-    pub aerial_view_lut_size: UVec3,
-
-    /// The maximum distance from the camera to evaluate the
-    /// aerial view LUT. The slices along the z-axis of the
-    /// texture will be distributed linearly from the camera
-    /// to this value.
-    ///
-    /// units: m
-    pub aerial_view_lut_max_distance: f32,
+#[derive(Component, Clone, Reflect)]
+#[reflect(Component)]
+pub enum AtmosphericScatteringSettings {
+    LutBased(LutBasedAtmosphericScatteringSettings),
+    //this is an enum so that raytracing support can be added without a breaking change
 }
 
 impl Default for AtmosphericScatteringSettings {
     fn default() -> Self {
-        Self {
-            sky_view_lut_size: UVec2::new(400, 200),
-            sky_view_lut_samples: 16,
-            aerial_view_lut_size: UVec3::new(32, 32, 32),
-            aerial_view_lut_samples: 10,
-            aerial_view_lut_max_distance: 3.2e4,
-        }
+        Self::LutBased(Default::default())
     }
 }
+
+fn configure_camera_depth_usages() {} //TODO:

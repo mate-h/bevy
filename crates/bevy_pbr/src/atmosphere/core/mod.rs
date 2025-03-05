@@ -8,25 +8,24 @@ use bevy_ecs::{
     query::With,
     resource::Resource,
     schedule::IntoSystemConfigs,
-    system::{Commands, Query, Res},
+    system::{Commands, Query, Res, ResMut},
     world::{FromWorld, World},
 };
 use bevy_math::{UVec2, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
     graph::CameraDriverLabel,
-    render_graph::{RenderGraphApp, ViewNodeRunner},
+    render_graph::RenderGraphApp,
     render_resource::{
         binding_types::{sampler, storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
-        CachedComputePipelineId, ComputePipelineDescriptor, DownlevelFlags, Extent3d, FilterMode,
-        PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, Shader, ShaderStages,
-        ShaderType, StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureSampleType, TextureUsages, TextureViewDescriptor,
+        CachedComputePipelineId, ComputePipelineDescriptor, Extent3d, FilterMode, PipelineCache,
+        Sampler, SamplerBindingType, SamplerDescriptor, Shader, ShaderStages, ShaderType,
+        StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureSampleType, TextureUsages,
     },
-    renderer::{RenderAdapter, RenderDevice},
-    settings::WgpuFeatures,
-    texture::CachedTexture,
+    renderer::RenderDevice,
+    texture::{CachedTexture, TextureCache},
     Render, RenderApp, RenderSet,
 };
 
@@ -42,39 +41,6 @@ mod shaders {
         weak_handle!("a4187282-8cb1-42d3-889c-cbbfb6044183");
     pub const MULTISCATTERING_LUT: Handle<Shader> =
         weak_handle!("bde3a71a-73e9-49fe-a379-a81940c67a1e");
-}
-
-#[derive(Clone, Reflect, Component, ShaderType)]
-pub struct Settings {
-    /// The size of the transmittance LUT
-    pub transmittance_lut_size: UVec2,
-
-    /// The size of the multiscattering LUT
-    pub multiscattering_lut_size: UVec2,
-
-    /// The number of points to sample along each ray when
-    /// computing the transmittance LUT
-    pub transmittance_lut_samples: u32,
-
-    /// The number of rays to sample when computing each
-    /// pixel of the multiscattering LUT
-    pub multiscattering_lut_dirs: u32,
-
-    /// The number of points to sample along each ray when
-    /// computing the multiscattering LUT.
-    pub multiscattering_lut_samples: u32,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            transmittance_lut_size: UVec2::new(256, 128),
-            multiscattering_lut_size: UVec2::new(32, 32),
-            transmittance_lut_samples: 40,
-            multiscattering_lut_dirs: 64,
-            multiscattering_lut_samples: 20,
-        }
-    }
 }
 
 pub struct CoreAtmospherePlugin;
@@ -116,6 +82,39 @@ impl Plugin for CoreAtmospherePlugin {
     }
 }
 
+#[derive(Clone, Reflect, Component, ShaderType)]
+pub struct Settings {
+    /// The size of the transmittance LUT
+    pub transmittance_lut_size: UVec2,
+
+    /// The size of the multiscattering LUT
+    pub multiscattering_lut_size: UVec2,
+
+    /// The number of points to sample along each ray when
+    /// computing the transmittance LUT
+    pub transmittance_lut_samples: u32,
+
+    /// The number of rays to sample when computing each
+    /// pixel of the multiscattering LUT
+    pub multiscattering_lut_dirs: u32,
+
+    /// The number of points to sample along each ray when
+    /// computing the multiscattering LUT.
+    pub multiscattering_lut_samples: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            transmittance_lut_size: UVec2::new(256, 128),
+            multiscattering_lut_size: UVec2::new(32, 32),
+            transmittance_lut_samples: 40,
+            multiscattering_lut_dirs: 64,
+            multiscattering_lut_samples: 20,
+        }
+    }
+}
+
 #[derive(ShaderType)]
 struct GpuPlanet {
     ground_albedo: Vec3,
@@ -124,12 +123,6 @@ struct GpuPlanet {
     upper_radius: f32,
     upper_radius_sq: f32,
     space_altitude: f32,
-}
-
-#[derive(ShaderType, Component)]
-struct GpuAtmosphere {
-    profile: ScatteringProfile,
-    planet: GpuPlanet,
 }
 
 impl From<Planet> for GpuPlanet {
@@ -148,6 +141,12 @@ impl From<Planet> for GpuPlanet {
     }
 }
 
+#[derive(ShaderType, Component)]
+struct GpuAtmosphere {
+    profile: ScatteringProfile,
+    planet: GpuPlanet,
+}
+
 #[derive(Resource)]
 pub struct Layout {
     pub transmittance_lut: BindGroupLayout,
@@ -164,10 +163,10 @@ impl FromWorld for Layout {
                 ShaderStages::COMPUTE,
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (4, uniform_buffer::<AtmosphereSettings>(true)),
+                    (4, uniform_buffer::<Settings>(true)),
                     (
                         // transmittance lut storage texture
-                        9,
+                        10,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -184,11 +183,11 @@ impl FromWorld for Layout {
                 (
                     (0, storage_buffer::<GpuAtmosphere>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
-                    (4, uniform_buffer::<AtmosphereSettings>(true)),
-                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
+                    (4, uniform_buffer::<Settings>(true)),
+                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (
                         // multiscattering lut storage texture
-                        9,
+                        10,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -260,60 +259,51 @@ pub struct Luts {
 }
 
 fn prepare_luts(
-    atmospheres: Query<(Entity, &AtmosphereSettings), (With<Planet>, With<Atmosphere>)>,
+    atmospheres: Query<(Entity, &Settings), (With<Planet>, With<Atmosphere>)>,
     render_device: Res<RenderDevice>,
+    mut texture_cache: ResMut<TextureCache>,
     mut commands: Commands,
 ) {
     for (entity, settings) in &atmospheres {
-        let transmittance_lut = render_device.create_texture(&TextureDescriptor {
-            label: Some("transmittance_lut"),
-            size: Extent3d {
-                width: settings.transmittance_lut_size.x,
-                height: settings.transmittance_lut_size.y,
-                depth_or_array_layers: 1,
+        let transmittance_lut = texture_cache.get(
+            &render_device,
+            TextureDescriptor {
+                label: Some("transmittance_lut"),
+                size: Extent3d {
+                    width: settings.transmittance_lut_size.x,
+                    height: settings.transmittance_lut_size.y,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba16Float,
-            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        );
 
-        let transmittance_lut_view = transmittance_lut.create_view(&TextureViewDescriptor {
-            label: Some("transmittance_lut_view"),
-            ..Default::default()
-        });
-
-        let multiscattering_lut = render_device.create_texture(&TextureDescriptor {
-            label: Some("multiscattering_lut"),
-            size: Extent3d {
-                width: settings.multiscattering_lut_size.x,
-                height: settings.multiscattering_lut_size.y,
-                depth_or_array_layers: 1,
+        let multiscattering_lut = texture_cache.get(
+            &render_device,
+            TextureDescriptor {
+                label: Some("multiscattering_lut"),
+                size: Extent3d {
+                    width: settings.multiscattering_lut_size.x,
+                    height: settings.multiscattering_lut_size.y,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba16Float,
-            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let multiscattering_lut_view = multiscattering_lut.create_view(&TextureViewDescriptor {
-            label: Some("multiscattering_lut_view"),
-            ..Default::default()
-        });
+        );
 
         commands.entity(entity).insert(Luts {
-            transmittance_lut: CachedTexture {
-                texture: transmittance_lut,
-                default_view: transmittance_lut_view,
-            },
-            multiscattering_lut: CachedTexture {
-                texture: multiscattering_lut,
-                default_view: multiscattering_lut_view,
-            },
+            transmittance_lut,
+            multiscattering_lut,
         });
     }
 }
@@ -330,22 +320,32 @@ fn prepare_bind_groups(
     layout: Res<Layout>,
     mut commands: Commands,
 ) {
-    for (entity, core_luts) in &atmospheres {
+    for (entity, core_luts, gpu_atmosphere) in &atmospheres {
         let transmittance_lut = render_device.create_bind_group(
             "transmittance_lut_bind_group",
             &layout.transmittance_lut,
-            &BindGroupEntries::with_indices((,)),
+            &BindGroupEntries::with_indices((
+                (0, todo!()), //TODO: MAKE ATMOSPHERE STORAGE BUFFER
+                (4, todo!()), //TODO: MAKE CORE SETTINGS UNIFORM BUFFER
+                (10, &core_luts.transmittance_lut.default_view),
+            )),
         );
 
         let multiscattering_lut = render_device.create_bind_group(
             "multiscattering_lut_bind_group",
             &layout.multiscattering_lut,
-            &BindGroupEntries::with_indices((todo!())),
+            &BindGroupEntries::with_indices((
+                (0, todo!()), //TODO: MAKE ATMOSPHERE STORAGE BUFFER
+                (1, &layout.sampler),
+                (4, todo!()), //TODO: MAKE CORE SETTINGS UNIFORM BUFFER
+                (6, &core_luts.transmittance_lut.default_view),
+                (10, &core_luts.multiscattering_lut.default_view),
+            )),
         );
 
         commands.entity(entity).insert(BindGroups {
             transmittance_lut,
             multiscattering_lut,
-        })
+        });
     }
 }

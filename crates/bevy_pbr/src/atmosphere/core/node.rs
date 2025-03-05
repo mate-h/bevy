@@ -28,7 +28,7 @@ impl FromWorld for LutsNode {
 impl Node for LutsNode {
     fn run<'w>(
         &self,
-        graph: &mut RenderGraphContext,
+        _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
