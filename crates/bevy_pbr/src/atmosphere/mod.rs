@@ -70,7 +70,10 @@ mod shaders {
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
 }
 
-pub use core::{Luts as CoreAtmosphereLuts, Settings as AtmosphereSettings};
+pub use core::{
+    Luts as CoreAtmosphereLuts, Settings as AtmosphereSettings,
+    UniformIndex as AtmosphereUniformIndex, Uniforms as AtmosphereUniforms,
+};
 pub use lut_based::{
     Luts as LutBasedAtmosphereLuts, Settings as LutBasedAtmosphericScatteringSettings,
 };

@@ -1,9 +1,7 @@
 use bevy_render::render_graph::ViewNode;
 
-pub enum Nodes {
-    Luts,
-    Apply,
-}
+#[derive(RenderLabel)]
+pub struct LutsLabel;
 
 #[derive(Default)]
 pub struct LutsNode;
@@ -134,10 +132,13 @@ impl ViewNode for LutsNode {
     }
 }
 
-#[derive(Default)]
-pub(super) struct ApplyNode;
+#[derive(RenderLabel)]
+pub struct ResolveLabel;
 
-impl ViewNode for ApplyNode {
+#[derive(Default)]
+pub(super) struct ResolveNode;
+
+impl ViewNode for ResolveNode {
     type ViewQuery = (
         Read<AtmosphereBindGroups>,
         Read<ViewTarget>,

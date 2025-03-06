@@ -26,6 +26,7 @@ use bevy_render::{
         TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
     },
     renderer::RenderDevice,
+    settings,
     sync_world::RenderEntity,
     texture::{CachedTexture, TextureCache},
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
@@ -86,6 +87,7 @@ impl Plugin for CoreAtmospherePlugin {
 }
 
 #[derive(Clone, Reflect, Component, ShaderType)]
+#[type_path = "bevy_pbr::atmosphere::AtmosphereSettings"]
 pub struct Settings {
     /// The size of the transmittance LUT
     pub transmittance_lut_size: UVec2,
@@ -145,15 +147,15 @@ impl From<Planet> for GpuPlanet {
 }
 
 #[derive(ShaderType, Component)]
-struct GpuAtmosphere {
+pub struct GpuAtmosphere {
     profile: ScatteringProfile,
     planet: GpuPlanet,
 }
 
 #[derive(Resource)]
 pub struct Uniforms {
-    atmospheres: DynamicStorageBuffer<GpuAtmosphere>,
-    settings: DynamicUniformBuffer<Settings>,
+    pub atmospheres: DynamicStorageBuffer<GpuAtmosphere>,
+    pub settings: DynamicUniformBuffer<Settings>,
 }
 
 #[derive(Resource)]
@@ -356,16 +358,26 @@ pub struct BindGroups {
 fn prepare_bind_groups(
     atmospheres: Query<(Entity, &Luts, &GpuAtmosphere)>,
     render_device: Res<RenderDevice>,
+    uniforms: Res<Uniforms>,
     layout: Res<Layout>,
     mut commands: Commands,
 ) {
+    let atmosphere_binding = uniforms
+        .atmospheres
+        .binding()
+        .expect("Failed to prepare atmosphere bind groups. Atmosphere storage buffer missing");
+
+    let settings_binding = uniforms.settings.binding().expect(
+        "Failed to prepare atmosphere bind groups. Atmosphere settings uniform buffer missing",
+    );
+
     for (entity, core_luts, gpu_atmosphere) in &atmospheres {
         let transmittance_lut = render_device.create_bind_group(
             "transmittance_lut_bind_group",
             &layout.transmittance_lut,
             &BindGroupEntries::with_indices((
-                (0, todo!()), //TODO: MAKE ATMOSPHERE STORAGE BUFFER
-                (4, todo!()), //TODO: MAKE CORE SETTINGS UNIFORM BUFFER
+                (0, &atmosphere_binding),
+                (4, &settings_binding),
                 (10, &core_luts.transmittance_lut.default_view),
             )),
         );
@@ -374,9 +386,9 @@ fn prepare_bind_groups(
             "multiscattering_lut_bind_group",
             &layout.multiscattering_lut,
             &BindGroupEntries::with_indices((
-                (0, todo!()), //TODO: MAKE ATMOSPHERE STORAGE BUFFER
+                (0, &atmosphere_binding),
                 (1, &layout.sampler),
-                (4, todo!()), //TODO: MAKE CORE SETTINGS UNIFORM BUFFER
+                (4, &settings_binding),
                 (6, &core_luts.transmittance_lut.default_view),
                 (10, &core_luts.multiscattering_lut.default_view),
             )),
