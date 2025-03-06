@@ -310,7 +310,7 @@ impl FromWorld for Layout {
             ),
         );
 
-        let resolve = render_device.create_bind_group_layout(
+        let resolve_msaa = render_device.create_bind_group_layout(
             "resolve_bind_group_layout",
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,

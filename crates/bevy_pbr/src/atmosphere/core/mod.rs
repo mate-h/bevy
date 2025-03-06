@@ -158,12 +158,12 @@ pub struct Uniforms {
     pub settings: DynamicUniformBuffer<Settings>,
 }
 
-#[derive(Resource)]
+#[derive(Component)]
 pub struct UniformIndex(pub u32);
 
 pub fn extract_atmospheres(
     atmospheres: Extract<Query<(RenderEntity, &Atmosphere, &Settings, &Planet)>>,
-    scattering_profiles: Extract<Assets<ScatteringProfile>>,
+    scattering_profiles: Extract<Res<Assets<ScatteringProfile>>>,
     mut uniforms: ResMut<Uniforms>,
     mut commands: Commands,
 ) {
@@ -171,10 +171,13 @@ pub fn extract_atmospheres(
     uniforms.settings.clear();
 
     for (render_entity, atmosphere, settings, planet) in &atmospheres {
-        let profile = scattering_profiles.get(atmosphere.0.id());
+        let Some(profile) = scattering_profiles.get(atmosphere.0.id()).cloned() else {
+            continue; //TODO: check this doesn't cause problems
+        };
+        let planet: Planet = planet.clone();
         let gpu_atmosphere = GpuAtmosphere {
             profile,
-            planet: planet.clone().into(),
+            planet: planet.into(),
         };
 
         //since we're extracting both at once, we can assume their indices are the same

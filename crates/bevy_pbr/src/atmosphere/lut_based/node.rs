@@ -1,21 +1,13 @@
-use bevy_render::render_graph::ViewNode;
+use bevy_render::render_graph::{RenderLabel, ViewNode};
 
-#[derive(RenderLabel)]
+#[derive(PartialEq, Eq, Hash, Debug, RenderLabel)]
 pub struct LutsLabel;
 
 #[derive(Default)]
 pub struct LutsNode;
 
 impl ViewNode for LutsNode {
-    type ViewQuery = (
-        Read<AtmosphereMode>,
-        Read<AtmosphereBindGroups>,
-        Read<DynamicUniformIndex<ScatteringProfile>>,
-        Read<DynamicUniformIndex<AtmosphereMode>>,
-        Read<AtmosphereTransformsOffset>,
-        Read<ViewUniformOffset>,
-        Read<ViewLightsUniformOffset>,
-    );
+    type ViewQuery = ();
 
     fn run(
         &self,
@@ -132,7 +124,7 @@ impl ViewNode for LutsNode {
     }
 }
 
-#[derive(RenderLabel)]
+#[derive(PartialEq, Eq, Hash, Debug, RenderLabel)]
 pub struct ResolveLabel;
 
 #[derive(Default)]
