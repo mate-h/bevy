@@ -27,7 +27,7 @@ use bevy_render::{
     },
     renderer::RenderDevice,
     settings,
-    sync_world::RenderEntity,
+    sync_world::{RenderEntity, TemporaryRenderEntity},
     texture::{CachedTexture, TextureCache},
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
@@ -78,6 +78,7 @@ impl Plugin for CoreAtmospherePlugin {
                 Render,
                 (
                     prepare_luts.in_set(RenderSet::PrepareAssets),
+                    prepare_uniforms.in_set(RenderSet::PrepareAssets),
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
             )
@@ -174,21 +175,26 @@ pub fn extract_atmospheres(
         let Some(profile) = scattering_profiles.get(atmosphere.0.id()).cloned() else {
             continue; //TODO: check this doesn't cause problems
         };
-        let planet: Planet = planet.clone();
         let gpu_atmosphere = GpuAtmosphere {
             profile,
-            planet: planet.into(),
+            planet: planet.clone().into(),
         };
 
         //since we're extracting both at once, we can assume their indices are the same
         let atmospheres_index = uniforms.atmospheres.push(gpu_atmosphere);
         let settings_index = uniforms.settings.push(settings);
-        debug_assert_eq(atmospheres_index, settings_index);
+        debug_assert_eq!(atmospheres_index, settings_index);
 
-        commands
-            .entity(render_entity)
-            .insert((settings.clone(), UniformIndex(atmospheres_index)));
+        commands.entity(render_entity).insert((
+            settings.clone(),
+            UniformIndex(atmospheres_index),
+            TemporaryRenderEntity,
+        ));
     }
+}
+
+pub fn prepare_uniforms() {
+    todo!()
 }
 
 #[derive(Resource)]

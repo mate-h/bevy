@@ -33,8 +33,6 @@ impl FromWorld for LutsNode {
     }
 }
 
-const WORKGROUP_SIZE: u32 = 16;
-
 impl Node for LutsNode {
     fn run<'w>(
         &self,
@@ -66,6 +64,7 @@ impl Node for LutsNode {
         {
             core_luts_pass.set_bind_group(0, &core_bind_groups.transmittance_lut, &[*idx, *idx]);
 
+            const WORKGROUP_SIZE: u32 = 16;
             let workgroups_x = core_settings
                 .transmittance_lut_size
                 .x

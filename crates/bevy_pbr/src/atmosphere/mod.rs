@@ -151,7 +151,7 @@ impl Plugin for AtmospherePlugin {
     }
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, PartialEq)]
 pub struct Planet {
     /// Radius of the planet
     ///
