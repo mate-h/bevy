@@ -143,18 +143,18 @@ bitflags! {
 
 impl fmt::Display for AtmospherePluginInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GPU lacks support for: ");
+        write!(f, "GPU lacks support for: ")?;
 
         if self.contains(AtmospherePluginInitError::NO_DUAL_SOURCE_BLENDING) {
-            write!(f, "dual-source blending, ");
+            write!(f, "dual-source blending, ")?;
         }
 
         if self.contains(AtmospherePluginInitError::NO_COMPUTE) {
-            write!(f, "compute shaders, ");
+            write!(f, "compute shaders, ")?;
         }
 
         if self.contains(AtmospherePluginInitError::NO_RGBA_16_FLOAT_STORAGE) {
-            write!(f, "Rgba16Float storage textures");
+            write!(f, "Rgba16Float storage textures")?;
         }
 
         Ok(())

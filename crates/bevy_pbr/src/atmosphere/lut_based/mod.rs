@@ -88,8 +88,6 @@ impl Plugin for LutBasedAtmospherePlugin {
         );
 
         app.register_type::<Settings>()
-            .init_resource::<Layout>()
-            .init_resource::<Pipelines>()
             .add_plugins(UniformComponentPlugin::<Uniforms>::default());
     }
 
@@ -105,6 +103,8 @@ impl Plugin for LutBasedAtmospherePlugin {
         }
 
         render_app
+            .init_resource::<Layout>()
+            .init_resource::<Pipelines>()
             .add_systems(
                 Render,
                 (
@@ -114,8 +114,8 @@ impl Plugin for LutBasedAtmospherePlugin {
                 ),
             )
             .add_render_graph_node::<node::LutsNode>(Core3d, node::LutsLabel)
-            .add_render_graph_edges(Core3d, (node::LutsLabel, node::ResolveLabel))
             .add_render_graph_node::<node::ResolveNode>(Core3d, node::ResolveLabel)
+            .add_render_graph_edges(Core3d, (node::LutsLabel, node::ResolveLabel))
             .add_render_graph_edges(
                 Core3d,
                 (Node3d::EndMainPass, node::ResolveLabel, Node3d::Tonemapping),

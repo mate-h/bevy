@@ -6,7 +6,7 @@ use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
     pbr::{
         light_consts::lux, Atmosphere, AtmosphericScattering, AtmosphericScatteringSettings,
-        CascadeShadowConfigBuilder, ScatteringProfile,
+        CascadeShadowConfigBuilder, LutBasedAtmosphericScatteringSettings, ScatteringProfile,
     },
     prelude::*,
     render::camera::Exposure,
@@ -15,18 +15,18 @@ use bevy::{
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_systems(Startup, (setup_camera_fog, setup_terrain_scene))
+        .add_systems(Startup, (setup_atmosphere, setup_terrain_scene))
         .add_systems(Update, dynamic_scene)
         .run();
 }
 
-fn setup_camera_fog(
+fn setup_atmosphere(
     mut commands: Commands,
-    scattering_profiles: ResMut<Assets<ScatteringProfile>>,
+    mut scattering_profiles: ResMut<Assets<ScatteringProfile>>,
 ) {
     // should prefer `Atmosphere::earth()` in most cases, unless a custom atmosphere or length
     // scale is desired.
-    let profile = scattering_profiles.add(ScatteringProfile::EARTH::with_length_unit(1e-4));
+    let profile = scattering_profiles.add(ScatteringProfile::EARTH.with_length_unit(1e-4));
     let atmosphere = commands.spawn(Atmosphere(profile)).id();
     commands.spawn((
         Camera3d::default(),
@@ -38,10 +38,10 @@ fn setup_camera_fog(
         Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
         AtmosphericScattering(atmosphere),
-        AtmosphericScatteringSettings {
+        AtmosphericScatteringSettings::LutBased(LutBasedAtmosphericScatteringSettings {
             aerial_view_lut_max_distance: 3.2e5,
             ..Default::default()
-        },
+        }),
         // The directional light illuminance  used in this scene
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps

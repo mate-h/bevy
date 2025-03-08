@@ -130,7 +130,6 @@ pub struct ResolveNode {
     views: QueryState<
         (
             Read<AtmosphericScattering>,
-            Read<AtmosphericScatteringSettings>,
             Read<lut_based::BindGroups>,
             Read<DynamicUniformIndex<lut_based::Uniforms>>,
             Read<ViewUniformOffset>,
@@ -164,7 +163,6 @@ impl Node for ResolveNode {
 
         let Ok((
             AtmosphericScattering(atmosphere),
-            AtmosphericScatteringSettings::LutBased(settings),
             bind_groups,
             lut_based_uniforms_offset,
             view_uniforms_offset,
@@ -181,7 +179,8 @@ impl Node for ResolveNode {
         };
 
         let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(render_sky_pipeline) = pipeline_cache.get_render_pipeline(resolve_pipeline_id.0)
+        let Some(render_sky_pipeline) =
+            pipeline_cache.get_render_pipeline(resolve_pipeline_id.id())
         else {
             return Ok(());
         };

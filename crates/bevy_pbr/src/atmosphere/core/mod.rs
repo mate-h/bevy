@@ -15,7 +15,7 @@ use bevy_math::{UVec2, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
     graph::CameraDriverLabel,
-    render_graph::RenderGraphApp,
+    render_graph::{RenderGraph, RenderGraphApp},
     render_resource::{
         binding_types::{sampler, storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BindingResource,
@@ -78,6 +78,7 @@ impl Plugin for CoreAtmospherePlugin {
         render_app
             .init_resource::<Layout>()
             .init_resource::<Pipelines>()
+            .init_resource::<UniformsBuffer>()
             .add_systems(ExtractSchedule, extract_atmospheres)
             .add_systems(
                 Render,
@@ -86,9 +87,13 @@ impl Plugin for CoreAtmospherePlugin {
                     prepare_uniforms.in_set(RenderSet::PrepareAssets),
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
-            )
-            .add_render_graph_node::<node::LutsNode>(Core3d, node::LutsLabel)
-            .add_render_graph_edges(Core3d, (node::LutsLabel, CameraDriverLabel));
+            );
+
+        let luts_node = node::LutsNode::from_world(render_app.world_mut());
+        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
+
+        render_graph.add_node(node::LutsLabel, luts_node);
+        render_graph.add_node_edge(node::LutsLabel, CameraDriverLabel);
     }
 }
 
@@ -159,7 +164,7 @@ pub struct Uniforms {
     settings: Settings,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct UniformsBuffer {
     uniforms: DynamicStorageBuffer<Uniforms>,
 }
