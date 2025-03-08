@@ -35,12 +35,12 @@
 // LUT UV PARAMATERIZATIONS
 fn multiscattering_lut_r_mu_to_uv(planet: Planet, r: f32, mu: f32) -> vec2<f32> {
     let u = 0.5 + 0.5 * mu;
-    let v = saturate((r - planet.bottom_radius) / planet.space_altitude);
+    let v = saturate((r - planet.lower_radius) / planet.space_altitude);
     return vec2(u, v);
 }
 
 fn multiscattering_lut_uv_to_r_mu(planet: Planet, uv: vec2<f32>) -> vec2<f32> {
-    let r = mix(planet.bottom_radius, planet.top_radius, uv.y);
+    let r = mix(planet.lower_radius, planet.upper_radius, uv.y);
     let mu = uv.x * 2 - 1;
     return vec2(r, mu);
 }

@@ -50,7 +50,7 @@ fn sky_view_lut_r_mu_azimuth_to_uv(r: f32, mu: f32, azimuth: f32) -> vec2<f32> {
     let u = (azimuth * FRAC_2_PI) + 0.5;
 
     // Horizon parameters
-    let v_horizon = sqrt(r * r - atmosphere.planet.bottom_radius_sq);
+    let v_horizon = sqrt(r * r - atmosphere.planet.lower_radius_sq);
     let cos_beta = v_horizon / r;
     // Using fast_acos_4 for better precision at small angles
     // to avoid artifacts at the horizon
@@ -74,7 +74,7 @@ fn sky_view_lut_uv_to_zenith_azimuth(r: f32, uv: vec2<f32>) -> vec2<f32> {
     let azimuth = (adj_uv.x - 0.5) * PI_2;
 
     // Horizon parameters
-    let v_horizon = sqrt(r * r - atmosphere.planet.bottom_radius_sq);
+    let v_horizon = sqrt(r * r - atmosphere.planet.lower_radius_sq);
     let cos_beta = v_horizon / r;
     // Using fast_acos_4 for better precision at small angles
     // to avoid artifacts at the horizon
@@ -103,7 +103,7 @@ fn sample_aerial_view_lut(pos_ndc: vec3<f32>) -> vec4<f32> {
     let view_pos = view.view_from_clip * vec4(pos_ndc, 1.0); //TODO: use transform fns to get dist to camera
     let dist = length(view_pos.xyz / view_pos.w);
     let t_max = lut_based_settings.aerial_view_lut_max_distance;
-    let num_slices = f32(lut_based_settings.aerial_view_lut_size.z);
+    let num_slices = f32(lut_based_uniforms.settings.aerial_view_lut_size.z);
     // Offset the W coordinate by -0.5 over the max distance in order to 
     // align sampling position with slice boundaries, since each texel 
     // stores the integral over its entire slice
@@ -135,30 +135,30 @@ struct Medium {
 
 /// Samples the atmosphere medium at a given radius and returns the optical density of each scattering component
 fn sample_medium(r: f32) -> Medium {
-    let altitude = clamp(r, atmosphere.planet.bottom_radius, atmosphere.planet.top_radius) - atmosphere.planet.bottom_radius;
+    let altitude = clamp(r, atmosphere.planet.lower_radius, atmosphere.planet.upper_radius) - atmosphere.planet.lower_radius;
 
     // atmosphere values at altitude
     let mie_density = exp(-atmosphere.profile.mie_density_exp_scale * altitude);
-    let rayleigh_density = exp(-atmosphere.rayleigh_density_exp_scale * altitude);
-    var ozone_density: f32 = max(0.0, 1.0 - (abs(altitude - atmosphere.ozone_layer_altitude) / (atmosphere.ozone_layer_width * 0.5)));
+    let rayleigh_density = exp(-atmosphere.profile.rayleigh_density_exp_scale * altitude);
+    var ozone_density: f32 = max(0.0, 1.0 - (abs(altitude - atmosphere.profile.ozone_layer_altitude) / (atmosphere.profile.ozone_layer_width * 0.5)));
 
-    let mie_scattering = mie_density * atmosphere.mie_scattering;
-    let mie_absorption = mie_density * atmosphere.mie_absorption;
+    let mie_scattering = mie_density * atmosphere.profile.mie_scattering;
+    let mie_absorption = mie_density * atmosphere.profile.mie_absorption;
     let mie_extinction = mie_scattering + mie_absorption;
 
-    let rayleigh_scattering = rayleigh_density * atmosphere.rayleigh_scattering;
+    let rayleigh_scattering = rayleigh_density * atmosphere.profile.rayleigh_scattering;
     // no rayleigh absorption
     // rayleigh extinction is the sum of scattering and absorption
 
     // ozone doesn't contribute to scattering
-    let ozone_absorption = ozone_density * atmosphere.ozone_absorption;
+    let ozone_absorption = ozone_density * atmosphere.profile.ozone_absorption;
 
-    var sample: AtmosphereSample;
-    sample.rayleigh_scattering = rayleigh_scattering;
-    sample.mie_scattering = mie_scattering;
-    sample.extinction = rayleigh_scattering + mie_extinction + ozone_absorption;
+    var medium: Medium;
+    medium.rayleigh_scattering = rayleigh_scattering;
+    medium.mie_scattering = mie_scattering;
+    medium.extinction = rayleigh_scattering + mie_extinction + ozone_absorption;
 
-    return sample;
+    return medium;
 }
 
 /// evaluates L_scat, equation 3 in the paper, which gives the total single-order scattering towards the view at a single point
@@ -217,7 +217,7 @@ fn L_sun(transmittance: vec3<f32>, r: f32, ray_dir_ws: vec3<f32>) -> vec3<f32> {
 // MISC TRANSFORMS
 
 fn view_radius() -> f32 {
-    return view.position.y + atmosphere.planet.bottom_radius;
+    return view.position.y + atmosphere.planet.lower_radius;
 }
 
 // Modified from skybox.wgsl. For this pass we don't need to apply a separate sky transform or consider camera viewport.
