@@ -13,9 +13,9 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
 #ifdef MULTISAMPLED
-@group(0) @binding(13) var depth_texture: texture_depth_multisampled_2d;
+@group(0) @binding(9) var depth_texture: texture_depth_multisampled_2d;
 #else
-@group(0) @binding(13) var depth_texture: texture_depth_2d;
+@group(0) @binding(9) var depth_texture: texture_depth_2d;
 #endif
 
 struct RenderSkyOutput {

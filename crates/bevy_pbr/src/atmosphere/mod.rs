@@ -37,27 +37,29 @@ use bevy_asset::{
     load_internal_asset, weak_handle, AsAssetId, Asset, AssetApp, AssetId, Assets, Handle,
 };
 use bevy_color::LinearRgba;
+use bevy_core_pipeline::core_3d::Camera3d;
 use bevy_ecs::{
     component::{require, Component},
     entity::Entity,
+    query::With,
     reflect::ReflectComponent,
     schedule::IntoSystemConfigs,
+    system::{Commands, Query},
 };
 use bevy_math::Vec3;
 use bevy_reflect::Reflect;
 use bevy_render::{
-    render_resource::{DownlevelFlags, ShaderType},
-    renderer::RenderDevice,
+    extract_component::{ExtractComponent, ExtractComponentPlugin},
+    render_resource::{DownlevelFlags, Shader, ShaderType, TextureFormat, TextureUsages},
+    renderer::{RenderAdapter, RenderDevice},
     settings::WgpuFeatures,
+    sync_world::{RenderEntity, SyncToRenderWorld},
+    Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
-use bevy_render::{
-    render_resource::{Shader, TextureFormat, TextureUsages},
-    renderer::RenderAdapter,
-    sync_world::SyncToRenderWorld,
-    Render, RenderApp, RenderSet,
-};
-
 use tracing::warn;
+
+use bitflags::bitflags;
+use lut_based::LutBasedAtmospherePlugin;
 
 mod shaders {
     use bevy_asset::{weak_handle, Handle};
@@ -70,13 +72,14 @@ mod shaders {
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
 }
 
+use ::core::fmt;
+
+use core::CoreAtmospherePlugin;
 pub use core::{
-    Luts as CoreAtmosphereLuts, Settings as AtmosphereSettings,
-    UniformIndex as AtmosphereUniformIndex, Uniforms as AtmosphereUniforms,
+    ExtractedAtmosphere, Luts as CoreAtmosphereLuts, Settings as AtmosphereSettings,
+    UniformIndex as AtmosphereUniformIndex, UniformsBuffer as AtmosphereUniforms,
 };
-pub use lut_based::{
-    Luts as LutBasedAtmosphereLuts, Settings as LutBasedAtmosphericScatteringSettings,
-};
+pub use lut_based::{Luts as AuxAtmosphereLuts, Settings as LutBasedAtmosphericScatteringSettings};
 
 #[doc(hidden)]
 pub struct AtmospherePlugin;
@@ -101,7 +104,12 @@ impl Plugin for AtmospherePlugin {
         app.register_type::<ScatteringProfile>()
             .register_type::<Atmosphere>()
             .register_type::<AtmosphericScattering>()
-            .register_type::<AtmosphericScatteringCameras>();
+            .register_type::<AtmosphericScatteringCameras>()
+            .add_plugins((
+                ExtractComponentPlugin::<AtmosphericScatteringSettings>::default(),
+                CoreAtmospherePlugin,
+                LutBasedAtmospherePlugin,
+            ));
     }
 
     fn finish(&self, app: &mut App) {
@@ -109,45 +117,83 @@ impl Plugin for AtmospherePlugin {
             return;
         };
 
-        let render_adapter = render_app.world().resource::<RenderAdapter>();
-        let render_device = render_app.world().resource::<RenderDevice>();
-
-        if !render_device
-            .features()
-            .contains(WgpuFeatures::DUAL_SOURCE_BLENDING)
-        {
-            warn!("AtmospherePlugin not loaded. GPU lacks support for dual-source blending.");
-            return;
+        let device = render_app.world().resource::<RenderDevice>();
+        let adapter = render_app.world().resource::<RenderAdapter>();
+        if let Err(err) = validate_plugin(device, adapter) {
+            warn!("AtmospherePlugin not loaded: {err}");
         }
 
-        if !render_adapter
-            .get_downlevel_capabilities()
-            .flags
-            .contains(DownlevelFlags::COMPUTE_SHADERS)
-        {
-            warn!("AtmospherePlugin not loaded. GPU lacks support for compute shaders.");
-            return;
-        }
-
-        if !render_adapter
-            .get_texture_format_features(TextureFormat::Rgba16Float)
-            .allowed_usages
-            .contains(TextureUsages::STORAGE_BINDING)
-        {
-            warn!("AtmospherePlugin not loaded. GPU lacks support: TextureFormat::Rgba16Float does not support TextureUsages::STORAGE_BINDING.");
-            return;
-        }
-
-        render_app.add_systems(
-            Render,
-            (
+        render_app
+            .add_systems(ExtractSchedule, extract_atmospheric_scattering)
+            .add_systems(
+                Render,
                 configure_camera_depth_usages.in_set(RenderSet::ManageViews),
-                // queue_render_sky_pipelines.in_set(RenderSet::Queue),
-                // prepare_atmosphere_textures.in_set(RenderSet::PrepareResources),
-                // prepare_atmosphere_transforms.in_set(RenderSet::PrepareResources),
-                // prepare_atmosphere_bind_groups.in_set(RenderSet::PrepareBindGroups),
-            ),
-        );
+            );
+    }
+}
+
+bitflags! {
+    #[derive(PartialEq, Eq)]
+    pub struct AtmospherePluginInitError: u8 {
+        const NO_DUAL_SOURCE_BLENDING = 1 << 0;
+        const NO_COMPUTE = 1 << 1;
+        const NO_RGBA_16_FLOAT_STORAGE = 1 << 2;
+    }
+}
+
+impl fmt::Display for AtmospherePluginInitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GPU lacks support for: ");
+
+        if self.contains(AtmospherePluginInitError::NO_DUAL_SOURCE_BLENDING) {
+            write!(f, "dual-source blending, ");
+        }
+
+        if self.contains(AtmospherePluginInitError::NO_COMPUTE) {
+            write!(f, "compute shaders, ");
+        }
+
+        if self.contains(AtmospherePluginInitError::NO_RGBA_16_FLOAT_STORAGE) {
+            write!(f, "Rgba16Float storage textures");
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_plugin(
+    device: &RenderDevice,
+    adapter: &RenderAdapter,
+) -> Result<(), AtmospherePluginInitError> {
+    let mut err = AtmospherePluginInitError::empty();
+
+    if !device
+        .features()
+        .contains(WgpuFeatures::DUAL_SOURCE_BLENDING)
+    {
+        err |= AtmospherePluginInitError::NO_DUAL_SOURCE_BLENDING;
+    }
+
+    if !adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(DownlevelFlags::COMPUTE_SHADERS)
+    {
+        err |= AtmospherePluginInitError::NO_COMPUTE;
+    }
+
+    if !adapter
+        .get_texture_format_features(TextureFormat::Rgba16Float)
+        .allowed_usages
+        .contains(TextureUsages::STORAGE_BINDING)
+    {
+        err |= AtmospherePluginInitError::NO_RGBA_16_FLOAT_STORAGE;
+    }
+
+    if err.is_empty() {
+        Ok(())
+    } else {
+        Err(err)
     }
 }
 
@@ -342,7 +388,22 @@ pub struct AtmosphericScattering(pub Entity);
 #[relationship_target(relationship = AtmosphericScattering)]
 pub struct AtmosphericScatteringCameras(Vec<Entity>);
 
-#[derive(Component, Clone, Reflect)]
+pub fn extract_atmospheric_scattering(
+    views: Extract<Query<(RenderEntity, &AtmosphericScattering), With<Camera3d>>>,
+    atmospheres: Extract<Query<RenderEntity, With<Atmosphere>>>,
+    mut commands: Commands,
+) {
+    for (view_render_entity, AtmosphericScattering(atmosphere)) in &views {
+        if let Ok(atmosphere_render_entity) = atmospheres.get(*atmosphere) {
+            commands
+                .entity(view_render_entity)
+                .insert(AtmosphericScattering(atmosphere_render_entity));
+        }
+    }
+}
+
+#[derive(Component, Clone, Reflect, ExtractComponent)]
+#[extract_component_filter(With<AtmosphericScattering>)]
 #[reflect(Component)]
 pub enum AtmosphericScatteringSettings {
     LutBased(LutBasedAtmosphericScatteringSettings),

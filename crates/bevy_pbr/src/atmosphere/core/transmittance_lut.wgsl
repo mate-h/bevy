@@ -9,7 +9,7 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
 
-@group(0) @binding(10) var transmittance_lut_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(9) var transmittance_lut_out: texture_storage_2d<rgba16float, write>;
 
 @compute 
 @workgroup_size(16, 16, 1)

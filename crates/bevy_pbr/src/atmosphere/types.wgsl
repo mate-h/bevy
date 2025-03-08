@@ -3,12 +3,12 @@
 struct Atmosphere {
     scattering_profile: ScatteringProfile,
     planet: Planet,
-    core_lut_settings: CoreLutSettings,
+    settings: CoreLutSettings,
 }
 
 struct ScatteringProfile {
     rayleigh_density_exp_scale: f32,
-    rayleigh_scattering: vec3<f32>,
+    rayleigh_scattering: vec3<f32>, //units: m^-1
 
     mie_density_exp_scale: f32,
     mie_scattering: f32, // units: m^-1
@@ -29,14 +29,19 @@ struct Planet {
     space_altitude: f32,
 }
 
-struct CoreSettings {
+struct CoreLutSettings {
     transmittance_lut_size: vec2<u32>,
     multiscattering_lut_size: vec2<u32>,   
     transmittance_lut_samples: u32,
     multiscattering_lut_samples: u32,
 }
 
-struct LutBasedSettings {
+struct LutBasedUniforms {
+    transforms: AtmosphereTransforms,
+    settings: AuxLutSettings,
+}
+
+struct AuxLutSettings {
     sky_view_lut_size: vec2<u32>,
     sky_view_lut_samples: u32,
     aerial_view_lut_samples: u32,

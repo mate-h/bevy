@@ -30,14 +30,13 @@
 // uniform bindings 
 @group(0) @binding(2) var<uniform> view: View;
 @group(0) @binding(3) var<uniform> lights: Lights;
-@group(0) @binding(4) var<uniform> core_settings: CoreSettings;
-@group(0) @binding(5) var<uniform> lut_based_settings: LutBasedSettings;
+@group(0) @binding(4) var<uniform> lut_based_uniforms: LutBasedUniforms;
 
 // luts
-@group(0) @binding(6) var transmittance_lut: texture_2d<f32>;
-@group(0) @binding(7) var multiscattering_lut: texture_2d<f32>;
-@group(0) @binding(8) var sky_view_lut: texture_2d<f32>;
-@group(0) @binding(9) var aerial_view_lut: texture_2d<f32>;
+@group(0) @binding(5) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(6) var multiscattering_lut: texture_2d<f32>;
+@group(0) @binding(7) var sky_view_lut: texture_2d<f32>;
+@group(0) @binding(8) var aerial_view_lut: texture_2d<f32>;
 
 
 // During raymarching, each segment is sampled at a single point. This constant determines
@@ -120,17 +119,17 @@ fn sample_aerial_view_lut(pos_ndc: vec3<f32>) -> vec4<f32> {
 // ATMOSPHERE SAMPLING
 
 struct Medium {
-    /// units: m^-1
+    /// units: n/a
     rayleigh_scattering: vec3<f32>,
 
-    /// units: m^-1
+    /// units: n/a
     mie_scattering: f32,
 
     /// the sum of scattering and absorption. Since the phase function doesn't
     /// matter for this, we combine rayleigh and mie extinction to a single 
     //  value.
     //
-    /// units: m^-1
+    //  units: n/a
     extinction: vec3<f32>
 }
 

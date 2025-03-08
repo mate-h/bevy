@@ -19,20 +19,21 @@ use bevy_render::{
     render_graph::RenderGraphApp,
     render_resource::{
         binding_types::{sampler, storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
-        BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
+        BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BindingResource,
         CachedComputePipelineId, ComputePipelineDescriptor, DynamicStorageBuffer,
         DynamicUniformBuffer, Extent3d, FilterMode, PipelineCache, Sampler, SamplerBindingType,
         SamplerDescriptor, Shader, ShaderStages, ShaderType, StorageTextureAccess,
         TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
     },
-    renderer::RenderDevice,
+    renderer::{RenderAdapter, RenderDevice, RenderQueue},
     settings,
     sync_world::{RenderEntity, TemporaryRenderEntity},
     texture::{CachedTexture, TextureCache},
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
+use tracing::warn;
 
-use super::{Atmosphere, Planet, ScatteringProfile};
+use super::{validate_plugin, Atmosphere, Planet, ScatteringProfile};
 
 mod node;
 
@@ -69,6 +70,12 @@ impl Plugin for CoreAtmospherePlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+
+        let device = render_app.world().resource::<RenderDevice>();
+        let adapter = render_app.world().resource::<RenderAdapter>();
+        if let Err(err) = validate_plugin(device, adapter) {
+            warn!("CoreAtmospherePlugin not loaded: {err}");
+        }
 
         render_app
             .init_resource::<Layout>()
@@ -121,7 +128,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(ShaderType)]
+#[derive(ShaderType, Clone)]
 struct GpuPlanet {
     ground_albedo: Vec3,
     lower_radius: f32,
@@ -147,54 +154,72 @@ impl From<Planet> for GpuPlanet {
     }
 }
 
-#[derive(ShaderType, Component)]
-pub struct GpuAtmosphere {
+#[derive(ShaderType, Component, Clone)]
+pub struct Uniforms {
     profile: ScatteringProfile,
     planet: GpuPlanet,
+    settings: Settings,
 }
 
 #[derive(Resource)]
-pub struct Uniforms {
-    pub atmospheres: DynamicStorageBuffer<GpuAtmosphere>,
-    pub settings: DynamicUniformBuffer<Settings>,
+pub struct UniformsBuffer {
+    uniforms: DynamicStorageBuffer<Uniforms>,
+}
+
+impl UniformsBuffer {
+    pub fn binding(&self) -> Option<BindingResource> {
+        self.uniforms.binding()
+    }
 }
 
 #[derive(Component)]
-pub struct UniformIndex(pub u32);
+pub struct UniformIndex(u32);
+
+impl UniformIndex {
+    pub fn index(&self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Component)]
+pub struct ExtractedAtmosphere;
 
 pub fn extract_atmospheres(
     atmospheres: Extract<Query<(RenderEntity, &Atmosphere, &Settings, &Planet)>>,
     scattering_profiles: Extract<Res<Assets<ScatteringProfile>>>,
-    mut uniforms: ResMut<Uniforms>,
+    mut uniforms: ResMut<UniformsBuffer>,
     mut commands: Commands,
 ) {
-    uniforms.atmospheres.clear();
-    uniforms.settings.clear();
+    uniforms.uniforms.clear();
 
     for (render_entity, atmosphere, settings, planet) in &atmospheres {
         let Some(profile) = scattering_profiles.get(atmosphere.0.id()).cloned() else {
             continue; //TODO: check this doesn't cause problems
         };
-        let gpu_atmosphere = GpuAtmosphere {
+
+        let uniform = Uniforms {
             profile,
             planet: planet.clone().into(),
+            settings: settings.clone(),
         };
-
-        //since we're extracting both at once, we can assume their indices are the same
-        let atmospheres_index = uniforms.atmospheres.push(gpu_atmosphere);
-        let settings_index = uniforms.settings.push(settings);
-        debug_assert_eq!(atmospheres_index, settings_index);
 
         commands.entity(render_entity).insert((
             settings.clone(),
-            UniformIndex(atmospheres_index),
+            UniformIndex(uniforms.uniforms.push(uniform)),
             TemporaryRenderEntity,
+            ExtractedAtmosphere,
         ));
     }
 }
 
-pub fn prepare_uniforms() {
-    todo!()
+pub fn prepare_uniforms(
+    mut uniforms: ResMut<UniformsBuffer>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) {
+    uniforms
+        .uniforms
+        .write_buffer(&render_device, &render_queue);
 }
 
 #[derive(Resource)]
@@ -212,11 +237,10 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<GpuAtmosphere>(true)),
-                    (4, uniform_buffer::<Settings>(true)),
+                    (0, storage_buffer::<Uniforms>(true)),
                     (
                         // transmittance lut storage texture
-                        10,
+                        9,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -231,13 +255,12 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<GpuAtmosphere>(true)),
+                    (0, storage_buffer::<Uniforms>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
-                    (4, uniform_buffer::<Settings>(true)),
-                    (6, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
+                    (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (
                         // multiscattering lut storage texture
-                        10,
+                        9,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -365,29 +388,23 @@ pub struct BindGroups {
 }
 
 fn prepare_bind_groups(
-    atmospheres: Query<(Entity, &Luts, &GpuAtmosphere)>,
+    atmospheres: Query<(Entity, &Luts), With<ExtractedAtmosphere>>,
     render_device: Res<RenderDevice>,
-    uniforms: Res<Uniforms>,
+    uniforms: Res<UniformsBuffer>,
     layout: Res<Layout>,
     mut commands: Commands,
 ) {
-    let atmosphere_binding = uniforms
-        .atmospheres
+    let uniforms_binding = uniforms
         .binding()
         .expect("Failed to prepare atmosphere bind groups. Atmosphere storage buffer missing");
 
-    let settings_binding = uniforms.settings.binding().expect(
-        "Failed to prepare atmosphere bind groups. Atmosphere settings uniform buffer missing",
-    );
-
-    for (entity, core_luts, gpu_atmosphere) in &atmospheres {
+    for (entity, core_luts) in &atmospheres {
         let transmittance_lut = render_device.create_bind_group(
             "transmittance_lut_bind_group",
             &layout.transmittance_lut,
             &BindGroupEntries::with_indices((
-                (0, &atmosphere_binding),
-                (4, &settings_binding),
-                (10, &core_luts.transmittance_lut.default_view),
+                (0, uniforms_binding.clone()),
+                (9, &core_luts.transmittance_lut.default_view),
             )),
         );
 
@@ -395,11 +412,10 @@ fn prepare_bind_groups(
             "multiscattering_lut_bind_group",
             &layout.multiscattering_lut,
             &BindGroupEntries::with_indices((
-                (0, &atmosphere_binding),
+                (0, uniforms_binding.clone()),
                 (1, &layout.sampler),
-                (4, &settings_binding),
-                (6, &core_luts.transmittance_lut.default_view),
-                (10, &core_luts.multiscattering_lut.default_view),
+                (5, &core_luts.transmittance_lut.default_view),
+                (9, &core_luts.multiscattering_lut.default_view),
             )),
         );
 
