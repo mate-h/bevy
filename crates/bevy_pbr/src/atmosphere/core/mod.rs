@@ -6,7 +6,6 @@ use bevy_ecs::{
     component::Component,
     entity::Entity,
     query::With,
-    removal_detection::RemovedComponents,
     resource::Resource,
     schedule::IntoSystemConfigs,
     system::{Commands, Query, Res, ResMut},
@@ -26,7 +25,6 @@ use bevy_render::{
         TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
     },
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
-    settings,
     sync_world::{RenderEntity, TemporaryRenderEntity},
     texture::{CachedTexture, TextureCache},
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
@@ -173,9 +171,9 @@ impl UniformsBuffer {
 }
 
 #[derive(Component)]
-pub struct UniformIndex(u32);
+pub struct UniformsIndex(u32);
 
-impl UniformIndex {
+impl UniformsIndex {
     pub fn index(&self) -> u32 {
         self.0
     }
@@ -205,7 +203,7 @@ pub fn extract_atmospheres(
 
         commands.entity(render_entity).insert((
             settings.clone(),
-            UniformIndex(uniforms.uniforms.push(uniform)),
+            UniformsIndex(uniforms.uniforms.push(uniform)),
             TemporaryRenderEntity,
             ExtractedAtmosphere,
         ));

@@ -41,7 +41,7 @@ use bevy_core_pipeline::core_3d::Camera3d;
 use bevy_ecs::{
     component::{require, Component},
     entity::Entity,
-    query::With,
+    query::{Changed, With},
     reflect::ReflectComponent,
     schedule::IntoSystemConfigs,
     system::{Commands, Query},
@@ -77,7 +77,7 @@ use ::core::fmt;
 use core::CoreAtmospherePlugin;
 pub use core::{
     ExtractedAtmosphere, Luts as CoreAtmosphereLuts, Settings as AtmosphereSettings,
-    UniformIndex as AtmosphereUniformIndex, UniformsBuffer as AtmosphereUniforms,
+    UniformsBuffer as AtmosphereUniforms, UniformsIndex as AtmosphereUniformIndex,
 };
 pub use lut_based::{Luts as AuxAtmosphereLuts, Settings as LutBasedAtmosphericScatteringSettings};
 
@@ -416,4 +416,10 @@ impl Default for AtmosphericScatteringSettings {
     }
 }
 
-fn configure_camera_depth_usages() {} //TODO:
+fn configure_camera_depth_usages(
+    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<AtmosphericScattering>)>,
+) {
+    for mut camera in &mut cameras {
+        camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();
+    }
+}

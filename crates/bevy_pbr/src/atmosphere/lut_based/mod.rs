@@ -39,7 +39,7 @@ use bevy_render::{
     },
     renderer::{RenderAdapter, RenderDevice},
     texture::{CachedTexture, TextureCache},
-    view::{ExtractedView, Msaa, ViewUniform, ViewUniforms},
+    view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
     Render, RenderApp, RenderSet,
 };
 use tracing::warn;
@@ -60,7 +60,8 @@ pub mod shaders {
     pub const SKY_VIEW_LUT: Handle<Shader> = weak_handle!("f87e007a-bf4b-4f99-9ef0-ac21d369f0e5");
     pub const AERIAL_VIEW_LUT: Handle<Shader> =
         weak_handle!("a3daf030-4b64-49ae-a6a7-354489597cbe");
-    pub const RESOLVE: Handle<Shader> = weak_handle!("09422f46-d0f7-41c1-be24-121c17d6e834");
+    pub const RESOLVE_ATMOSPHERE: Handle<Shader> =
+        weak_handle!("09422f46-d0f7-41c1-be24-121c17d6e834");
 }
 
 pub struct LutBasedAtmospherePlugin;
@@ -79,7 +80,12 @@ impl Plugin for LutBasedAtmospherePlugin {
             "aerial_view_lut.wgsl",
             Shader::from_wgsl
         );
-        load_internal_asset!(app, shaders::RESOLVE, "resolve.wgsl", Shader::from_wgsl);
+        load_internal_asset!(
+            app,
+            shaders::RESOLVE_ATMOSPHERE,
+            "resolve_atmosphere.wgsl",
+            Shader::from_wgsl
+        );
 
         app.register_type::<Settings>()
             .init_resource::<Layout>()
@@ -107,9 +113,9 @@ impl Plugin for LutBasedAtmospherePlugin {
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
             )
-            .add_render_graph_node::<ViewNodeRunner<node::LutsNode>>(Core3d, node::LutsLabel)
+            .add_render_graph_node::<node::LutsNode>(Core3d, node::LutsLabel)
             .add_render_graph_edges(Core3d, (node::LutsLabel, node::ResolveLabel))
-            .add_render_graph_node::<ViewNodeRunner<node::ResolveNode>>(Core3d, node::ResolveLabel)
+            .add_render_graph_node::<node::ResolveNode>(Core3d, node::ResolveLabel)
             .add_render_graph_edges(
                 Core3d,
                 (Node3d::EndMainPass, node::ResolveLabel, Node3d::Tonemapping),
@@ -192,9 +198,7 @@ pub fn prepare_uniforms(
     >,
     mut commands: Commands,
 ) {
-    for (entity, view, settings) in &views {
-        let AtmosphericScatteringSettings::LutBased(settings) = settings;
-
+    for (entity, view, AtmosphericScatteringSettings::LutBased(settings)) in &views {
         let world_from_view = view.world_from_view.compute_matrix();
         let camera_z = world_from_view.z_axis.truncate();
         let camera_y = world_from_view.y_axis.truncate();
@@ -229,8 +233,8 @@ pub fn prepare_uniforms(
 pub struct Layout {
     sky_view_lut: BindGroupLayout,
     aerial_view_lut: BindGroupLayout,
-    resolve: BindGroupLayout,
-    resolve_msaa: BindGroupLayout,
+    resolve_atmosphere: BindGroupLayout,
+    resolve_atmosphere_msaa: BindGroupLayout,
     sampler: Sampler,
 }
 
@@ -283,7 +287,7 @@ impl FromWorld for Layout {
             ),
         );
 
-        let resolve = render_device.create_bind_group_layout(
+        let resolve_atmosphere = render_device.create_bind_group_layout(
             "resolve_bind_group_layout",
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
@@ -301,7 +305,7 @@ impl FromWorld for Layout {
             ),
         );
 
-        let resolve_msaa = render_device.create_bind_group_layout(
+        let resolve_atmosphere_msaa = render_device.create_bind_group_layout(
             "resolve_bind_group_layout",
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
@@ -324,8 +328,8 @@ impl FromWorld for Layout {
         Self {
             sky_view_lut,
             aerial_view_lut,
-            resolve,
-            resolve_msaa,
+            resolve_atmosphere,
+            resolve_atmosphere_msaa,
             sampler,
         }
     }
@@ -370,10 +374,16 @@ impl FromWorld for Pipelines {
 }
 
 #[derive(Component)]
-pub struct ResolvePipelineId(pub CachedRenderPipelineId);
+pub struct ResolvePipelineId(CachedRenderPipelineId);
+
+impl ResolvePipelineId {
+    pub fn id(&self) -> CachedRenderPipelineId {
+        self.0
+    }
+}
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
-struct ResolvePipelineKey {
+pub struct ResolvePipelineKey {
     pub msaa_samples: u32,
     pub hdr: bool,
 }
@@ -393,10 +403,10 @@ impl SpecializedRenderPipeline for Layout {
 
         RenderPipelineDescriptor {
             label: Some(format!("render_sky_pipeline_{}", key.msaa_samples).into()),
-            layout: vec![if key.msaa_samples == 1 {
-                self.resolve.clone()
+            layout: vec![if key.msaa_samples > 1 {
+                self.resolve_atmosphere_msaa.clone()
             } else {
-                self.resolve_msaa.clone()
+                self.resolve_atmosphere.clone()
             }],
             push_constant_ranges: vec![],
             vertex: fullscreen_shader_vertex_state(),
@@ -409,7 +419,7 @@ impl SpecializedRenderPipeline for Layout {
             },
             zero_initialize_workgroup_memory: false,
             fragment: Some(FragmentState {
-                shader: shaders::RESOLVE.clone(),
+                shader: shaders::RESOLVE_ATMOSPHERE.clone(),
                 shader_defs,
                 entry_point: "main".into(),
                 targets: vec![Some(ColorTargetState {
@@ -468,9 +478,7 @@ fn prepare_luts(
     mut texture_cache: ResMut<TextureCache>,
     mut commands: Commands,
 ) {
-    for (entity, settings) in &atmospheres {
-        let AtmosphericScatteringSettings::LutBased(settings) = settings;
-
+    for (entity, AtmosphericScatteringSettings::LutBased(settings)) in &atmospheres {
         let sky_view_lut = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -518,10 +526,20 @@ fn prepare_luts(
 pub struct BindGroups {
     pub sky_view_lut: BindGroup,
     pub aerial_view_lut: BindGroup,
+    pub resolve_atmosphere: BindGroup,
 }
 
 fn prepare_bind_groups(
-    views: Query<(Entity, &Luts, &AtmosphericScattering), With<Camera3d>>,
+    views: Query<
+        (
+            Entity,
+            &Luts,
+            &AtmosphericScattering,
+            &Msaa,
+            &ViewDepthTexture,
+        ),
+        With<Camera3d>,
+    >,
     atmospheres: Query<&core::Luts, With<ExtractedAtmosphere>>,
     render_device: Res<RenderDevice>,
     core_uniforms: Res<core::UniformsBuffer>,
@@ -549,7 +567,7 @@ fn prepare_bind_groups(
         .binding()
         .expect("Failed to prepare atmosphere bind groups. Lights uniform buffer missing");
 
-    for (entity, aux_luts, atmosphere) in &views {
+    for (entity, aux_luts, atmosphere, msaa, view_depth_texture) in &views {
         let Ok(core_luts) = atmospheres.get(atmosphere.0) else {
             continue;
         };
@@ -584,9 +602,33 @@ fn prepare_bind_groups(
             )),
         );
 
+        let resolve_atmosphere_layout = if msaa.samples() > 1 {
+            &layout.resolve_atmosphere_msaa
+        } else {
+            &layout.resolve_atmosphere
+        };
+
+        let resolve_atmosphere = render_device.create_bind_group(
+            "resolve_atmosphere_bind_group",
+            resolve_atmosphere_layout,
+            &BindGroupEntries::with_indices((
+                (0, core_uniforms_binding.clone()),
+                (1, &layout.sampler),
+                (2, view_binding.clone()),
+                (3, lights_binding.clone()),
+                (4, lut_based_uniforms_binding.clone()),
+                (5, &core_luts.transmittance_lut.default_view),
+                (6, &core_luts.multiscattering_lut.default_view),
+                (7, &aux_luts.sky_view_lut.default_view),
+                (8, &aux_luts.aerial_view_lut.default_view),
+                (9, view_depth_texture.view()),
+            )),
+        );
+
         commands.entity(entity).insert(BindGroups {
             sky_view_lut,
             aerial_view_lut,
+            resolve_atmosphere,
         });
     }
 }
