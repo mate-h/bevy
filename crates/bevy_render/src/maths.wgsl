@@ -172,8 +172,8 @@ fn fast_atan2(y: f32, x: f32) -> f32 {
 }
 
 // Low discrepancy sequences: given an index, these functions return a "random" value in [0, 1)^N. They're not purely random,
-// but behave like blue noise and are very cheap to compute on-demand. This makes them extremely good at tasks such as monte
-// carlo integration, unless there are better options available like importance sampling.
+// but instead behave like blue noise and are very cheap to compute on-demand. This makes them extremely good at tasks such 
+// as monte carlo integration, unless there are better options available like importance sampling.
 
 // For each constant R_N below, the first entry is the unique real solution R of x^(n + 1) = x + 1. The following entries are
 // R^2, R^3, .. R^N. For more info read: https://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
@@ -184,7 +184,7 @@ const R_3: vec3<f32> = vec3(1.220744084605759475361685, 1.4902161200999536481163
 const R_4: vec4<f32> = vec4(1.167303978261418684256045, 1.362598577664934624179556, 1.590566740481628865257057, 1.856674883854502874852324);
 
 fn r1_seq(n: u32) -> f32 {
-    return fract(0.5 * f32(n) * R_1)
+    return fract(0.5 * f32(n) * R_1);
 }
 
 fn r2_seq(n: u32) -> vec2<f32> {
