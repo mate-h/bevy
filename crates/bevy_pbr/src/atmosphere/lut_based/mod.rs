@@ -105,6 +105,7 @@ impl Plugin for LutBasedAtmospherePlugin {
         render_app
             .init_resource::<Layout>()
             .init_resource::<Pipelines>()
+            .init_resource::<SpecializedRenderPipelines<Layout>>()
             .add_systems(
                 Render,
                 (

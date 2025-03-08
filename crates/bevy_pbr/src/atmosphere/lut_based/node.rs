@@ -1,12 +1,12 @@
 use bevy_ecs::{
-    query::{QueryItem, QueryState, With},
+    query::{QueryState, With},
     system::lifetimeless::Read,
     world::{FromWorld, World},
 };
 use bevy_math::{UVec2, Vec3Swizzles};
 use bevy_render::{
     extract_component::DynamicUniformIndex,
-    render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel, ViewNode},
+    render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
     render_resource::{ComputePass, ComputePassDescriptor, PipelineCache, RenderPassDescriptor},
     renderer::RenderContext,
     view::{ExtractedView, ViewTarget, ViewUniformOffset},
