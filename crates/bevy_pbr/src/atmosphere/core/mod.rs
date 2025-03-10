@@ -1,7 +1,6 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Assets};
 use bevy_color::ColorToComponents;
-use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
@@ -15,14 +14,14 @@ use bevy_math::{UVec2, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
     graph::CameraDriverLabel,
-    render_graph::{RenderGraph, RenderGraphApp},
+    render_graph::RenderGraph,
     render_resource::{
-        binding_types::{sampler, storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
+        binding_types::{sampler, storage_buffer_read_only, texture_2d, texture_storage_2d},
         BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BindingResource,
-        CachedComputePipelineId, ComputePipelineDescriptor, DynamicStorageBuffer,
-        DynamicUniformBuffer, Extent3d, FilterMode, PipelineCache, Sampler, SamplerBindingType,
-        SamplerDescriptor, Shader, ShaderStages, ShaderType, StorageTextureAccess,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+        CachedComputePipelineId, ComputePipelineDescriptor, DynamicStorageBuffer, Extent3d,
+        FilterMode, PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, Shader,
+        ShaderStages, ShaderType, StorageTextureAccess, TextureDescriptor, TextureDimension,
+        TextureFormat, TextureSampleType, TextureUsages,
     },
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
     sync_world::{RenderEntity, TemporaryRenderEntity},
@@ -83,8 +82,8 @@ impl Plugin for CoreAtmospherePlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_luts.in_set(RenderSet::PrepareAssets),
-                    prepare_uniforms.in_set(RenderSet::PrepareAssets),
+                    prepare_luts.in_set(RenderSet::PrepareResources),
+                    prepare_uniforms.in_set(RenderSet::PrepareResources),
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
             );
@@ -240,7 +239,7 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<Uniforms>(true)),
+                    (0, storage_buffer_read_only::<Uniforms>(true)),
                     (
                         // transmittance lut storage texture
                         9,
@@ -258,7 +257,7 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<Uniforms>(true)),
+                    (0, storage_buffer_read_only::<Uniforms>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (

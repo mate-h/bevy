@@ -19,21 +19,19 @@ use bevy_ecs::{
 use bevy_math::{Mat4, UVec2, UVec3, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
-    camera::{Camera, ExtractedCamera},
-    extract_component::{
-        ComponentUniforms, ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin,
-    },
-    render_graph::{RenderGraphApp, ViewNodeRunner},
+    camera::ExtractedCamera,
+    extract_component::{ComponentUniforms, UniformComponentPlugin},
+    render_graph::RenderGraphApp,
     render_resource::{
         binding_types::{
-            sampler, storage_buffer, texture_2d, texture_depth_2d, texture_depth_2d_multisampled,
-            texture_storage_2d, texture_storage_3d, uniform_buffer,
+            sampler, storage_buffer, storage_buffer_read_only, texture_2d, texture_depth_2d,
+            texture_depth_2d_multisampled, texture_storage_2d, texture_storage_3d, uniform_buffer,
         },
         BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent,
         BlendFactor, BlendOperation, BlendState, CachedComputePipelineId, CachedRenderPipelineId,
-        ColorTargetState, ColorWrites, ComputePipelineDescriptor, DynamicUniformBuffer, Extent3d,
-        FragmentState, MultisampleState, PipelineCache, PrimitiveState, RenderPipelineDescriptor,
-        Sampler, SamplerBindingType, Shader, ShaderStages, ShaderType, SpecializedRenderPipeline,
+        ColorTargetState, ColorWrites, ComputePipelineDescriptor, Extent3d, FragmentState,
+        MultisampleState, PipelineCache, PrimitiveState, RenderPipelineDescriptor, Sampler,
+        SamplerBindingType, Shader, ShaderStages, ShaderType, SpecializedRenderPipeline,
         SpecializedRenderPipelines, StorageTextureAccess, TextureDescriptor, TextureDimension,
         TextureFormat, TextureSampleType, TextureUsages,
     },
@@ -110,7 +108,7 @@ impl Plugin for LutBasedAtmospherePlugin {
                 Render,
                 (
                     queue_render_sky_pipelines.in_set(RenderSet::Queue),
-                    prepare_luts.in_set(RenderSet::PrepareAssets),
+                    prepare_luts.in_set(RenderSet::PrepareResources),
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
             )
@@ -247,7 +245,7 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<core::Uniforms>(true)),
+                    (0, storage_buffer_read_only::<core::Uniforms>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
                     (2, uniform_buffer::<ViewUniform>(true)),
                     (3, uniform_buffer::<GpuLights>(true)),
@@ -270,7 +268,7 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<core::Uniforms>(true)),
+                    (0, storage_buffer_read_only::<core::Uniforms>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
                     (2, uniform_buffer::<ViewUniform>(true)),
                     (3, uniform_buffer::<GpuLights>(true)),
@@ -555,7 +553,7 @@ fn prepare_bind_groups(
         .expect("Failed to prepare atmosphere bind groups. Atmosphere storage buffer missing");
 
     let lut_based_uniforms_binding = lut_based_uniforms.binding().expect(
-        "Failed to prepare atmosphere bind groups. AtmosphereSettings uniform buffer missing",
+        "Failed to prepare atmosphere bind groups. Lut-based atmosphere uniform buffer missing",
     );
 
     let view_binding = view_uniforms
