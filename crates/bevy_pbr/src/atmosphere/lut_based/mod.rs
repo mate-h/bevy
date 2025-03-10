@@ -108,6 +108,7 @@ impl Plugin for LutBasedAtmospherePlugin {
                 Render,
                 (
                     queue_render_sky_pipelines.in_set(RenderSet::Queue),
+                    prepare_uniforms.before(RenderSet::PrepareResources),
                     prepare_luts.in_set(RenderSet::PrepareResources),
                     prepare_bind_groups.in_set(RenderSet::PrepareBindGroups),
                 ),
@@ -249,7 +250,7 @@ impl FromWorld for Layout {
                     (1, sampler(SamplerBindingType::Filtering)),
                     (2, uniform_buffer::<ViewUniform>(true)),
                     (3, uniform_buffer::<GpuLights>(true)),
-                    (4, uniform_buffer::<Settings>(true)),
+                    (4, uniform_buffer::<Uniforms>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (6, texture_2d(TextureSampleType::Float { filterable: true })), // multiscattering lut
                     (
@@ -272,7 +273,7 @@ impl FromWorld for Layout {
                     (1, sampler(SamplerBindingType::Filtering)),
                     (2, uniform_buffer::<ViewUniform>(true)),
                     (3, uniform_buffer::<GpuLights>(true)),
-                    (4, uniform_buffer::<Settings>(true)),
+                    (4, uniform_buffer::<Uniforms>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (6, texture_2d(TextureSampleType::Float { filterable: true })), // mulitscattering lut
                     (
@@ -291,11 +292,11 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<core::Uniforms>(true)),
+                    (0, storage_buffer_read_only::<core::Uniforms>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
                     (2, uniform_buffer::<ViewUniform>(true)),
                     (3, uniform_buffer::<GpuLights>(true)),
-                    (5, uniform_buffer::<Settings>(true)),
+                    (5, uniform_buffer::<Uniforms>(true)),
                     (6, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (8, texture_2d(TextureSampleType::Float { filterable: true })), // sky view lut
                     (9, texture_2d(TextureSampleType::Float { filterable: true })), // aerial view lut
@@ -309,11 +310,11 @@ impl FromWorld for Layout {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, storage_buffer::<core::Uniforms>(true)),
+                    (0, storage_buffer_read_only::<core::Uniforms>(true)),
                     (1, sampler(SamplerBindingType::Filtering)),
                     (2, uniform_buffer::<ViewUniform>(true)),
                     (3, uniform_buffer::<GpuLights>(true)),
-                    (4, uniform_buffer::<Settings>(true)),
+                    (4, uniform_buffer::<Uniforms>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), // transmittance lut
                     (7, texture_2d(TextureSampleType::Float { filterable: true })), // sky view lut
                     (8, texture_2d(TextureSampleType::Float { filterable: true })), // aerial view lut
