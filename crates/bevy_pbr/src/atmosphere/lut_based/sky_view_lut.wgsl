@@ -1,20 +1,20 @@
 #import bevy_pbr::{
-    mesh_view_types::Lights,
     atmosphere::{
-        types::{Atmosphere, AtmosphereSettings},
-        bindings::{atmosphere, view, settings},
+        internal::{
+            atmosphere, lut_based_uniforms, MIDPOINT_RATIO,
+            sample_medium, L_scattering, view_radius,
+            direction_atmosphere_to_world,
+            sky_view_lut_uv_to_zenith_azimuth, 
+        },
         functions::{
-            sample_atmosphere, get_local_up, AtmosphereSample,
-            sample_local_inscattering, get_local_r, view_radius,
-            max_atmosphere_distance, direction_atmosphere_to_world,
-            sky_view_lut_uv_to_zenith_azimuth, zenith_azimuth_to_ray_dir,
-            MIDPOINT_RATIO
+            get_local_up, get_local_r, 
+            max_atmosphere_distance, 
+            zenith_azimuth_to_ray_dir,
         },
     }
 }
 
 #import bevy_render::{
-    view::View,
     maths::HALF_PI,
 }
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
@@ -24,7 +24,7 @@
 @compute
 @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
-    let uv = vec2<f32>(idx.xy) / vec2<f32>(settings.sky_view_lut_size);
+    let uv = vec2<f32>(idx.xy) / vec2<f32>(lut_based_uniforms.settings.sky_view_lut_size);
 
     let r = view_radius();
     var zenith_azimuth = sky_view_lut_uv_to_zenith_azimuth(r, uv);
@@ -46,12 +46,12 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
 
         let local_r = get_local_r(r, mu, t_i);
         let local_up = get_local_up(r, t_i, ray_dir_ws);
-        let local_atmosphere = sample_atmosphere(local_r);
+        let medium = sample_medium(local_r);
 
-        let sample_optical_depth = local_atmosphere.extinction * dt_i;
+        let sample_optical_depth = medium.extinction * dt_i;
         let sample_transmittance = exp(-sample_optical_depth);
 
-        let inscattering = sample_local_inscattering(
+        let inscattering = L_scattering(
             local_atmosphere,
             ray_dir_ws,
             local_r,

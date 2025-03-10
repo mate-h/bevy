@@ -70,7 +70,7 @@ fn transmittance_lut_r_mu_to_uv(planet: Planet, r: f32, mu: f32) -> vec2<f32> {
     let rho = sqrt(max(r * r - planet.lower_radius_sq, 0.0));
 
     // Distance from a point at height r to the top atmosphere boundary at zenith angle mu
-    let d = distance_to_top_atmosphere_boundary(r, mu);
+    let d = distance_to_top_atmosphere_boundary(planet, r, mu);
 
     // Minimum and maximum distance to the top atmosphere boundary from a point at height r
     let d_min = planet.upper_radius - r; // length of the ray straight up to the top atmosphere boundary

@@ -3,7 +3,7 @@
 #import bevy_render::maths::{PI, HALF_PI, PI_2, FRAC_4_PI, FRAC_3_16_PI, fast_acos, fast_acos_4, fast_atan2}
 
 #import bevy_pbr::atmosphere::{
-    types::Atmosphere,
+    types::{Atmosphere, Planet},
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, transmittance_lut_uv_to_r_mu, 
         ray_intersects_ground, distance_to_top_atmosphere_boundary, 
@@ -54,7 +54,7 @@ fn sample_transmittance_lut(planet: Planet, lut: texture_2d<f32>, smp: sampler, 
 
 fn sample_multiscattering_lut(planet: Planet, lut: texture_2d<f32>, smp: sampler, r: f32, mu: f32) -> vec3<f32> {
     let uv = multiscattering_lut_r_mu_to_uv(planet, r, mu);
-    return textureSampleLevel(plut, smp, uv, 0.0).rgb;
+    return textureSampleLevel(lut, smp, uv, 0.0).rgb;
 }
 
 
@@ -78,10 +78,10 @@ fn henyey_greenstein_phase(neg_LdotV: f32, g: f32) -> f32 {
 
 // TRANSFORM UTILITIES
 
-fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
-    let t_top = distance_to_top_atmosphere_boundary(r, mu);
-    let t_bottom = distance_to_bottom_atmosphere_boundary(r, mu);
-    let hits = ray_intersects_ground(r, mu);
+fn max_atmosphere_distance(planet: Planet, r: f32, mu: f32) -> f32 {
+    let t_top = distance_to_top_atmosphere_boundary(planet, r, mu);
+    let t_bottom = distance_to_bottom_atmosphere_boundary(planet, r, mu);
+    let hits = ray_intersects_ground(planet, r, mu);
     return select(t_top, t_bottom, hits);
 }
 

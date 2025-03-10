@@ -2,19 +2,11 @@
     mesh_view_types::{Lights, DirectionalLight},
     atmosphere::{
         types::{Atmosphere, AtmosphereSettings},
-        bindings::{atmosphere, settings, view, lights, aerial_view_lut_out},
-        common::{
-              
-        },
-        functions::{
-            sample_transmittance_lut, sample_atmosphere, rayleigh, henyey_greenstein,
-            sample_multiscattering_lut, AtmosphereSample, sample_local_inscattering,
-            get_local_r, get_local_up, view_radius, uv_to_ndc, max_atmosphere_distance,
-            uv_to_ray_direction, MIDPOINT_RATIO
-        },
+        internal::{lut_based_uniforms, sample_medium, L_scattering, MIDPOINT_RATIO},
+        functions::{get_local_r, get_local_up, max_atmosphere_distance},
     }
 }
-
+ 
 
 @group(0) @binding(9) var aerial_view_lut_out: texture_storage_3d<rgba16float, write>;
 
@@ -23,7 +15,11 @@
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     if any(idx.xy > settings.aerial_view_lut_size.xy) { return; }
 
-    let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(settings.aerial_view_lut_size.xy);
+    let aerial_view_lut_size = lut_based_uniforms.settings.aerial_view_lut_size;
+    let aerial_view_lut_samples = lut_based_uniforms.settings.aerial_view_lut_samples;
+    let aerial_view_lut_max_distance = lut_based_uniforms.settings.aerial_view_lut_max_distance;
+
+    let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(aerial_view_lut_size.xy);
     let ray_dir = uv_to_ray_direction(uv);
     let r = view_radius();
     let mu = ray_dir.y;
@@ -33,9 +29,9 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     var total_inscattering = vec3(0.0);
     var throughput = vec3(1.0);
 
-    for (var slice_i: u32 = 0; slice_i < settings.aerial_view_lut_size.z; slice_i++) {
-        for (var step_i: u32 = 0; step_i < settings.aerial_view_lut_samples; step_i++) {
-            let t_i = t_max * (f32(slice_i) + ((f32(step_i) + MIDPOINT_RATIO) / f32(settings.aerial_view_lut_samples))) / f32(settings.aerial_view_lut_size.z);
+    for (var slice_i: u32 = 0; slice_i < aerial_view_lut_size.z; slice_i++) {
+        for (var step_i: u32 = 0; step_i < aerial_view_lut_samples; step_i++) {
+            let t_i = t_max * (f32(slice_i) + ((f32(step_i) + MIDPOINT_RATIO) / f32(aerial_view_lut_samples))) / f32(aerial_view_lut_size.z);
             let dt = (t_i - prev_t);
             prev_t = t_i;
 

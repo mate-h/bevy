@@ -19,7 +19,25 @@
 //   frame. This enables the non-linear latitude parametrization the paper uses 
 //   to concentrate detail near the horizon 
 
-#import bevy_render::maths::{PI_2, FRAC_2_PI, FRAC_PI}
+#define_import_path bevy_pbr::atmosphere::internal
+
+#import bevy_pbr::{
+    mesh_view_types::Lights,
+    atmosphere::{
+        types::{Atmosphere, LutBasedUniforms},
+        functions::{uv_to_ndc, rayleigh_phase, henyey_greenstein_phase, sample_transmittance_lut, sample_multiscattering_lut},
+        bruneton_functions::ray_intersects_ground
+    }
+}
+
+
+#import bevy_render::{
+    view::View,
+    maths::{
+        PI, PI_2, ROOT_2, FRAC_2_PI, FRAC_PI, 
+        HALF_PI, fast_acos_4, fast_atan2, fast_acos
+    }
+}
 
 // BINDINGS
 
@@ -100,9 +118,10 @@ fn sample_sky_view_lut(r: f32, ray_dir_as: vec3<f32>) -> vec3<f32> {
 // RGB channels: total inscattered light along the camera ray to the current sample.
 // A channel: average transmittance across all wavelengths to the current sample.
 fn sample_aerial_view_lut(pos_ndc: vec3<f32>) -> vec4<f32> {
+    let uv = uv_to_ndc(pos_ndc.xy);
     let view_pos = view.view_from_clip * vec4(pos_ndc, 1.0); //TODO: use transform fns to get dist to camera
     let dist = length(view_pos.xyz / view_pos.w);
-    let t_max = lut_based_settings.aerial_view_lut_max_distance;
+    let t_max = lut_based_uniforms.settings.aerial_view_lut_max_distance;
     let num_slices = f32(lut_based_uniforms.settings.aerial_view_lut_size.z);
     // Offset the W coordinate by -0.5 over the max distance in order to 
     // align sampling position with slice boundaries, since each texel 
@@ -138,20 +157,20 @@ fn sample_medium(r: f32) -> Medium {
     let altitude = clamp(r, atmosphere.planet.lower_radius, atmosphere.planet.upper_radius) - atmosphere.planet.lower_radius;
 
     // atmosphere values at altitude
-    let mie_density = exp(-atmosphere.profile.mie_density_exp_scale * altitude);
-    let rayleigh_density = exp(-atmosphere.profile.rayleigh_density_exp_scale * altitude);
-    var ozone_density: f32 = max(0.0, 1.0 - (abs(altitude - atmosphere.profile.ozone_layer_altitude) / (atmosphere.profile.ozone_layer_width * 0.5)));
+    let mie_density = exp(-atmosphere.scattering_profile.mie_density_exp_scale * altitude);
+    let rayleigh_density = exp(-atmosphere.scattering_profile.rayleigh_density_exp_scale * altitude);
+    var ozone_density: f32 = max(0.0, 1.0 - (abs(altitude - atmosphere.scattering_profile.ozone_layer_altitude) / (atmosphere.scattering_profile.ozone_layer_width * 0.5)));
 
-    let mie_scattering = mie_density * atmosphere.profile.mie_scattering;
-    let mie_absorption = mie_density * atmosphere.profile.mie_absorption;
+    let mie_scattering = mie_density * atmosphere.scattering_profile.mie_scattering;
+    let mie_absorption = mie_density * atmosphere.scattering_profile.mie_absorption;
     let mie_extinction = mie_scattering + mie_absorption;
 
-    let rayleigh_scattering = rayleigh_density * atmosphere.profile.rayleigh_scattering;
+    let rayleigh_scattering = rayleigh_density * atmosphere.scattering_profile.rayleigh_scattering;
     // no rayleigh absorption
     // rayleigh extinction is the sum of scattering and absorption
 
     // ozone doesn't contribute to scattering
-    let ozone_absorption = ozone_density * atmosphere.profile.ozone_absorption;
+    let ozone_absorption = ozone_density * atmosphere.scattering_profile.ozone_absorption;
 
     var medium: Medium;
     medium.rayleigh_scattering = rayleigh_scattering;
@@ -175,18 +194,18 @@ fn L_scattering(medium: Medium, ray_dir_ws: vec3<f32>, local_r: f32, local_up: v
 
         // Phase functions give the proportion of light
         // scattered towards the camera for each scattering type
-        let rayleigh_phase = rayleigh(neg_LdotV);
-        let mie_phase = henyey_greenstein(neg_LdotV);
+        let rayleigh_phase = rayleigh_phase(neg_LdotV);
+        let mie_phase = henyey_greenstein_phase(neg_LdotV);
         let scattering_coeff = medium.rayleigh_scattering * rayleigh_phase + medium.mie_scattering * mie_phase;
 
-        let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
-        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
+        let transmittance_to_light = sample_transmittance_lut(atmosphere.planet, transmittance_lut, atmosphere_sampler, local_r, mu_light);
+        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(atmosphere.planet, local_r, mu_light));
 
         // Transmittance from scattering event to light source
         let scattering_factor = shadow_factor * scattering_coeff;
 
         // Additive factor from the multiscattering LUT
-        let psi_ms = sample_multiscattering_lut(local_r, mu_light);
+        let psi_ms = sample_multiscattering_lut(atmosphere.planet, multiscattering_lut, atmosphere_sampler, local_r, mu_light);
         let multiscattering_factor = psi_ms * (medium.rayleigh_scattering + medium.mie_scattering);
 
         inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
@@ -217,7 +236,7 @@ fn L_sun(transmittance: vec3<f32>, r: f32, ray_dir_ws: vec3<f32>) -> vec3<f32> {
 // MISC TRANSFORMS
 
 fn view_radius() -> f32 {
-    return view.position.y + atmosphere.planet.lower_radius;
+    return view.world_position.y + atmosphere.planet.lower_radius;
 }
 
 // Modified from skybox.wgsl. For this pass we don't need to apply a separate sky transform or consider camera viewport.
@@ -259,18 +278,18 @@ fn ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
 
 fn ndc_to_camera_dist(ndc: vec3<f32>) -> f32 {
     let view_pos = view.view_from_clip * vec4(ndc, 1.0);
-    let t = length(view_pos.xyz / view_pos.w) * settings.scene_units_to_m;
+    let t = length(view_pos.xyz / view_pos.w);
     return t;
 }
 
 /// Converts a direction in world space to atmosphere space
-fn direction_world_to_atmosphere(tf: AtmosphereTransforms, dir_ws: vec3<f32>) -> vec3<f32> {
-    let dir_as = tf.atmosphere_from_world * vec4(dir_ws, 0.0);
+fn direction_world_to_atmosphere(dir_ws: vec3<f32>) -> vec3<f32> {
+    let dir_as = lut_based_uniforms.transforms.atmosphere_from_world * vec4(dir_ws, 0.0);
     return dir_as.xyz;
 }
 
 /// Converts a direction in atmosphere space to world space
-fn direction_atmosphere_to_world(tf: AtmosphereTransforms, dir_as: vec3<f32>) -> vec3<f32> {
-    let dir_ws = tf.world_from_atmosphere * vec4(dir_as, 0.0);
+fn direction_atmosphere_to_world(dir_as: vec3<f32>) -> vec3<f32> {
+    let dir_ws = lut_based_uniforms.transforms.world_from_atmosphere * vec4(dir_as, 0.0);
     return dir_ws.xyz;
 }

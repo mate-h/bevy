@@ -1,22 +1,17 @@
 #import bevy_pbr::{
-    mesh_view_types::{Lights, DirectionalLight},
     atmosphere::{
-        types::{Atmosphere, AtmosphereSettings},
-        bindings::{atmosphere, settings},
+        internal::{atmosphere, atmosphere_sampler, sample_medium, transmittance_lut},
         functions::{
-            multiscattering_lut_uv_to_r_mu, sample_transmittance_lut,
-            get_local_r, get_local_up, sample_atmosphere, FRAC_4_PI,
-            max_atmosphere_distance, rayleigh, henyey_greenstein,
-            zenith_azimuth_to_ray_dir,
+            sample_transmittance_lut,
+            multiscattering_lut_uv_to_r_mu,
+            get_local_r, get_local_up,
+            max_atmosphere_distance,
         },
-        bruneton_functions::{
-            distance_to_top_atmosphere_boundary, distance_to_bottom_atmosphere_boundary, ray_intersects_ground
-        }
+        bruneton_functions::ray_intersects_ground
     }
 }
 
-#import bevy_render::maths::{PI, PI_2, r2_seq, unit_square_to_sphere}
-
+#import bevy_render::maths::{PI, FRAC_4_PI, r2_seq, unit_square_to_sphere}
 
 @group(0) @binding(9) var multiscattering_lut_out: texture_storage_2d<rgba16float, write>;
 
@@ -26,10 +21,12 @@ var<workgroup> l_shared_mem: array<vec3<f32>, 64>;
 
 @compute 
 @workgroup_size(1, 1, 64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    var uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(core_settings.multiscattering_lut_size);
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+    var uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(atmosphere.settings.multiscattering_lut_size);
 
-    let r_mu = multiscattering_lut_uv_to_r_mu(uv);
+    let r_mu = multiscattering_lut_uv_to_r_mu(atmosphere.planet, uv);
     let light_dir = normalize(vec3(0.0, r_mu.y, -1.0));
 
     let ray_dir = unit_square_to_sphere(r2_seq(global_id.z));
@@ -62,13 +59,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Equation 10 from the paper: Geometric series for infinite scattering
     let psi_ms = l_2 / (1.0 - f_ms);
-    textureStore(multiscattering_lut_out, global_id.xy, vec4<f32>(psi_ms, 1.0));
+    if local_id.z == 0 {
+        textureStore(multiscattering_lut_out, global_id.xy, vec4<f32>(psi_ms, 1.0));
+    }
 }
 
 struct MultiscatteringSample {
-    l_2: vec3<f32>,
-    f_ms: vec3<f32>,
-};
+        l_2: vec3<f32>,
+        f_ms: vec3<f32>,
+    };
 
 fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) -> MultiscatteringSample {
     // get the cosine of the zenith angle of the view direction with respect to the light direction
@@ -96,7 +95,7 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
         let ms_int = (ms - ms * sample_transmittance) / local_atmosphere.extinction;
         f_ms += throughput * ms_int;
 
-        let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
+        let transmittance_to_light = sample_transmittance_lut(atmosphere.planet, transmitance_lut, atmosphere_sampler, local_r, mu_light);
         let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
 
         let s = scattering_no_phase * shadow_factor * FRAC_4_PI;
@@ -113,7 +112,7 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
     if ray_intersects_ground(r, mu_view) {
         let local_up = get_local_up(r, t_max, ray_dir);
         let mu_light = dot(light_dir, local_up);
-        let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
+        let transmittance_to_light = sample_transmittance_lut(atmosphere.planet, transmittance_lut, atmosphere_sampler, 0.0, mu_light);
         let ground_luminance = transmittance_to_light * throughput * max(mu_light, 0.0) * atmosphere.planet.ground_albedo;
         l_2 += ground_luminance;
     }
