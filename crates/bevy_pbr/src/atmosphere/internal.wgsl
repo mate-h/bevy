@@ -42,7 +42,7 @@
 // BINDINGS
 
 // core bindings
-@group(0) @binding(0) var<storage> atmosphere: Atmosphere;
+@group(0) @binding(0) var<storage, read> atmosphere: Atmosphere;
 @group(0) @binding(1) var atmosphere_sampler: sampler;
 
 // uniform bindings 
@@ -195,7 +195,7 @@ fn L_scattering(medium: Medium, ray_dir_ws: vec3<f32>, local_r: f32, local_up: v
         // Phase functions give the proportion of light
         // scattered towards the camera for each scattering type
         let rayleigh_phase = rayleigh_phase(neg_LdotV);
-        let mie_phase = henyey_greenstein_phase(neg_LdotV);
+        let mie_phase = henyey_greenstein_phase(neg_LdotV, atmosphere.scattering_profile.mie_asymmetry);
         let scattering_coeff = medium.rayleigh_scattering * rayleigh_phase + medium.mie_scattering * mie_phase;
 
         let transmittance_to_light = sample_transmittance_lut(atmosphere.planet, transmittance_lut, atmosphere_sampler, local_r, mu_light);

@@ -2,7 +2,10 @@
     mesh_view_types::{Lights, DirectionalLight},
     atmosphere::{
         types::{Atmosphere, AtmosphereSettings},
-        internal::{lut_based_uniforms, sample_medium, L_scattering, MIDPOINT_RATIO},
+        internal::{
+            lut_based_uniforms, sample_medium, L_scattering,
+            MIDPOINT_RATIO, uv_to_ray_dir_ws, view_radius
+        },
         functions::{get_local_r, get_local_up, max_atmosphere_distance},
     }
 }
@@ -13,17 +16,18 @@
 @compute
 @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
-    if any(idx.xy > settings.aerial_view_lut_size.xy) { return; }
-
     let aerial_view_lut_size = lut_based_uniforms.settings.aerial_view_lut_size;
     let aerial_view_lut_samples = lut_based_uniforms.settings.aerial_view_lut_samples;
     let aerial_view_lut_max_distance = lut_based_uniforms.settings.aerial_view_lut_max_distance;
 
+    if any(idx.xy > aerial_view_lut_size.xy) { return; }
+
+
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(aerial_view_lut_size.xy);
-    let ray_dir = uv_to_ray_direction(uv);
+    let ray_dir = uv_to_ray_dir_ws(uv);
     let r = view_radius();
     let mu = ray_dir.y;
-    let t_max = settings.aerial_view_lut_max_distance;
+    let t_max = aerial_view_lut_max_distance;
 
     var prev_t = 0.0;
     var total_inscattering = vec3(0.0);
