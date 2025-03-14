@@ -96,7 +96,7 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
         f_ms += throughput * ms_int;
 
         let transmittance_to_light = sample_transmittance_lut(atmosphere.planet, transmittance_lut, atmosphere_sampler, local_r, mu_light);
-        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
+        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(atmosphere.planet, local_r, mu_light));
 
         let s = scattering_no_phase * shadow_factor * FRAC_4_PI;
         let s_int = (s - s * sample_transmittance) / medium.extinction;
@@ -109,7 +109,7 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
     }
 
     //include reflected luminance from planet ground 
-    if ray_intersects_ground(r, mu_view) {
+    if ray_intersects_ground(atmosphere.planet, r, mu_view) {
         let local_up = get_local_up(r, t_max, ray_dir);
         let mu_light = dot(light_dir, local_up);
         let transmittance_to_light = sample_transmittance_lut(atmosphere.planet, transmittance_lut, atmosphere_sampler, 0.0, mu_light);

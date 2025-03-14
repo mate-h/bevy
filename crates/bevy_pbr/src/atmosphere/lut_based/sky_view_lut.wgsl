@@ -33,7 +33,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let ray_dir_ws = direction_atmosphere_to_world(ray_dir_as);
 
     let mu = ray_dir_ws.y;
-    let t_max = max_atmosphere_distance(r, mu);
+    let t_max = max_atmosphere_distance(atmosphere.planet, r, mu);
 
     let sample_count = mix(1.0, f32(lut_based_uniforms.settings.sky_view_lut_samples), clamp(t_max * 0.01, 0.0, 1.0));
     var total_inscattering = vec3(0.0);
@@ -52,14 +52,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         let sample_transmittance = exp(-sample_optical_depth);
 
         let inscattering = L_scattering(
-            local_atmosphere,
+            medium,
             ray_dir_ws,
             local_r,
             local_up
         );
 
         // Analytical integration of the single scattering term in the radiance transfer equation
-        let s_int = (inscattering - inscattering * sample_transmittance) / local_atmosphere.extinction;
+        let s_int = (inscattering - inscattering * sample_transmittance) / medium.extinction;
         total_inscattering += throughput * s_int;
 
         throughput *= sample_transmittance;
