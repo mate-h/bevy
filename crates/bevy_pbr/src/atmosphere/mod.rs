@@ -45,7 +45,7 @@ use bevy_ecs::{
     schedule::IntoScheduleConfigs,
     system::{lifetimeless::Read, Query},
 };
-use bevy_math::{UVec2, UVec3, Vec3};
+use bevy_math::{UVec2, UVec3, Vec2, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_component::UniformComponentPlugin,
@@ -83,6 +83,8 @@ mod shaders {
     pub const BRUNETON_FUNCTIONS: Handle<Shader> =
         weak_handle!("e2dccbb0-7322-444a-983b-e74d0a08bcda");
     pub const BINDINGS: Handle<Shader> = weak_handle!("bcc55ce5-0fc4-451e-8393-1b9efd2612c4");
+    pub const CLOUD_FUNCTIONS: Handle<Shader> =
+        weak_handle!("38f96c34-2c52-410f-a5e8-26c8456c5394");
 
     pub const TRANSMITTANCE_LUT: Handle<Shader> =
         weak_handle!("a4187282-8cb1-42d3-889c-cbbfb6044183");
@@ -105,6 +107,12 @@ impl Plugin for AtmospherePlugin {
             app,
             shaders::BRUNETON_FUNCTIONS,
             "bruneton_functions.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            shaders::CLOUD_FUNCTIONS,
+            "cloud_functions.wgsl",
             Shader::from_wgsl
         );
 
@@ -147,11 +155,14 @@ impl Plugin for AtmospherePlugin {
 
         app.register_type::<Atmosphere>()
             .register_type::<AtmosphereSettings>()
+            .register_type::<Clouds>()
             .add_plugins((
                 ExtractComponentPlugin::<Atmosphere>::default(),
                 ExtractComponentPlugin::<AtmosphereSettings>::default(),
+                ExtractComponentPlugin::<Clouds>::default(),
                 UniformComponentPlugin::<Atmosphere>::default(),
                 UniformComponentPlugin::<AtmosphereSettings>::default(),
+                UniformComponentPlugin::<Clouds>::default(),
             ));
     }
 
@@ -457,6 +468,82 @@ impl ExtractComponent for AtmosphereSettings {
     type QueryFilter = (With<Camera3d>, With<Atmosphere>);
 
     type Out = AtmosphereSettings;
+
+    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
+    }
+}
+
+/// This component adds cloud rendering to the atmosphere system.
+/// Clouds are simulated as a volumetric layer using noise-based methods
+/// to create natural-looking formations.
+///
+/// Clouds are rendered on top of the existing atmosphere by ray-marching
+/// through a volume in the final render_sky pass.
+///
+/// Note: Cloud rendering is somewhat computationally expensive, especially
+/// when using higher sample counts or detailed noise functions.
+#[derive(Clone, Component, Reflect, ShaderType)]
+#[reflect(Clone, Default)]
+pub struct Clouds {
+    /// Controls the overall cloud coverage from 0.0 (no clouds) to 1.0 (overcast)
+    pub coverage: f32,
+
+    /// Base altitude of the cloud layer in meters from planet surface
+    pub altitude: f32,
+
+    /// Thickness of the cloud layer in meters
+    pub thickness: f32,
+
+    /// Overall density multiplier for the clouds
+    pub density: f32,
+
+    /// The scale of the noise used for cloud shape (affects size of cloud formations)
+    pub shape_scale: Vec3,
+
+    /// The scale of the noise used for cloud detail
+    pub detail_scale: Vec3,
+
+    /// Strength of the detail noise influence
+    pub detail_strength: f32,
+
+    /// Speed of cloud movement in world units per second
+    pub wind_speed: Vec2,
+
+    /// Overall cloud brightness multiplier
+    pub brightness: f32,
+
+    /// Number of steps for cloud ray-marching
+    /// Higher values give better quality but reduce performance
+    pub ray_march_steps: u32,
+
+    /// Number of steps for cloud light sampling
+    /// Higher values give better cloud lighting quality
+    pub light_samples: u32,
+}
+
+impl Default for Clouds {
+    fn default() -> Self {
+        Self {
+            coverage: 0.5,
+            altitude: 2000.0,
+            thickness: 4000.0,
+            density: 0.05,
+            shape_scale: Vec3::new(0.0001, 0.0002, 0.0001),
+            detail_scale: Vec3::new(0.001, 0.001, 0.001),
+            detail_strength: 0.3,
+            wind_speed: Vec2::new(4.0, 2.0),
+            brightness: 1.0,
+            ray_march_steps: 32,
+            light_samples: 4,
+        }
+    }
+}
+
+impl ExtractComponent for Clouds {
+    type QueryData = Read<Clouds>;
+    type QueryFilter = With<Camera3d>;
+    type Out = Clouds;
 
     fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
         Some(item.clone())

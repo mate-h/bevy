@@ -1,12 +1,13 @@
 #import bevy_pbr::atmosphere::{
     types::{Atmosphere, AtmosphereSettings},
-    bindings::{atmosphere, view, atmosphere_transforms},
+    bindings::{atmosphere, view, atmosphere_transforms, clouds, globals},
     functions::{
         sample_transmittance_lut, sample_transmittance_lut_segment,
         sample_sky_view_lut, direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
         view_radius, sample_sun_radiance, ndc_to_camera_dist
     },
+    cloud_functions::{sample_clouds}
 };
 #import bevy_render::view::View;
 
@@ -48,6 +49,14 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
         inscattering = sample_aerial_view_lut(in.uv, t);
         transmittance = sample_transmittance_lut_segment(r, mu, t);
     }
+    
+    // Sample clouds along the ray
+    let cloud_result = sample_clouds(view.world_position, ray_dir_ws.xyz, globals.time);
+    
+    // Blend clouds with atmosphere
+    inscattering = inscattering * cloud_result.transmittance + cloud_result.inscattering;
+    transmittance *= cloud_result.transmittance;
+    
 #ifdef DUAL_SOURCE_BLENDING
     return RenderSkyOutput(vec4(inscattering, 0.0), vec4(transmittance, 1.0));
 #else
