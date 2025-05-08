@@ -74,7 +74,7 @@ use self::{
     },
 };
 
-mod shaders {
+pub mod shaders {
     use bevy_asset::{weak_handle, Handle};
     use bevy_render::render_resource::Shader;
 
