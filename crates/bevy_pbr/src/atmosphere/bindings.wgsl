@@ -1,10 +1,11 @@
 #define_import_path bevy_pbr::atmosphere::bindings
 
 #import bevy_render::view::View;
+#import bevy_render::globals::Globals;
 
 #import bevy_pbr::{
     mesh_view_types::Lights,
-    atmosphere::types::{Atmosphere, AtmosphereSettings, AtmosphereTransforms}
+    atmosphere::types::{Atmosphere, AtmosphereSettings, AtmosphereTransforms, Clouds}
 }
 
 @group(0) @binding(0) var<uniform> atmosphere: Atmosphere;
@@ -20,3 +21,5 @@
 @group(0) @binding(10) var sky_view_lut_sampler: sampler;
 @group(0) @binding(11) var aerial_view_lut: texture_3d<f32>;
 @group(0) @binding(12) var aerial_view_lut_sampler: sampler;
+@group(0) @binding(14) var<uniform> clouds: Clouds;
+@group(0) @binding(15) var<uniform> globals: Globals;

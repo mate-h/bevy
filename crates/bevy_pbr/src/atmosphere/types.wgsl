@@ -36,6 +36,19 @@ struct AtmosphereSettings {
     scene_units_to_m: f32,
 }
 
+struct Clouds {
+    coverage: f32,
+    altitude: f32,
+    thickness: f32,
+    density: f32,
+    shape_scale: vec3<f32>,
+    detail_scale: vec3<f32>,
+    detail_strength: f32,
+    wind_speed: vec2<f32>,
+    brightness: f32,
+    ray_march_steps: u32,
+    light_samples: u32,
+}
 
 // "Atmosphere space" is just the view position with y=0 and oriented horizontally,
 // so the horizon stays a horizontal line in our luts

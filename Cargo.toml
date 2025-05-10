@@ -970,6 +970,17 @@ category = "3D Rendering"
 wasm = true
 
 [[example]]
+name = "clouds"
+path = "examples/3d/clouds.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.clouds]
+name = "Volumetric Clouds"
+description = "A scene showcasing volumetric cloud rendering with the atmosphere system"
+category = "3D Rendering"
+wasm = true
+
+[[example]]
 name = "fog"
 path = "examples/3d/fog.rs"
 doc-scrape-examples = true

@@ -13,6 +13,7 @@ use bevy_math::{Mat4, Vec3};
 use bevy_render::{
     camera::Camera,
     extract_component::ComponentUniforms,
+    globals::GlobalsUniform,
     render_resource::{binding_types::*, *},
     renderer::{RenderDevice, RenderQueue},
     texture::{CachedTexture, TextureCache},
@@ -21,7 +22,7 @@ use bevy_render::{
 
 use crate::{GpuLights, LightMeta};
 
-use super::{shaders, Atmosphere, AtmosphereSettings};
+use super::{shaders, Atmosphere, AtmosphereSettings, Clouds};
 
 #[derive(Resource)]
 pub(crate) struct AtmosphereBindGroupLayouts {
@@ -154,6 +155,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (4, uniform_buffer::<GpuLights>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
                     (6, sampler(SamplerBindingType::Filtering)),
+                    (7, texture_2d(TextureSampleType::Float { filterable: true })), //multiscattering lut
+                    (8, sampler(SamplerBindingType::Filtering)), //multiscattering lut sampler
                     (9, texture_2d(TextureSampleType::Float { filterable: true })), //sky view lut and sampler
                     (10, sampler(SamplerBindingType::Filtering)),
                     (
@@ -167,6 +170,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                         13,
                         texture_2d(TextureSampleType::Depth),
                     ),
+                    (14, uniform_buffer::<Clouds>(false)), // clouds uniform
+                    (15, uniform_buffer::<GlobalsUniform>(false)), // globals uniform (non-dynamic)
                 ),
             ),
         );
@@ -183,6 +188,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (4, uniform_buffer::<GpuLights>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
                     (6, sampler(SamplerBindingType::Filtering)),
+                    (7, texture_2d(TextureSampleType::Float { filterable: true })), //multiscattering lut
+                    (8, sampler(SamplerBindingType::Filtering)), //multiscattering lut sampler
                     (9, texture_2d(TextureSampleType::Float { filterable: true })), //sky view lut and sampler
                     (10, sampler(SamplerBindingType::Filtering)),
                     (
@@ -196,6 +203,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                         13,
                         texture_2d_multisampled(TextureSampleType::Depth),
                     ),
+                    (14, uniform_buffer::<Clouds>(false)), // clouds uniform
+                    (15, uniform_buffer::<GlobalsUniform>(false)), // globals uniform (non-dynamic)
                 ),
             ),
         );
@@ -612,35 +621,44 @@ pub(super) fn prepare_atmosphere_bind_groups(
     atmosphere_transforms: Res<AtmosphereTransforms>,
     atmosphere_uniforms: Res<ComponentUniforms<Atmosphere>>,
     settings_uniforms: Res<ComponentUniforms<AtmosphereSettings>>,
-
+    clouds_uniforms: Res<ComponentUniforms<Clouds>>,
+    globals_uniforms: Res<bevy_render::globals::GlobalsBuffer>,
     mut commands: Commands,
 ) {
-    if views.iter().len() == 0 {
-        return;
-    }
+    let view_binding = match view_uniforms.uniforms.binding() {
+        Some(binding) => binding,
+        None => return,
+    };
 
-    let atmosphere_binding = atmosphere_uniforms
-        .binding()
-        .expect("Failed to prepare atmosphere bind groups. Atmosphere uniform buffer missing");
+    let atmosphere_binding = match atmosphere_uniforms.binding() {
+        Some(binding) => binding,
+        None => return,
+    };
 
-    let transforms_binding = atmosphere_transforms
-        .uniforms()
-        .binding()
-        .expect("Failed to prepare atmosphere bind groups. Atmosphere transforms buffer missing");
+    let settings_binding = match settings_uniforms.binding() {
+        Some(binding) => binding,
+        None => return,
+    };
 
-    let settings_binding = settings_uniforms.binding().expect(
-        "Failed to prepare atmosphere bind groups. AtmosphereSettings uniform buffer missing",
-    );
+    let transforms_binding = match atmosphere_transforms.uniforms().binding() {
+        Some(binding) => binding,
+        None => return,
+    };
 
-    let view_binding = view_uniforms
-        .uniforms
-        .binding()
-        .expect("Failed to prepare atmosphere bind groups. View uniform buffer missing");
+    let lights_binding = match lights_uniforms.view_gpu_lights.binding() {
+        Some(binding) => binding,
+        None => return,
+    };
 
-    let lights_binding = lights_uniforms
-        .view_gpu_lights
-        .binding()
-        .expect("Failed to prepare atmosphere bind groups. Lights uniform buffer missing");
+    let clouds_binding = match clouds_uniforms.binding() {
+        Some(binding) => binding,
+        None => return,
+    };
+
+    let globals_binding = match globals_uniforms.buffer.binding() {
+        Some(binding) => binding,
+        None => return,
+    };
 
     for (entity, textures, view_depth_texture, msaa) in &views {
         let transmittance_lut = render_device.create_bind_group(
@@ -683,7 +701,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         );
 
         let aerial_view_lut = render_device.create_bind_group(
-            "sky_view_lut_bind_group",
+            "aerial_view_lut_bind_group",
             &layouts.aerial_view_lut,
             &BindGroupEntries::with_indices((
                 (0, atmosphere_binding.clone()),
@@ -698,13 +716,15 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )),
         );
 
+        let layout = if msaa.samples() > 1 {
+            &render_sky_layouts.render_sky_msaa
+        } else {
+            &render_sky_layouts.render_sky
+        };
+
         let render_sky = render_device.create_bind_group(
             "render_sky_bind_group",
-            if *msaa == Msaa::Off {
-                &render_sky_layouts.render_sky
-            } else {
-                &render_sky_layouts.render_sky_msaa
-            },
+            layout,
             &BindGroupEntries::with_indices((
                 (0, atmosphere_binding.clone()),
                 (1, settings_binding.clone()),
@@ -713,11 +733,15 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (4, lights_binding.clone()),
                 (5, &textures.transmittance_lut.default_view),
                 (6, &samplers.transmittance_lut),
+                (7, &textures.multiscattering_lut.default_view),
+                (8, &samplers.multiscattering_lut),
                 (9, &textures.sky_view_lut.default_view),
                 (10, &samplers.sky_view_lut),
                 (11, &textures.aerial_view_lut.default_view),
                 (12, &samplers.aerial_view_lut),
                 (13, view_depth_texture.view()),
+                (14, clouds_binding.clone()),
+                (15, globals_binding.clone()),
             )),
         );
 

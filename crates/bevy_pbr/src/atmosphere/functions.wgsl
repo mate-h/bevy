@@ -191,8 +191,7 @@ fn rayleigh(neg_LdotV: f32) -> f32 {
 
 // evaluates the henyey-greenstein phase function, which describes the likelihood
 // of a mie scattering event scattering light from the light direction towards the view
-fn henyey_greenstein(neg_LdotV: f32) -> f32 {
-    let g = atmosphere.mie_asymmetry;
+fn henyey_greenstein(neg_LdotV: f32, g: f32) -> f32 {
     let denom = 1.0 + g * g - 2.0 * g * neg_LdotV;
     return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
 }
@@ -257,7 +256,7 @@ fn sample_local_inscattering(local_atmosphere: AtmosphereSample, ray_dir: vec3<f
         // Phase functions give the proportion of light
         // scattered towards the camera for each scattering type
         let rayleigh_phase = rayleigh(neg_LdotV);
-        let mie_phase = henyey_greenstein(neg_LdotV);
+        let mie_phase = henyey_greenstein(neg_LdotV, atmosphere.mie_asymmetry);
         let scattering_coeff = local_atmosphere.rayleigh_scattering * rayleigh_phase + local_atmosphere.mie_scattering * mie_phase;
 
         let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
