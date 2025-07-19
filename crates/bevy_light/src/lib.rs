@@ -27,7 +27,7 @@ use cluster::{
 mod ambient_light;
 pub use ambient_light::AmbientLight;
 mod probe;
-pub use probe::{EnvironmentMapLight, IrradianceVolume, LightProbe};
+pub use probe::{EnvironmentMapLight, GeneratedEnvironmentMapLight, IrradianceVolume, LightProbe};
 mod volumetric;
 pub use volumetric::{FogVolume, VolumetricFog, VolumetricLight};
 pub mod cascade;
@@ -201,8 +201,8 @@ impl Plugin for LightPlugin {
 pub type WithLight = Or<(With<PointLight>, With<SpotLight>, With<DirectionalLight>)>;
 
 /// Add this component to make a [`Mesh3d`] not cast shadows.
-#[derive(Debug, Component, Reflect, Default)]
-#[reflect(Component, Default, Debug)]
+#[derive(Debug, Component, Reflect, Default, Clone, PartialEq)]
+#[reflect(Component, Default, Debug, Clone, PartialEq)]
 pub struct NotShadowCaster;
 /// Add this component to make a [`Mesh3d`] not receive shadows.
 ///
