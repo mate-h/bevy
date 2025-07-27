@@ -286,13 +286,13 @@ fn sample_local_inscattering(local_atmosphere: AtmosphereSample, ray_dir: vec3<f
     return inscattering;
 }
 
-fn sample_sun_luminance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
+fn sample_sun_radiance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
     let view_pos = get_view_position();
     let r = length(view_pos);
     let up = normalize(view_pos);
     let mu_view = dot(ray_dir_ws, up);
     let shadow_factor = f32(!ray_intersects_ground(r, mu_view));
-    var sun_luminance = vec3(0.0);
+    var sun_radiance = vec3(0.0);
     for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
         let light = &lights.directional_lights[light_i];
         let neg_LdotV = dot((*light).direction_to_light, ray_dir_ws);
@@ -302,10 +302,10 @@ fn sample_sun_luminance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
         if sun_angular_size > 0.0 {
             let factor = smoothstep(0.0, -pixel_size * ROOT_2, angle_to_sun - sun_angular_size * 0.5);
             let sun_solid_angle = (sun_angular_size * sun_angular_size) * 4.0 * FRAC_PI;
-            sun_luminance += ((*light).color.rgb / sun_solid_angle) * factor * shadow_factor;
+            sun_radiance += ((*light).color.rgb / sun_solid_angle) * factor * shadow_factor;
         }
     }
-    return sun_luminance;
+    return sun_radiance;
 }
 
 // TRANSFORM UTILITIES
@@ -546,7 +546,7 @@ fn raymarch_atmosphere(
         }
     }
 
-    // include reflected luminance from planet ground 
+    // include reflected radiance from planet ground 
     if ground && ray_intersects_ground(r, mu) {
         for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
             let light = &lights.directional_lights[light_i];
@@ -556,10 +556,10 @@ fn raymarch_atmosphere(
             let local_up = get_local_up(r, t_max, ray_dir);
             let mu_light = dot(light_dir, local_up);
             let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
-            let light_luminance = transmittance_to_light * max(mu_light, 0.0) * light_color;
+            let light_radiance = transmittance_to_light * max(mu_light, 0.0) * light_color;
             // Normalized Lambert BRDF
-            let ground_luminance = transmittance_to_ground * atmosphere.ground_albedo / PI;
-            result.inscattering += ground_luminance * light_luminance;
+            let ground_radiance = transmittance_to_ground * atmosphere.ground_albedo / PI;
+            result.inscattering += ground_radiance * light_radiance;
         }
     }
 

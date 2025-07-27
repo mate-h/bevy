@@ -38,7 +38,7 @@ fn setup_camera_fog(mut commands: Commands) {
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
         // bring the scene to a nicer brightness range.
-        Exposure::SUNLIGHT,
+        Exposure { ev100: 13.0 },
         // Tonemapper chosen just because it looked good with the scene, any
         // tonemapper would be fine :)
         Tonemapping::AcesFitted,
