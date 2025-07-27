@@ -95,6 +95,7 @@ pub struct ExtractedDirectionalLight {
     pub soft_shadow_size: Option<f32>,
     /// True if this light is using two-phase occlusion culling.
     pub occlusion_culling: bool,
+    pub angular_size: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wgsl!
@@ -130,6 +131,7 @@ pub struct GpuDirectionalLight {
     cascades_overlap_proportion: f32,
     depth_texture_base_index: u32,
     decal_index: u32,
+    angular_size: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wgsl!
@@ -271,6 +273,7 @@ pub fn extract_lights(
                 Option<&RenderLayers>,
                 Option<&VolumetricLight>,
                 Has<OcclusionCulling>,
+                Option<&SunLight>,
             ),
             Without<SpotLight>,
         >,
@@ -452,6 +455,7 @@ pub fn extract_lights(
         maybe_layers,
         volumetric_light,
         occlusion_culling,
+        sun_light,
     ) in &directional_lights
     {
         if !view_visibility.get() {
@@ -518,6 +522,7 @@ pub fn extract_lights(
                     frusta: extracted_frusta,
                     render_layers: maybe_layers.unwrap_or_default().clone(),
                     occlusion_culling,
+                    angular_size: sun_light.map_or(0.0, |sun_light| sun_light.angular_size),
                 },
                 RenderCascadesVisibleEntities {
                     entities: cascade_visible_entities,
@@ -1144,6 +1149,7 @@ pub fn prepare_lights(
                 num_cascades: num_cascades as u32,
                 cascades_overlap_proportion: light.cascade_shadow_config.overlap_proportion,
                 depth_texture_base_index: num_directional_cascades_enabled_for_this_view as u32,
+                angular_size: light.angular_size,
                 decal_index: decals
                     .as_ref()
                     .and_then(|decals| decals.get(*light_entity))

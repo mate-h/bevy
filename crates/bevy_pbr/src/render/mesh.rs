@@ -1,4 +1,7 @@
-use crate::material_bind_groups::{MaterialBindGroupIndex, MaterialBindGroupSlot};
+use crate::{
+    material_bind_groups::{MaterialBindGroupIndex, MaterialBindGroupSlot},
+    resources::prepare_atmosphere_buffer,
+};
 use allocator::MeshAllocator;
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetId};
 use bevy_core_pipeline::{
@@ -187,7 +190,8 @@ impl Plugin for MeshRenderPlugin {
                         prepare_mesh_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                         prepare_mesh_view_bind_groups
                             .in_set(RenderSystems::PrepareBindGroups)
-                            .after(prepare_oit_buffers),
+                            .after(prepare_oit_buffers)
+                            .after(prepare_atmosphere_buffer),
                         no_gpu_preprocessing::clear_batched_cpu_instance_buffers::<MeshPipeline>
                             .in_set(RenderSystems::Cleanup)
                             .after(RenderSystems::Render),
@@ -317,6 +321,7 @@ pub fn check_views_need_specialization(
             Has<RenderViewLightProbes<IrradianceVolume>>,
         ),
         Has<OrderIndependentTransparencySettings>,
+        Has<Atmosphere>,
     )>,
     ticks: SystemChangeTick,
 ) {
@@ -334,6 +339,7 @@ pub fn check_views_need_specialization(
         distance_fog,
         (has_environment_maps, has_irradiance_volumes),
         has_oit,
+        has_atmosphere,
     ) in views.iter_mut()
     {
         let mut view_key = MeshPipelineKey::from_msaa_samples(msaa.samples())
@@ -369,6 +375,10 @@ pub fn check_views_need_specialization(
 
         if has_oit {
             view_key |= MeshPipelineKey::OIT_ENABLED;
+        }
+
+        if has_atmosphere {
+            view_key |= MeshPipelineKey::ATMOSPHERE;
         }
 
         if let Some(projection) = projection {
@@ -2072,6 +2082,7 @@ bitflags::bitflags! {
         const HAS_PREVIOUS_MORPH                = 1 << 19;
         const OIT_ENABLED                       = 1 << 20;
         const DISTANCE_FOG                      = 1 << 21;
+        const ATMOSPHERE                        = 1 << 22;
         const LAST_FLAG                         = Self::DISTANCE_FOG.bits();
 
         // Bitfields
@@ -2540,6 +2551,10 @@ impl SpecializedMeshPipeline for MeshPipeline {
 
         if key.contains(MeshPipelineKey::DISTANCE_FOG) {
             shader_defs.push("DISTANCE_FOG".into());
+        }
+
+        if key.contains(MeshPipelineKey::ATMOSPHERE) {
+            shader_defs.push("ATMOSPHERE".into());
         }
 
         if self.binding_arrays_are_usable {

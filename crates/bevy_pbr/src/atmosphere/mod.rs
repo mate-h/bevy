@@ -36,7 +36,7 @@
 mod node;
 pub mod resources;
 
-use bevy_app::{App, Plugin};
+use bevy_app::{App, Plugin, Update};
 use bevy_asset::embedded_asset;
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
@@ -45,7 +45,8 @@ use bevy_ecs::{
     schedule::IntoScheduleConfigs,
     system::{lifetimeless::Read, Query},
 };
-use bevy_math::{UVec2, UVec3, Vec3};
+use bevy_light::{DirectionalLight, LightProbe};
+use bevy_math::{Quat, UVec2, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_component::UniformComponentPlugin,
@@ -62,17 +63,26 @@ use bevy_render::{
 };
 
 use bevy_core_pipeline::core_3d::{graph::Core3d, Camera3d};
+use bevy_transform::components::Transform;
 use resources::{
     prepare_atmosphere_transforms, queue_render_sky_pipelines, AtmosphereTransforms,
     RenderSkyBindGroupLayouts,
 };
 use tracing::warn;
 
+use crate::{
+    atmosphere::node::EnvironmentNode,
+    resources::{
+        prepare_atmosphere_buffer, prepare_atmosphere_probe_components, prepare_probe_textures,
+        prepare_view_textures, AtmosphereBuffer, AtmosphereEnvironmentMap,
+    },
+};
+
 use self::{
     node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
     resources::{
-        prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereBindGroupLayouts,
-        AtmosphereLutPipelines, AtmosphereSamplers,
+        prepare_atmosphere_bind_groups, AtmosphereBindGroupLayouts, AtmospherePipelines,
+        AtmosphereSamplers,
     },
 };
 
@@ -85,21 +95,26 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "functions.wgsl");
         load_shader_library!(app, "bruneton_functions.wgsl");
         load_shader_library!(app, "bindings.wgsl");
+        load_shader_library!(app, "shadows.wgsl");
 
         embedded_asset!(app, "transmittance_lut.wgsl");
         embedded_asset!(app, "multiscattering_lut.wgsl");
         embedded_asset!(app, "sky_view_lut.wgsl");
         embedded_asset!(app, "aerial_view_lut.wgsl");
         embedded_asset!(app, "render_sky.wgsl");
+        embedded_asset!(app, "environment.wgsl");
 
         app.register_type::<Atmosphere>()
             .register_type::<AtmosphereSettings>()
             .add_plugins((
                 ExtractComponentPlugin::<Atmosphere>::default(),
                 ExtractComponentPlugin::<AtmosphereSettings>::default(),
+                ExtractComponentPlugin::<AtmosphereEnvironmentMapLight>::default(),
+                ExtractComponentPlugin::<AtmosphereEnvironmentMap>::default(),
                 UniformComponentPlugin::<Atmosphere>::default(),
                 UniformComponentPlugin::<AtmosphereSettings>::default(),
-            ));
+            ))
+            .add_systems(Update, prepare_atmosphere_probe_components);
     }
 
     fn finish(&self, app: &mut App) {
@@ -131,29 +146,38 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<AtmosphereBindGroupLayouts>()
             .init_resource::<RenderSkyBindGroupLayouts>()
             .init_resource::<AtmosphereSamplers>()
-            .init_resource::<AtmosphereLutPipelines>()
+            .init_resource::<AtmospherePipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
+            .init_resource::<AtmosphereBuffer>()
             .add_systems(
                 Render,
                 (
                     configure_camera_depth_usages.in_set(RenderSystems::ManageViews),
                     queue_render_sky_pipelines.in_set(RenderSystems::Queue),
-                    prepare_atmosphere_textures.in_set(RenderSystems::PrepareResources),
+                    prepare_view_textures.in_set(RenderSystems::PrepareResources),
+                    prepare_probe_textures
+                        .in_set(RenderSystems::PrepareResources)
+                        .after(prepare_view_textures),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_atmosphere_buffer
+                        .in_set(RenderSystems::PrepareResources)
+                        .before(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_render_graph_node::<ViewNodeRunner<AtmosphereLutsNode>>(
                 Core3d,
                 AtmosphereNode::RenderLuts,
             )
+            .add_render_graph_node::<EnvironmentNode>(Core3d, AtmosphereNode::Environment)
             .add_render_graph_edges(
                 Core3d,
                 (
-                    // END_PRE_PASSES -> RENDER_LUTS -> MAIN_PASS
+                    // END_PRE_PASSES -> RENDER_LUTS -> ENVIRONMENT -> MAIN_PASS
                     Node3d::EndPrepasses,
                     AtmosphereNode::RenderLuts,
+                    AtmosphereNode::Environment,
                     Node3d::StartMainPass,
                 ),
             )
@@ -206,6 +230,11 @@ pub struct Atmosphere {
     ///
     /// units: m
     pub top_radius: f32,
+
+    /// The origin of the view relative to the center of the planet.
+    ///
+    /// units: m
+    pub origin: Vec3,
 
     /// An approximation of the average albedo (or color, roughly) of the
     /// planet's surface. This is used when calculating multiscattering.
@@ -275,6 +304,7 @@ impl Atmosphere {
     pub const EARTH: Atmosphere = Atmosphere {
         bottom_radius: 6_360_000.0,
         top_radius: 6_460_000.0,
+        origin: Vec3::new(0.0, 6_360_000.0, 0.0),
         ground_albedo: Vec3::splat(0.3),
         rayleigh_density_exp_scale: 1.0 / 8_000.0,
         rayleigh_scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
@@ -285,6 +315,22 @@ impl Atmosphere {
         ozone_layer_altitude: 25_000.0,
         ozone_layer_width: 30_000.0,
         ozone_absorption: Vec3::new(0.650e-6, 1.881e-6, 0.085e-6),
+    };
+
+    pub const MARS: Atmosphere = Atmosphere {
+        bottom_radius: 3_389_500.0,
+        top_radius: 3_509_500.0,
+        origin: Vec3::new(0.0, 3_389_500.0, 0.0),
+        ground_albedo: Vec3::splat(0.1),
+        rayleigh_density_exp_scale: 1.0 / 10_430.0,
+        rayleigh_scattering: Vec3::new(0.019918e-3, 0.01357e-3, 0.00575e-3),
+        mie_density_exp_scale: 1.0 / 3_095.0,
+        mie_scattering: 5.361771e-5,
+        mie_absorption: 5.530838e-7,
+        mie_asymmetry: 0.85,
+        ozone_layer_altitude: 0.0,
+        ozone_layer_width: 0.0,
+        ozone_absorption: Vec3::ZERO,
     };
 
     pub fn with_density_multiplier(mut self, mult: f32) -> Self {
@@ -378,6 +424,12 @@ pub struct AtmosphereSettings {
     /// A conversion factor between scene units and meters, used to
     /// ensure correctness at different length scales.
     pub scene_units_to_m: f32,
+
+    /// The strength of the jitter applied to the raymarching steps.
+    pub jitter_strength: f32,
+
+    /// The rendering method to use for the atmosphere.
+    pub rendering_method: u32,
 }
 
 impl Default for AtmosphereSettings {
@@ -394,6 +446,8 @@ impl Default for AtmosphereSettings {
             aerial_view_lut_samples: 10,
             aerial_view_lut_max_distance: 3.2e4,
             scene_units_to_m: 1.0,
+            jitter_strength: 0.99,
+            rendering_method: AtmosphereRenderingMethod::Default as u32,
         }
     }
 }
@@ -415,5 +469,85 @@ fn configure_camera_depth_usages(
 ) {
     for mut camera in &mut cameras {
         camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();
+    }
+}
+
+/// The rendering method to use for the atmosphere.
+#[derive(Clone, Default, Reflect, Copy)]
+pub enum AtmosphereRenderingMethod {
+    /// Use the default rendering method which uses a 3D lookup texture
+    /// fitted to the view frustum.
+    #[default]
+    Default,
+    /// Use the raymarching rendering method which uses raymarching to
+    /// compute the atmosphere and supports volumetric shadows.
+    Raymarching,
+}
+
+/// This component marks a light probe entity for generating an environment map
+/// using the atmosphere's environment map shader.
+#[derive(Component, Clone)]
+#[require(LightProbe)]
+pub struct AtmosphereEnvironmentMapLight {
+    pub intensity: f32,
+    pub rotation: Quat,
+    pub affects_lightmapped_mesh_diffuse: bool,
+    pub size: UVec2,
+}
+
+impl Default for AtmosphereEnvironmentMapLight {
+    fn default() -> Self {
+        Self {
+            intensity: 1.0,
+            rotation: Quat::IDENTITY,
+            affects_lightmapped_mesh_diffuse: true,
+            size: UVec2::new(512, 512),
+        }
+    }
+}
+
+impl ExtractComponent for AtmosphereEnvironmentMapLight {
+    type QueryData = Read<AtmosphereEnvironmentMapLight>;
+    type QueryFilter = With<LightProbe>;
+    type Out = AtmosphereEnvironmentMapLight;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
+    }
+}
+
+/// This component marks a directional light entity for changing the size of the sun disk.
+#[derive(Component, Clone)]
+#[require(DirectionalLight)]
+pub struct SunLight {
+    /// The angular size of the sun disk in radians as observed from Earth.
+    pub angular_size: f32,
+}
+
+impl SunLight {
+    pub const SUN: SunLight = SunLight {
+        // 32 arc minutes is the mean size of the sun disk when the Earth is
+        // exactly 1 astronomical unit from the sun.
+        angular_size: 0.00930842,
+    };
+}
+
+impl Default for SunLight {
+    fn default() -> Self {
+        Self::SUN
+    }
+}
+
+// Define a custom extraction component
+#[derive(Component, Clone)]
+struct AtmosphereGlobalTransform(Transform);
+
+impl ExtractComponent for AtmosphereGlobalTransform {
+    type QueryData = &'static Transform;
+    type QueryFilter = With<AtmosphereEnvironmentMapLight>;
+    type Out = AtmosphereGlobalTransform;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(AtmosphereGlobalTransform(*item))
     }
 }
