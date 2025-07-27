@@ -2083,7 +2083,7 @@ bitflags::bitflags! {
         const OIT_ENABLED                       = 1 << 20;
         const DISTANCE_FOG                      = 1 << 21;
         const ATMOSPHERE                        = 1 << 22;
-        const LAST_FLAG                         = Self::DISTANCE_FOG.bits();
+        const LAST_FLAG                         = Self::ATMOSPHERE.bits();
 
         // Bitfields
         const MSAA_RESERVED_BITS                = Self::MSAA_MASK_BITS << Self::MSAA_SHIFT_BITS;

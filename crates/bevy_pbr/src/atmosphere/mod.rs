@@ -70,19 +70,13 @@ use resources::{
 };
 use tracing::warn;
 
-use crate::{
-    atmosphere::node::EnvironmentNode,
-    resources::{
-        prepare_atmosphere_buffer, prepare_atmosphere_probe_components, prepare_probe_textures,
-        prepare_view_textures, AtmosphereBuffer, AtmosphereEnvironmentMap,
-    },
-};
-
 use self::{
-    node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
+    node::{AtmosphereLutsNode, AtmosphereNode, EnvironmentNode, RenderSkyNode},
     resources::{
-        prepare_atmosphere_bind_groups, AtmosphereBindGroupLayouts, AtmospherePipelines,
-        AtmosphereSamplers,
+        prepare_atmosphere_bind_groups, prepare_atmosphere_buffer,
+        prepare_atmosphere_probe_components, prepare_probe_textures, prepare_view_textures,
+        AtmosphereBindGroupLayouts, AtmosphereBuffer, AtmosphereEnvironmentMap,
+        AtmospherePipelines, AtmosphereSamplers,
     },
 };
 

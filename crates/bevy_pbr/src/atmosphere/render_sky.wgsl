@@ -23,12 +23,12 @@ enable dual_source_blending;
 #endif
 
 struct RenderSkyOutput {
-    #ifdef DUAL_SOURCE_BLENDING
-        @location(0) @blend_src(0) inscattering: vec4<f32>,
-        @location(0) @blend_src(1) transmittance: vec4<f32>,
-    #else
-        @location(0) inscattering: vec4<f32>,
-    #endif
+#ifdef DUAL_SOURCE_BLENDING
+    @location(0) @blend_src(0) inscattering: vec4<f32>,
+    @location(0) @blend_src(1) transmittance: vec4<f32>,
+#else
+    @location(0) inscattering: vec4<f32>,
+#endif
 }
 
 @fragment
