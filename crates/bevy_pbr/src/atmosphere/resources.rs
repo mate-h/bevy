@@ -126,6 +126,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
                 (
                     (0, uniform_buffer::<Atmosphere>(true)),
                     (1, uniform_buffer::<AtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
                     (4, uniform_buffer::<GpuLights>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
@@ -241,6 +242,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (4, uniform_buffer::<GpuLights>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
                     (6, sampler(SamplerBindingType::Filtering)),
+                    (7, texture_2d(TextureSampleType::Float { filterable: true })), //multiscattering lut and sampler
+                    (8, sampler(SamplerBindingType::Filtering)),
                     (9, texture_2d(TextureSampleType::Float { filterable: true })), //sky view lut and sampler
                     (10, sampler(SamplerBindingType::Filtering)),
                     (
@@ -798,7 +801,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         );
 
         let aerial_view_lut = render_device.create_bind_group(
-            "sky_view_lut_bind_group",
+            "aerial_view_lut_bind_group",
             &layouts.aerial_view_lut,
             &BindGroupEntries::with_indices((
                 (0, atmosphere_binding.clone()),
