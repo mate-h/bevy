@@ -407,7 +407,7 @@ fn zenith_azimuth_to_ray_dir(zenith: f32, azimuth: f32) -> vec3<f32> {
 fn get_view_ray(uv: vec2<f32>) -> vec3<f32> {
     let clip_pos = vec2(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0) * vec2(1.0, -1.0);
     let view_pos = view.view_from_clip * vec4(clip_pos, 1.0, 1.0);
-    let view_ray = normalize(view_pos.xyz / view_pos.w);
+    let view_ray = normalize(view_pos.xyz);
     let world_ray = (view.world_from_view * vec4(view_ray, 0.0)).xyz;
     return normalize(world_ray);
 }
