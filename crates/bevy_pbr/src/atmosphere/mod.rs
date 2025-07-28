@@ -105,6 +105,7 @@ impl Plugin for AtmospherePlugin {
                 ExtractComponentPlugin::<AtmosphereSettings>::default(),
                 ExtractComponentPlugin::<AtmosphereEnvironmentMapLight>::default(),
                 ExtractComponentPlugin::<AtmosphereEnvironmentMap>::default(),
+                ExtractComponentPlugin::<AtmosphereGlobalTransform>::default(),
                 UniformComponentPlugin::<Atmosphere>::default(),
                 UniformComponentPlugin::<AtmosphereSettings>::default(),
             ))
@@ -529,6 +530,12 @@ impl SunLight {
 impl Default for SunLight {
     fn default() -> Self {
         Self::SUN
+    }
+}
+
+impl Default for &SunLight {
+    fn default() -> Self {
+        &SunLight::SUN
     }
 }
 

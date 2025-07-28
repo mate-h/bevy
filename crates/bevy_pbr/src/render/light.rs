@@ -522,7 +522,7 @@ pub fn extract_lights(
                     frusta: extracted_frusta,
                     render_layers: maybe_layers.unwrap_or_default().clone(),
                     occlusion_culling,
-                    angular_size: sun_light.map_or(0.0, |sun_light| sun_light.angular_size),
+                    sun_light.unwrap_or_default().angular_size,
                 },
                 RenderCascadesVisibleEntities {
                     entities: cascade_visible_entities,
