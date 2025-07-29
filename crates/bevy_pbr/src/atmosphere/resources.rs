@@ -115,6 +115,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
                         16,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ), // blue noise texture
+                    (17, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -146,6 +147,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
                         16,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ), // blue noise texture
+                    (17, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -180,7 +182,8 @@ impl FromWorld for AtmosphereBindGroupLayouts {
                         16,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ), // blue noise texture
-                    (17, uniform_buffer::<Mat4>(false)),
+                    (17, sampler(SamplerBindingType::Filtering)),
+                    (18, uniform_buffer::<Mat4>(false)),
                 ),
             ),
         );
@@ -226,6 +229,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                         16,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ), // blue noise texture
+                    (17, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -258,6 +262,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                         16,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ), // blue noise texture
+                    (17, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -277,6 +282,7 @@ pub struct AtmosphereSamplers {
     pub multiscattering_lut: Sampler,
     pub sky_view_lut: Sampler,
     pub aerial_view_lut: Sampler,
+    pub blue_noise: Sampler,
 }
 
 impl FromWorld for AtmosphereSamplers {
@@ -311,11 +317,20 @@ impl FromWorld for AtmosphereSamplers {
             ..base_sampler
         });
 
+        let blue_noise = render_device.create_sampler(&SamplerDescriptor {
+            label: Some("blue_noise_sampler"),
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat,
+            ..Default::default()
+        });
+
         Self {
             transmittance_lut,
             multiscattering_lut,
             sky_view_lut,
             aerial_view_lut,
+            blue_noise,
         }
     }
 }
@@ -723,6 +738,9 @@ pub(super) fn prepare_atmosphere_bind_groups(
     if views.iter().len() == 0 {
         return;
     }
+    let Some(bluenoise_image) = images.get(&bluenoise.texture) else {
+        return;
+    };
 
     let atmosphere_binding = atmosphere_uniforms
         .binding()
@@ -751,7 +769,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
     let shadow_bindings = views.iter().next().map(|(_, _, _, bindings, _)| bindings);
 
     // get the gpu image for the bluenoise texture
-    let bluenoise_image = images.get(&bluenoise.texture).unwrap();
     let bluenoise_texture_view = bluenoise_image.texture.create_view(&TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2Array),
         ..Default::default()
@@ -797,6 +814,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (14, &shadow_bindings.directional_light_depth_texture_view),
                 (15, &shadow_samplers.directional_light_comparison_sampler),
                 (16, &bluenoise_texture_view),
+                (17, &samplers.blue_noise),
             )),
         );
 
@@ -817,6 +835,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (14, &shadow_bindings.directional_light_depth_texture_view),
                 (15, &shadow_samplers.directional_light_comparison_sampler),
                 (16, &bluenoise_texture_view),
+                (17, &samplers.blue_noise),
             )),
         );
 
@@ -845,6 +864,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (14, &shadow_bindings.directional_light_depth_texture_view),
                 (15, &shadow_samplers.directional_light_comparison_sampler),
                 (16, &bluenoise_texture_view),
+                (17, &samplers.blue_noise),
             )),
         );
 
@@ -886,7 +906,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (14, &shadow_bindings.directional_light_depth_texture_view),
                 (15, &shadow_samplers.directional_light_comparison_sampler),
                 (16, &bluenoise_texture_view),
-                (17, &probe_transform_data),
+                (17, &samplers.blue_noise),
+                (18, &probe_transform_data),
             )),
         );
 

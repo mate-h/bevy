@@ -5,8 +5,8 @@ use std::f32::consts::PI;
 use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
     pbr::{
-        light_consts::lux, Atmosphere, AtmosphereEnvironmentMapLight, AtmosphereSettings,
-        CascadeShadowConfigBuilder, SunLight,
+        light_consts::lux, Atmosphere, AtmosphereEnvironmentMapLight, AtmosphereRenderingMethod,
+        AtmosphereSettings, CascadeShadowConfigBuilder, SunLight,
     },
     prelude::*,
     render::camera::Exposure,
@@ -32,6 +32,8 @@ fn setup_camera_fog(mut commands: Commands) {
         AtmosphereSettings {
             aerial_view_lut_max_distance: 3.2e5,
             scene_units_to_m: 1e+4,
+            // set this to Raymarching for high quality volumetric shadows
+            rendering_method: AtmosphereRenderingMethod::Default as u32,
             ..Default::default()
         },
         // The directional light illuminance used in this scene

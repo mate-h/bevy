@@ -8,7 +8,7 @@ enable dual_source_blending;
         sample_sky_view_lut, direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
         view_radius, sample_sun_radiance, ndc_to_camera_dist,
-        raymarch_atmosphere, max_atmosphere_distance, get_view_position
+        raymarch_atmosphere, max_atmosphere_distance, get_view_position, get_blue_noise
     },
     bruneton_functions::distance_to_bottom_atmosphere_boundary
 };

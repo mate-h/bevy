@@ -7,7 +7,8 @@
     bindings::{
         atmosphere, settings, view, lights, transmittance_lut, transmittance_lut_sampler, 
         multiscattering_lut, multiscattering_lut_sampler, sky_view_lut, sky_view_lut_sampler,
-        aerial_view_lut, aerial_view_lut_sampler, atmosphere_transforms, blue_noise_texture
+        aerial_view_lut, aerial_view_lut_sampler, atmosphere_transforms, blue_noise_texture,
+        blue_noise_sampler
     },
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, transmittance_lut_uv_to_r_mu, 
@@ -491,9 +492,9 @@ fn get_raymarch_segment(r: f32, mu: f32) -> RaymarchSegment {
 fn get_blue_noise(uv: vec2<f32>) -> f32 {
     let screen_size = view.viewport.zw;
     let aspect = view.viewport.z / view.viewport.w;
-    let noise_scale = screen_size.y / 64.0;
+    let noise_scale = screen_size.y / 128.0;
     let noise_uv = vec2(uv.x * aspect, uv.y) * noise_scale;
-    let blue_noise = textureSampleLevel(blue_noise_texture, transmittance_lut_sampler, noise_uv, 0u, 0.0).r;
+    let blue_noise = textureSampleLevel(blue_noise_texture, blue_noise_sampler, noise_uv, 0u, 0.0).r;
     return blue_noise;
 }
 

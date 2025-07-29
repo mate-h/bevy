@@ -7,7 +7,7 @@
             sample_transmittance_lut, sample_atmosphere, rayleigh, henyey_greenstein,
             sample_multiscattering_lut, AtmosphereSample, sample_local_inscattering,
             get_local_r, get_local_up, view_radius, uv_to_ndc, max_atmosphere_distance,
-            uv_to_ray_direction, MIDPOINT_RATIO, get_view_position
+            uv_to_ray_direction, MIDPOINT_RATIO, get_view_position, get_blue_noise
         },
     }
 }
@@ -20,6 +20,8 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     if any(idx.xy > settings.aerial_view_lut_size.xy) { return; }
 
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(settings.aerial_view_lut_size.xy);
+    // Apply blue-noise based jitter to the sampling offset
+    let sample_offset = (get_blue_noise(uv) - 0.5) * settings.jitter_strength + 0.5;
     let ray_dir = uv_to_ray_direction(uv);
     let world_pos = get_view_position();
     let r = length(world_pos);
@@ -31,7 +33,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
 
     for (var slice_i: u32 = 0; slice_i < settings.aerial_view_lut_size.z; slice_i++) {
         for (var step_i: u32 = 0; step_i < settings.aerial_view_lut_samples; step_i++) {
-            let t_i = t_max * (f32(slice_i) + ((f32(step_i) + MIDPOINT_RATIO) / f32(settings.aerial_view_lut_samples))) / f32(settings.aerial_view_lut_size.z);
+            let t_i = t_max * (f32(slice_i) + ((f32(step_i) + sample_offset) / f32(settings.aerial_view_lut_samples))) / f32(settings.aerial_view_lut_size.z);
             let dt = (t_i - prev_t);
             prev_t = t_i;
 
