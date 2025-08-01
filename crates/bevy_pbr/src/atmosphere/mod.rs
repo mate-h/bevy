@@ -45,7 +45,7 @@ use bevy_ecs::{
     schedule::IntoScheduleConfigs,
     system::Query,
 };
-use bevy_light::{DirectionalLight};
+use bevy_light::DirectionalLight;
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
@@ -53,6 +53,7 @@ use bevy_render::{
     load_shader_library,
     render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
     view::Hdr,
+    RenderStartup,
 };
 use bevy_render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin},
@@ -73,10 +74,11 @@ use tracing::warn;
 use self::{
     node::{AtmosphereLutsNode, AtmosphereNode, EnvironmentNode, RenderSkyNode},
     resources::{
+        init_atmosphere_bind_group_layouts, init_atmosphere_buffer, init_atmosphere_pipelines,
+        init_atmosphere_samplers, init_render_sky_bind_group_layouts,
         prepare_atmosphere_bind_groups, prepare_atmosphere_buffer,
         prepare_atmosphere_probe_components, prepare_probe_textures, prepare_view_textures,
-        AtmosphereBindGroupLayouts, AtmosphereBuffer, AtmosphereEnvironmentMap,
-        AtmospherePipelines, AtmosphereSamplers,
+        AtmosphereEnvironmentMap,
     },
 };
 
@@ -137,13 +139,16 @@ impl Plugin for AtmospherePlugin {
         }
 
         render_app
-            .init_resource::<AtmosphereBindGroupLayouts>()
-            .init_resource::<RenderSkyBindGroupLayouts>()
-            .init_resource::<AtmosphereSamplers>()
-            .init_resource::<AtmospherePipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
-            .init_resource::<AtmosphereBuffer>()
+            .add_systems(RenderStartup, init_atmosphere_bind_group_layouts)
+            .add_systems(RenderStartup, init_atmosphere_samplers)
+            .add_systems(RenderStartup, init_render_sky_bind_group_layouts)
+            .add_systems(
+                RenderStartup,
+                init_atmosphere_pipelines.after(init_render_sky_bind_group_layouts),
+            )
+            .add_systems(RenderStartup, init_atmosphere_buffer)
             .add_systems(
                 Render,
                 (

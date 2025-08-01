@@ -12,7 +12,10 @@ use bevy_render::{
     view::{ViewTarget, ViewUniformOffset},
 };
 
-use crate::{resources::{AtmosphereEnvironmentMap, AtmosphereProbeBindGroups}, ViewLightsUniformOffset};
+use crate::{
+    resources::{AtmosphereEnvironmentMap, AtmosphereProbeBindGroups},
+    ViewLightsUniformOffset,
+};
 
 use super::{
     resources::{
