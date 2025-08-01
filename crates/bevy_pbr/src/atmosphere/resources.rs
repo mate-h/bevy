@@ -1,6 +1,6 @@
 use crate::{
-    atmosphere::AtmosphereGlobalTransform, AtmosphereEnvironmentMapLight, Bluenoise, GpuLights,
-    LightMeta, ShadowSamplers, ViewShadowBindings,
+    atmosphere::AtmosphereGlobalTransform, Bluenoise, GpuLights, LightMeta, ShadowSamplers,
+    ViewShadowBindings,
 };
 use bevy_asset::{load_embedded_asset, Assets, Handle, RenderAssetUsages};
 use bevy_core_pipeline::{core_3d::Camera3d, FullscreenShader};
@@ -13,8 +13,8 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_image::{Image, ToExtents};
-use bevy_light::{GeneratedEnvironmentMapLight, LightProbe};
-use bevy_math::{Mat4, Vec3};
+use bevy_light::{AtmosphereEnvironmentMapLight, GeneratedEnvironmentMapLight};
+use bevy_math::{Mat4, UVec2, Vec3};
 use bevy_render::{
     camera::Camera,
     extract_component::{ComponentUniforms, ExtractComponent},
@@ -492,9 +492,11 @@ pub struct AtmosphereTextures {
     pub aerial_view_lut: CachedTexture,
 }
 
+// Render world representation of an environment map light for the atmosphere
 #[derive(Component, ExtractComponent, Clone)]
 pub struct AtmosphereEnvironmentMap {
     pub environment_map: Handle<Image>,
+    pub size: UVec2,
 }
 
 #[derive(Component)]
@@ -584,7 +586,6 @@ pub(super) fn prepare_probe_textures(
     probes: Query<
         (Entity, &AtmosphereEnvironmentMap),
         (
-            With<LightProbe>,
             With<AtmosphereEnvironmentMap>,
             Without<AtmosphereProbeTextures>,
         ),
@@ -717,7 +718,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
     >,
     probes: Query<
         (Entity, &AtmosphereProbeTextures, &AtmosphereGlobalTransform),
-        With<AtmosphereEnvironmentMapLight>,
+        With<AtmosphereEnvironmentMap>,
     >,
     render_device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -973,8 +974,6 @@ pub fn prepare_atmosphere_probe_components(
     probes: Query<
         (Entity, &AtmosphereEnvironmentMapLight),
         (
-            With<LightProbe>,
-            With<AtmosphereEnvironmentMapLight>,
             Without<AtmosphereEnvironmentMap>,
         ),
     >,
@@ -1009,6 +1008,7 @@ pub fn prepare_atmosphere_probe_components(
 
         commands.entity(entity).insert(AtmosphereEnvironmentMap {
             environment_map: environment_handle.clone(),
+            size: env_map_light.size,
         });
 
         commands

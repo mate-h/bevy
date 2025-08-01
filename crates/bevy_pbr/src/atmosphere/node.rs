@@ -12,9 +12,7 @@ use bevy_render::{
     view::{ViewTarget, ViewUniformOffset},
 };
 
-use crate::{
-    resources::AtmosphereProbeBindGroups, AtmosphereEnvironmentMapLight, ViewLightsUniformOffset,
-};
+use crate::{resources::{AtmosphereEnvironmentMap, AtmosphereProbeBindGroups}, ViewLightsUniformOffset};
 
 use super::{
     resources::{
@@ -237,7 +235,7 @@ pub(super) struct EnvironmentNode {
     )>,
     probe_query: QueryState<(
         Read<AtmosphereProbeBindGroups>,
-        Read<AtmosphereEnvironmentMapLight>,
+        Read<AtmosphereEnvironmentMap>,
     )>,
 }
 

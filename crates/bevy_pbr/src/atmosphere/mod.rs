@@ -43,10 +43,10 @@ use bevy_ecs::{
     component::Component,
     query::{Changed, QueryItem, With},
     schedule::IntoScheduleConfigs,
-    system::{lifetimeless::Read, Query},
+    system::Query,
 };
-use bevy_light::{DirectionalLight, LightProbe};
-use bevy_math::{Quat, UVec2, UVec3, Vec3};
+use bevy_light::{DirectionalLight};
+use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_component::UniformComponentPlugin,
@@ -103,7 +103,6 @@ impl Plugin for AtmospherePlugin {
             .add_plugins((
                 ExtractComponentPlugin::<Atmosphere>::default(),
                 ExtractComponentPlugin::<AtmosphereSettings>::default(),
-                ExtractComponentPlugin::<AtmosphereEnvironmentMapLight>::default(),
                 ExtractComponentPlugin::<AtmosphereEnvironmentMap>::default(),
                 ExtractComponentPlugin::<AtmosphereGlobalTransform>::default(),
                 UniformComponentPlugin::<Atmosphere>::default(),
@@ -211,7 +210,7 @@ impl Plugin for AtmospherePlugin {
 /// participating in Rayleigh and Mie scattering falls off roughly exponentially
 /// from the planet's surface, ozone only exists in a band centered at a fairly
 /// high altitude.
-#[derive(Clone, Component, Reflect, ShaderType)]
+#[derive(Clone, Component, Reflect, ShaderType, ExtractComponent)]
 #[require(AtmosphereSettings, Hdr)]
 #[reflect(Clone, Default)]
 pub struct Atmosphere {
@@ -343,18 +342,6 @@ impl Default for Atmosphere {
     }
 }
 
-impl ExtractComponent for Atmosphere {
-    type QueryData = Read<Atmosphere>;
-
-    type QueryFilter = With<Camera3d>;
-
-    type Out = Atmosphere;
-
-    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
-        Some(item.clone())
-    }
-}
-
 /// This component controls the resolution of the atmosphere LUTs, and
 /// how many samples are used when computing them.
 ///
@@ -373,7 +360,7 @@ impl ExtractComponent for Atmosphere {
 /// The aerial-view lut is a 3d LUT fit to the view frustum, which stores the luminance
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
-#[derive(Clone, Component, Reflect, ShaderType)]
+#[derive(Clone, Component, Reflect, ShaderType, ExtractComponent)]
 #[reflect(Clone, Default)]
 pub struct AtmosphereSettings {
     /// The size of the transmittance LUT
@@ -447,18 +434,6 @@ impl Default for AtmosphereSettings {
     }
 }
 
-impl ExtractComponent for AtmosphereSettings {
-    type QueryData = Read<AtmosphereSettings>;
-
-    type QueryFilter = (With<Camera3d>, With<Atmosphere>);
-
-    type Out = AtmosphereSettings;
-
-    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
-        Some(item.clone())
-    }
-}
-
 fn configure_camera_depth_usages(
     mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<Atmosphere>)>,
 ) {
@@ -477,38 +452,6 @@ pub enum AtmosphereRenderingMethod {
     /// Use the raymarching rendering method which uses raymarching to
     /// compute the atmosphere and supports volumetric shadows.
     Raymarching,
-}
-
-/// This component marks a light probe entity for generating an environment map
-/// using the atmosphere's environment map shader.
-#[derive(Component, Clone)]
-#[require(LightProbe)]
-pub struct AtmosphereEnvironmentMapLight {
-    pub intensity: f32,
-    pub rotation: Quat,
-    pub affects_lightmapped_mesh_diffuse: bool,
-    pub size: UVec2,
-}
-
-impl Default for AtmosphereEnvironmentMapLight {
-    fn default() -> Self {
-        Self {
-            intensity: 1.0,
-            rotation: Quat::IDENTITY,
-            affects_lightmapped_mesh_diffuse: true,
-            size: UVec2::new(512, 512),
-        }
-    }
-}
-
-impl ExtractComponent for AtmosphereEnvironmentMapLight {
-    type QueryData = Read<AtmosphereEnvironmentMapLight>;
-    type QueryFilter = With<LightProbe>;
-    type Out = AtmosphereEnvironmentMapLight;
-
-    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
-        Some(item.clone())
-    }
 }
 
 /// This component marks a directional light entity for changing the size of the sun disk.
@@ -545,7 +488,7 @@ struct AtmosphereGlobalTransform(Transform);
 
 impl ExtractComponent for AtmosphereGlobalTransform {
     type QueryData = &'static Transform;
-    type QueryFilter = With<AtmosphereEnvironmentMapLight>;
+    type QueryFilter = With<AtmosphereEnvironmentMap>;
     type Out = AtmosphereGlobalTransform;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {

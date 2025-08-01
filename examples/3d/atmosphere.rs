@@ -1,12 +1,15 @@
 //! This example showcases pbr atmospheric scattering
 
-use std::f32::consts::PI;
+#[path = "../helpers/camera_controller.rs"]
+mod camera_controller;
 
+use std::f32::consts::PI;
+use camera_controller::{CameraController, CameraControllerPlugin};
 use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
     pbr::{
-        light_consts::lux, Atmosphere, AtmosphereEnvironmentMapLight, AtmosphereRenderingMethod,
-        AtmosphereSettings, CascadeShadowConfigBuilder, SunLight,
+        light_consts::lux, Atmosphere, AtmosphereRenderingMethod, AtmosphereSettings,
+        CascadeShadowConfigBuilder, SunLight,
     },
     prelude::*,
     render::camera::Exposure,
@@ -14,7 +17,7 @@ use bevy::{
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, CameraControllerPlugin))
         .add_systems(Startup, (setup_camera_fog, setup_terrain_scene))
         .add_systems(Update, dynamic_scene)
         .run();
@@ -23,6 +26,7 @@ fn main() {
 fn setup_camera_fog(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        CameraController::default(),
         Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
         Atmosphere::EARTH,
@@ -83,7 +87,8 @@ fn setup_terrain_scene(
         cascade_shadow_config,
     ));
 
-    // Spawn a new light probe to generate an environment map for the atmosphere
+    // Spawn a new light probe to generate an environment map for the atmosphere,
+    // at this specific location. It can also be added to the camera directly.
     commands.spawn((
         LightProbe,
         AtmosphereEnvironmentMapLight::default(),
