@@ -249,7 +249,7 @@ impl ViewNode for RenderSkyNode {
                 lights_uniforms_offset.offset,
             ],
         );
-        render_sky_pass.draw(0..2, 0..1);
+        render_sky_pass.draw(0..3, 0..1);
 
         Ok(())
     }
