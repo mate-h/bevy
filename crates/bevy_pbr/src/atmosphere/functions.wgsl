@@ -1,7 +1,7 @@
 #define_import_path bevy_pbr::atmosphere::functions
 
 #import bevy_render::maths::{PI, HALF_PI, PI_2, fast_acos, fast_acos_4, fast_atan2}
-
+#import bevy_pbr::shadows
 #import bevy_pbr::atmosphere::{
     types::Atmosphere,
     bindings::{
@@ -14,9 +14,6 @@
         transmittance_lut_r_mu_to_uv, transmittance_lut_uv_to_r_mu, 
         ray_intersects_ground, distance_to_top_atmosphere_boundary, 
         distance_to_bottom_atmosphere_boundary
-    },
-    shadows::{
-        get_shadow
     }
 }
 
@@ -244,6 +241,21 @@ fn sample_atmosphere(r: f32) -> AtmosphereSample {
     sample.extinction = rayleigh_scattering + mie_extinction + ozone_absorption;
 
     return sample;
+}
+
+fn get_shadow(light_index: u32, P: vec3<f32>, ray_dir: vec3<f32>) -> f32 {
+    // For raymarched volumes, we can use the ray direction as the normal
+    // since we don't have surface normals
+    let world_normal = -ray_dir; // Point against ray direction
+    let world_pos = vec4<f32>((P + vec3<f32>(0.0, -atmosphere.bottom_radius, 0.0)) / settings.scene_units_to_m, 1.0);
+
+    // Get view space Z coordinate for cascade selection
+    let view_pos = view.view_from_world * world_pos;
+    let view_z = view_pos.z;
+
+    // Assuming we're using the first directional light (index 0)
+    let light = &lights.directional_lights[light_index];
+    return shadows::fetch_directional_shadow(light_index, world_pos, world_normal, view_z);
 }
 
 /// evaluates L_scat, equation 3 in the paper, which gives the total single-order scattering towards the view at a single point

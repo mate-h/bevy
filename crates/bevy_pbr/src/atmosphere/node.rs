@@ -12,7 +12,11 @@ use bevy_render::{
     view::{ViewTarget, ViewUniformOffset},
 };
 
-use crate::{resources::{AtmosphereEnvironmentMap, AtmosphereProbeBindGroups}, ViewLightsUniformOffset};
+use crate::{
+    resources::{AtmosphereEnvironmentMap, AtmosphereProbeBindGroups},
+    MeshViewBindGroup, ViewEnvironmentMapUniformOffset, ViewFogUniformOffset,
+    ViewLightProbesUniformOffset, ViewLightsUniformOffset, ViewScreenSpaceReflectionsUniformOffset,
+};
 
 use super::{
     resources::{
@@ -92,7 +96,7 @@ impl ViewNode for AtmosphereLutsNode {
 
         luts_pass.set_pipeline(transmittance_lut_pipeline);
         luts_pass.set_bind_group(
-            0,
+            1,
             &bind_groups.transmittance_lut,
             &[
                 atmosphere_uniforms_offset.index(),
@@ -106,7 +110,7 @@ impl ViewNode for AtmosphereLutsNode {
 
         luts_pass.set_pipeline(multiscattering_lut_pipeline);
         luts_pass.set_bind_group(
-            0,
+            1,
             &bind_groups.multiscattering_lut,
             &[
                 atmosphere_uniforms_offset.index(),
@@ -124,7 +128,7 @@ impl ViewNode for AtmosphereLutsNode {
 
         luts_pass.set_pipeline(sky_view_lut_pipeline);
         luts_pass.set_bind_group(
-            0,
+            1,
             &bind_groups.sky_view_lut,
             &[
                 atmosphere_uniforms_offset.index(),
@@ -141,7 +145,7 @@ impl ViewNode for AtmosphereLutsNode {
 
         luts_pass.set_pipeline(aerial_view_lut_pipeline);
         luts_pass.set_bind_group(
-            0,
+            1,
             &bind_groups.aerial_view_lut,
             &[
                 atmosphere_uniforms_offset.index(),
@@ -171,6 +175,13 @@ impl ViewNode for RenderSkyNode {
         Read<ViewUniformOffset>,
         Read<ViewLightsUniformOffset>,
         Read<RenderSkyPipelineId>,
+        Read<MeshViewBindGroup>,
+        Read<ViewUniformOffset>,
+        Read<ViewLightsUniformOffset>,
+        Read<ViewFogUniformOffset>,
+        Read<ViewLightProbesUniformOffset>,
+        Read<ViewScreenSpaceReflectionsUniformOffset>,
+        Read<ViewEnvironmentMapUniformOffset>,
     );
 
     fn run<'w>(
@@ -186,6 +197,13 @@ impl ViewNode for RenderSkyNode {
             view_uniforms_offset,
             lights_uniforms_offset,
             render_sky_pipeline_id,
+            view_bind_group,
+            view_uniform_offset,
+            view_lights_offset,
+            view_fog_offset,
+            view_light_probes_offset,
+            view_ssr_offset,
+            view_environment_map_offset,
         ): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
@@ -210,6 +228,18 @@ impl ViewNode for RenderSkyNode {
         render_sky_pass.set_pipeline(render_sky_pipeline);
         render_sky_pass.set_bind_group(
             0,
+            &view_bind_group.main,
+            &[
+                view_uniform_offset.offset,
+                view_lights_offset.offset,
+                view_fog_offset.offset,
+                **view_light_probes_offset,
+                **view_ssr_offset,
+                **view_environment_map_offset,
+            ],
+        );
+        render_sky_pass.set_bind_group(
+            1,
             &atmosphere_bind_groups.render_sky,
             &[
                 atmosphere_uniforms_offset.index(),
@@ -291,7 +321,7 @@ impl Node for EnvironmentNode {
 
             pass.set_pipeline(environment_pipeline);
             pass.set_bind_group(
-                0,
+                1,
                 &bind_groups.environment,
                 &[
                     atmosphere_uniforms_offset.index(),
