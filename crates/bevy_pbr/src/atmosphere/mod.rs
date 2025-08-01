@@ -45,7 +45,7 @@ use bevy_ecs::{
     schedule::IntoScheduleConfigs,
     system::Query,
 };
-use bevy_light::{DirectionalLight};
+use bevy_light::DirectionalLight;
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{

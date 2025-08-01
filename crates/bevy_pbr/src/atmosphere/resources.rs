@@ -971,12 +971,7 @@ pub(crate) fn prepare_atmosphere_buffer(
 }
 
 pub fn prepare_atmosphere_probe_components(
-    probes: Query<
-        (Entity, &AtmosphereEnvironmentMapLight),
-        (
-            Without<AtmosphereEnvironmentMap>,
-        ),
-    >,
+    probes: Query<(Entity, &AtmosphereEnvironmentMapLight), (Without<AtmosphereEnvironmentMap>,)>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
 ) {

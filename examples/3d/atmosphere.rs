@@ -3,8 +3,6 @@
 #[path = "../helpers/camera_controller.rs"]
 mod camera_controller;
 
-use std::f32::consts::PI;
-use camera_controller::{CameraController, CameraControllerPlugin};
 use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
     pbr::{
@@ -14,6 +12,8 @@ use bevy::{
     prelude::*,
     render::camera::Exposure,
 };
+use camera_controller::{CameraController, CameraControllerPlugin};
+use std::f32::consts::PI;
 
 fn main() {
     App::new()
