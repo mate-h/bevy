@@ -48,7 +48,7 @@ struct AtmosphereTransforms {
     atmosphere_from_world: mat4x4<f32>,
 }
 
-struct PbrAtmosphereData {
+struct AtmosphereData {
     atmosphere: Atmosphere,
     settings: AtmosphereSettings,
 }

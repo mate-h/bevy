@@ -98,7 +98,7 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 #ifdef ATMOSPHERE
 @group(0) @binding(29) var atmosphere_transmittance_texture: texture_2d<f32>;
 @group(0) @binding(30) var atmosphere_transmittance_sampler: sampler;
-@group(0) @binding(31) var<storage> atmosphere_data: atmosphere::PbrAtmosphereData;
+@group(0) @binding(31) var<storage> atmosphere_data: atmosphere::AtmosphereData;
 #endif // ATMOSPHERE
 
 #ifdef MULTIPLE_LIGHT_PROBES_IN_ARRAY

@@ -1,9 +1,13 @@
 use crate::{
-    atmosphere::AtmosphereGlobalTransform, Bluenoise, GpuLights, LightMeta, ShadowSamplers,
-    ViewShadowBindings,
+    atmosphere::AtmosphereGlobalTransform, Bluenoise, GpuLights, LightMeta, MeshPipeline,
+    MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, ShadowSamplers, ViewShadowBindings,
 };
 use bevy_asset::{load_embedded_asset, Assets, Handle, RenderAssetUsages};
+use bevy_core_pipeline::prepass::{
+    DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass,
+};
 use bevy_core_pipeline::{core_3d::Camera3d, FullscreenShader};
+use bevy_ecs::query::Has;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
@@ -38,11 +42,12 @@ pub(crate) struct AtmosphereBindGroupLayouts {
 }
 
 #[derive(Resource)]
-pub(crate) struct RenderSkyBindGroupLayouts {
+pub(crate) struct RenderSkyPipeline {
     pub render_sky: BindGroupLayout,
     pub render_sky_msaa: BindGroupLayout,
     pub fullscreen_shader: FullscreenShader,
     pub fragment_shader: Handle<Shader>,
+    pub mesh_view_layouts: MeshPipelineViewLayouts,
 }
 
 impl FromWorld for AtmosphereBindGroupLayouts {
@@ -198,7 +203,7 @@ impl FromWorld for AtmosphereBindGroupLayouts {
     }
 }
 
-impl FromWorld for RenderSkyBindGroupLayouts {
+impl FromWorld for RenderSkyPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         let render_sky = render_device.create_bind_group_layout(
@@ -272,6 +277,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
             render_sky_msaa,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             fragment_shader: load_embedded_asset!(world, "render_sky.wgsl"),
+            mesh_view_layouts: world.resource::<MeshPipelineViewLayouts>().clone(),
         }
     }
 }
@@ -402,9 +408,10 @@ pub(crate) struct RenderSkyPipelineId(pub CachedRenderPipelineId);
 pub(crate) struct RenderSkyPipelineKey {
     pub msaa_samples: u32,
     pub dual_source_blending: bool,
+    pub mesh_pipeline_view_key: MeshPipelineViewLayoutKey,
 }
 
-impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
+impl SpecializedRenderPipeline for RenderSkyPipeline {
     type Key = RenderSkyPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
@@ -423,13 +430,23 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
             BlendFactor::SrcAlpha
         };
 
+        let render_sky_bind_group_layout = if key.msaa_samples == 1 {
+            self.render_sky.clone()
+        } else {
+            self.render_sky_msaa.clone()
+        };
+
+        let layout = self
+            .mesh_view_layouts
+            .get_view_layout(key.mesh_pipeline_view_key);
+        let layout = vec![
+            layout.main_layout.clone(),
+            render_sky_bind_group_layout.clone(),
+        ];
+
         RenderPipelineDescriptor {
             label: Some(format!("render_sky_pipeline_{}", key.msaa_samples).into()),
-            layout: vec![if key.msaa_samples == 1 {
-                self.render_sky.clone()
-            } else {
-                self.render_sky_msaa.clone()
-            }],
+            layout,
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.fragment_shader.clone(),
@@ -462,14 +479,40 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
 }
 
 pub(super) fn queue_render_sky_pipelines(
-    views: Query<(Entity, &Msaa), (With<Camera>, With<Atmosphere>)>,
+    views: Query<
+        (
+            Entity,
+            &Msaa,
+            Has<NormalPrepass>,
+            Has<DepthPrepass>,
+            Has<MotionVectorPrepass>,
+            Has<DeferredPrepass>,
+        ),
+        (With<Camera>, With<Atmosphere>),
+    >,
     pipeline_cache: Res<PipelineCache>,
-    layouts: Res<RenderSkyBindGroupLayouts>,
-    mut specializer: ResMut<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>,
+    layouts: Res<RenderSkyPipeline>,
+    mut specializer: ResMut<SpecializedRenderPipelines<RenderSkyPipeline>>,
     render_device: Res<RenderDevice>,
+    _mesh_pipeline: Res<MeshPipeline>,
     mut commands: Commands,
 ) {
-    for (entity, msaa) in &views {
+    for (entity, msaa, normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass) in
+        &views
+    {
+        let mut mesh_pipeline_view_key = MeshPipelineViewLayoutKey::from(*msaa);
+        mesh_pipeline_view_key.set(MeshPipelineViewLayoutKey::NORMAL_PREPASS, normal_prepass);
+        mesh_pipeline_view_key.set(MeshPipelineViewLayoutKey::DEPTH_PREPASS, depth_prepass);
+        mesh_pipeline_view_key.set(
+            MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS,
+            motion_vector_prepass,
+        );
+        mesh_pipeline_view_key.set(
+            MeshPipelineViewLayoutKey::DEFERRED_PREPASS,
+            deferred_prepass,
+        );
+        mesh_pipeline_view_key.set(MeshPipelineViewLayoutKey::ATMOSPHERE, true);
+
         let id = specializer.specialize(
             &pipeline_cache,
             &layouts,
@@ -478,6 +521,7 @@ pub(super) fn queue_render_sky_pipelines(
                 dual_source_blending: render_device
                     .features()
                     .contains(WgpuFeatures::DUAL_SOURCE_BLENDING),
+                mesh_pipeline_view_key,
             },
         );
         commands.entity(entity).insert(RenderSkyPipelineId(id));
@@ -723,7 +767,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
     render_device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     layouts: Res<AtmosphereBindGroupLayouts>,
-    render_sky_layouts: Res<RenderSkyBindGroupLayouts>,
+    render_sky_layouts: Res<RenderSkyPipeline>,
     samplers: Res<AtmosphereSamplers>,
     view_uniforms: Res<ViewUniforms>,
     lights_uniforms: Res<LightMeta>,
@@ -920,14 +964,14 @@ pub(super) fn prepare_atmosphere_bind_groups(
 
 #[derive(ShaderType)]
 #[repr(C)]
-pub(crate) struct PbrAtmosphereData {
+pub(crate) struct AtmosphereData {
     pub atmosphere: Atmosphere,
     pub settings: AtmosphereSettings,
 }
 
 #[derive(Resource)]
 pub struct AtmosphereBuffer {
-    pub(crate) buffer: StorageBuffer<PbrAtmosphereData>,
+    pub(crate) buffer: StorageBuffer<AtmosphereData>,
 }
 
 impl FromWorld for AtmosphereBuffer {
@@ -937,11 +981,11 @@ impl FromWorld for AtmosphereBuffer {
             .iter(world)
             .next()
             .map_or_else(
-                || PbrAtmosphereData {
+                || AtmosphereData {
                     atmosphere: Atmosphere::default(),
                     settings: AtmosphereSettings::default(),
                 },
-                |(atmosphere, settings)| PbrAtmosphereData {
+                |(atmosphere, settings)| AtmosphereData {
                     atmosphere: atmosphere.clone(),
                     settings: settings.clone(),
                 },
@@ -963,7 +1007,7 @@ pub(crate) fn prepare_atmosphere_buffer(
         return;
     };
 
-    atmosphere_buffer.buffer.set(PbrAtmosphereData {
+    atmosphere_buffer.buffer.set(AtmosphereData {
         atmosphere: atmosphere.clone(),
         settings: settings.clone(),
     });
@@ -971,12 +1015,7 @@ pub(crate) fn prepare_atmosphere_buffer(
 }
 
 pub fn prepare_atmosphere_probe_components(
-    probes: Query<
-        (Entity, &AtmosphereEnvironmentMapLight),
-        (
-            Without<AtmosphereEnvironmentMap>,
-        ),
-    >,
+    probes: Query<(Entity, &AtmosphereEnvironmentMapLight), (Without<AtmosphereEnvironmentMap>,)>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
 ) {

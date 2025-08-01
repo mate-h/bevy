@@ -45,7 +45,7 @@ use crate::{
         IRRADIANCE_VOLUMES_ARE_USABLE,
     },
     prepass,
-    resources::{AtmosphereBuffer, AtmosphereSamplers, AtmosphereTextures, PbrAtmosphereData},
+    resources::{AtmosphereBuffer, AtmosphereData, AtmosphereSamplers, AtmosphereTextures},
     Atmosphere, EnvironmentMapUniformBuffer, FogMeta, GlobalClusterableObjectMeta,
     GpuClusterableObjects, GpuFog, GpuLights, LightMeta, LightProbesBuffer, LightProbesUniform,
     MeshPipeline, MeshPipelineKey, RenderViewLightProbes, ScreenSpaceAmbientOcclusionResources,
@@ -407,7 +407,7 @@ fn layout_entries(
             ),
             (30, sampler(SamplerBindingType::Filtering)),
             // atmosphere data buffer
-            (31, storage_buffer_read_only::<PbrAtmosphereData>(false)),
+            (31, storage_buffer_read_only::<AtmosphereData>(false)),
         ));
     }
 

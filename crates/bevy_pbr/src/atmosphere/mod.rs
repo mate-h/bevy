@@ -45,7 +45,7 @@ use bevy_ecs::{
     schedule::IntoScheduleConfigs,
     system::Query,
 };
-use bevy_light::{DirectionalLight};
+use bevy_light::DirectionalLight;
 use bevy_math::{UVec2, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
@@ -66,7 +66,7 @@ use bevy_core_pipeline::core_3d::{graph::Core3d, Camera3d};
 use bevy_transform::components::Transform;
 use resources::{
     prepare_atmosphere_transforms, queue_render_sky_pipelines, AtmosphereTransforms,
-    RenderSkyBindGroupLayouts,
+    RenderSkyPipeline,
 };
 use tracing::warn;
 
@@ -138,11 +138,11 @@ impl Plugin for AtmospherePlugin {
 
         render_app
             .init_resource::<AtmosphereBindGroupLayouts>()
-            .init_resource::<RenderSkyBindGroupLayouts>()
+            .init_resource::<RenderSkyPipeline>()
             .init_resource::<AtmosphereSamplers>()
             .init_resource::<AtmospherePipelines>()
             .init_resource::<AtmosphereTransforms>()
-            .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
+            .init_resource::<SpecializedRenderPipelines<RenderSkyPipeline>>()
             .init_resource::<AtmosphereBuffer>()
             .add_systems(
                 Render,
