@@ -78,7 +78,6 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     // exposure compensation
     inscattering *= view.exposure;
 
-    // inscattering = vec3(0.5);
 #ifdef DUAL_SOURCE_BLENDING
     return RenderSkyOutput(vec4(inscattering, 0.0), vec4(transmittance, 1.0));
 #else
