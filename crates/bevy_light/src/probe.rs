@@ -147,8 +147,6 @@ impl Default for GeneratedEnvironmentMapLight {
 pub struct AtmosphereEnvironmentMapLight {
     /// Luminance multiplier in cd/m².
     pub intensity: f32,
-    /// World-space rotation applied to the generated cubemap.
-    pub rotation: Quat,
     /// Whether the diffuse contribution should affect meshes that already have lightmaps.
     pub affects_lightmapped_mesh_diffuse: bool,
     /// Cubemap resolution in pixels (must be a power-of-two).
@@ -159,7 +157,6 @@ impl Default for AtmosphereEnvironmentMapLight {
     fn default() -> Self {
         Self {
             intensity: 1.0,
-            rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
             size: UVec2::new(512, 512),
         }

@@ -14,7 +14,7 @@ use bevy_ecs::{
 };
 use bevy_image::{Image, ToExtents};
 use bevy_light::{AtmosphereEnvironmentMapLight, GeneratedEnvironmentMapLight};
-use bevy_math::{Mat4, UVec2, Vec3};
+use bevy_math::{Mat4, Quat, UVec2, Vec3};
 use bevy_render::{
     camera::Camera,
     extract_component::{ComponentUniforms, ExtractComponent},
@@ -1011,7 +1011,7 @@ pub fn prepare_atmosphere_probe_components(
             .insert(GeneratedEnvironmentMapLight {
                 environment_map: environment_handle,
                 intensity: env_map_light.intensity,
-                rotation: env_map_light.rotation,
+                rotation: Quat::IDENTITY,
                 affects_lightmapped_mesh_diffuse: env_map_light.affects_lightmapped_mesh_diffuse,
             });
     }
