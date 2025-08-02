@@ -1,17 +1,23 @@
 //! This example showcases pbr atmospheric scattering
 
-use std::f32::consts::PI;
+#[path = "../helpers/camera_controller.rs"]
+mod camera_controller;
 
 use bevy::{
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
-    pbr::{light_consts::lux, Atmosphere, AtmosphereSettings, CascadeShadowConfigBuilder},
+    pbr::{
+        light_consts::lux, Atmosphere, AtmosphereRenderingMethod, AtmosphereSettings,
+        CascadeShadowConfigBuilder, SunLight,
+    },
     prelude::*,
     render::camera::Exposure,
 };
+use camera_controller::{CameraController, CameraControllerPlugin};
+use std::f32::consts::PI;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, CameraControllerPlugin))
         .add_systems(Startup, (setup_camera_fog, setup_terrain_scene))
         .add_systems(Update, dynamic_scene)
         .run();
@@ -20,6 +26,7 @@ fn main() {
 fn setup_camera_fog(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        CameraController::default(),
         Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
         Atmosphere::EARTH,
@@ -29,13 +36,15 @@ fn setup_camera_fog(mut commands: Commands) {
         AtmosphereSettings {
             aerial_view_lut_max_distance: 3.2e5,
             scene_units_to_m: 1e+4,
+            // set this to Raymarching for high quality volumetric shadows
+            rendering_method: AtmosphereRenderingMethod::Default as u32,
             ..Default::default()
         },
         // The directional light illuminance used in this scene
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
         // bring the scene to a nicer brightness range.
-        Exposure::SUNLIGHT,
+        Exposure { ev100: 13.0 },
         // Tonemapper chosen just because it looked good with the scene, any
         // tonemapper would be fine :)
         Tonemapping::AcesFitted,
@@ -73,8 +82,19 @@ fn setup_terrain_scene(
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
+        SunLight::default(),
         Transform::from_xyz(1.0, -0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         cascade_shadow_config,
+    ));
+
+    // Spawn a new light probe to generate an environment map for the atmosphere,
+    // at this specific location. It can also be added to the camera directly.
+    commands.spawn((
+        LightProbe,
+        AtmosphereEnvironmentMapLight::default(),
+        // The translation controls where the light probe is placed,
+        // and the scale controls the extents of where it will affect objects in the scene.
+        Transform::from_xyz(0.0, 1.0, 0.0).with_scale(Vec3::splat(1000.0)),
     ));
 
     let sphere_mesh = meshes.add(Mesh::from(Sphere { radius: 1.0 }));
