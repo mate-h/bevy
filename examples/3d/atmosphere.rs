@@ -1,21 +1,84 @@
 //! This example showcases pbr atmospheric scattering
+#[path = "../helpers/camera_controller.rs"]
+mod camera_controller;
 
+use camera_controller::{CameraController, CameraControllerPlugin};
 use std::f32::consts::PI;
 
 use bevy::{
     camera::Exposure,
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
+    input::keyboard::KeyCode,
     light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
-    pbr::{Atmosphere, AtmosphereSettings},
+    pbr::{Atmosphere, AtmosphereMode, AtmosphereSettings},
     prelude::*,
 };
 
+#[derive(Resource, Default)]
+struct GameState {
+    paused: bool,
+    atmosphere_mode: AtmosphereMode,
+}
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
-        .add_systems(Startup, (setup_camera_fog, setup_terrain_scene))
-        .add_systems(Update, dynamic_scene)
+        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(GameState::default())
+        .add_plugins((DefaultPlugins, CameraControllerPlugin))
+        .add_systems(
+            Startup,
+            (setup_camera_fog, setup_terrain_scene, print_controls),
+        )
+        .add_systems(Update, (dynamic_scene, atmosphere_controls))
         .run();
+}
+
+fn print_controls() {
+    println!("Atmosphere Example Controls:");
+    println!("    1          - Switch to default rendering method");
+    println!("    2          - Switch to raymarched rendering method");
+    println!("    Enter      - Pause/Resume sun motion");
+    println!("    Up/Down    - Increase/Decrease exposure");
+}
+
+fn atmosphere_controls(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut atmosphere_settings: Query<&mut AtmosphereSettings>,
+    mut atmosphere: Query<&mut Atmosphere>,
+    mut game_state: ResMut<GameState>,
+    mut camera_exposure: Query<&mut Exposure, With<Camera3d>>,
+    time: Res<Time>,
+) {
+    // Handle rendering method switching
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        for mut settings in &mut atmosphere_settings {
+            settings.rendering_method = AtmosphereMode::LookupTexture;
+            println!("Switched to default rendering method");
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::Digit2) {
+        for mut settings in &mut atmosphere_settings {
+            settings.rendering_method = AtmosphereMode::Raymarched;
+            println!("Switched to raymarched rendering method");
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::Enter) {
+        game_state.paused = !game_state.paused;
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowUp) {
+        for mut exposure in &mut camera_exposure {
+            exposure.ev100 -= time.delta_secs() * 2.0;
+        }
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowDown) {
+        for mut exposure in &mut camera_exposure {
+            exposure.ev100 += time.delta_secs() * 2.0;
+        }
+    }
 }
 
 fn setup_camera_fog(mut commands: Commands) {
@@ -30,6 +93,7 @@ fn setup_camera_fog(mut commands: Commands) {
         AtmosphereSettings {
             aerial_view_lut_max_distance: 3.2e5,
             scene_units_to_m: 1e+4,
+            rendering_method: AtmosphereMode::Raymarched,
             ..Default::default()
         },
         // The directional light illuminance used in this scene
@@ -44,6 +108,7 @@ fn setup_camera_fog(mut commands: Commands) {
         Bloom::NATURAL,
         // Enables the atmosphere to drive reflections and ambient lighting (IBL) for this view
         AtmosphereEnvironmentMapLight::default(),
+        CameraController::default(),
     ));
 }
 
@@ -59,7 +124,7 @@ fn setup_terrain_scene(
     // Configure a properly scaled cascade shadow map for this scene (defaults are too large, mesh units are in km)
     let cascade_shadow_config = CascadeShadowConfigBuilder {
         first_cascade_far_bound: 0.3,
-        maximum_distance: 3.0,
+        maximum_distance: 15.0,
         ..default()
     }
     .build();
@@ -76,7 +141,7 @@ fn setup_terrain_scene(
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
-        Transform::from_xyz(1.0, -0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(1.0, 0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         cascade_shadow_config,
     ));
 
@@ -117,7 +182,14 @@ fn setup_terrain_scene(
     ));
 }
 
-fn dynamic_scene(mut suns: Query<&mut Transform, With<DirectionalLight>>, time: Res<Time>) {
-    suns.iter_mut()
-        .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+fn dynamic_scene(
+    mut suns: Query<&mut Transform, With<DirectionalLight>>,
+    time: Res<Time>,
+    sun_motion_state: Res<GameState>,
+) {
+    // Only rotate the sun if motion is not paused
+    if !sun_motion_state.paused {
+        suns.iter_mut()
+            .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+    }
 }
