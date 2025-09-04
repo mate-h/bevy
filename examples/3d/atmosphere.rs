@@ -15,7 +15,10 @@ use bevy::{
         light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume,
         VolumetricFog, VolumetricLight,
     },
-    pbr::{Atmosphere, AtmosphereMode, AtmosphereSettings, DefaultOpaqueRendererMethod, ScreenSpaceReflections},
+    pbr::{
+        Atmosphere, AtmosphereMode, AtmosphereSettings, DefaultOpaqueRendererMethod,
+        ScreenSpaceReflections,
+    },
     prelude::*,
 };
 
