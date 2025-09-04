@@ -1,21 +1,94 @@
 //! This example showcases pbr atmospheric scattering
+#[path = "../helpers/camera_controller.rs"]
+mod camera_controller;
 
+use camera_controller::{CameraController, CameraControllerPlugin};
 use std::f32::consts::PI;
 
 use bevy::{
+    anti_aliasing::fxaa::Fxaa,
     camera::Exposure,
     core_pipeline::{bloom::Bloom, tonemapping::Tonemapping},
-    light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
-    pbr::{Atmosphere, AtmosphereSettings},
+    diagnostic::LogDiagnosticsPlugin,
+    input::keyboard::KeyCode,
+    light::{
+        light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume,
+        VolumetricFog, VolumetricLight,
+    },
+    pbr::{
+        Atmosphere, AtmosphereMode, AtmosphereSettings, DefaultOpaqueRendererMethod,
+        ScreenSpaceReflections,
+    },
     prelude::*,
 };
 
+#[derive(Resource, Default)]
+struct GameState {
+    paused: bool,
+}
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
-        .add_systems(Startup, (setup_camera_fog, setup_terrain_scene))
-        .add_systems(Update, dynamic_scene)
+        .insert_resource(DefaultOpaqueRendererMethod::deferred())
+        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(GameState::default())
+        .add_plugins((
+            DefaultPlugins,
+            CameraControllerPlugin,
+            LogDiagnosticsPlugin::default(),
+        ))
+        .add_systems(
+            Startup,
+            (setup_camera_fog, setup_terrain_scene, print_controls),
+        )
+        .add_systems(Update, (dynamic_scene, atmosphere_controls))
         .run();
+}
+
+fn print_controls() {
+    println!("Atmosphere Example Controls:");
+    println!("    1          - Switch to default rendering method");
+    println!("    2          - Switch to raymarched rendering method");
+    println!("    Enter      - Pause/Resume sun motion");
+    println!("    Up/Down    - Increase/Decrease exposure");
+}
+
+fn atmosphere_controls(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut atmosphere_settings: Query<&mut AtmosphereSettings>,
+    mut game_state: ResMut<GameState>,
+    mut camera_exposure: Query<&mut Exposure, With<Camera3d>>,
+    time: Res<Time>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        for mut settings in &mut atmosphere_settings {
+            settings.rendering_method = AtmosphereMode::LookupTexture;
+            println!("Switched to default rendering method");
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::Digit2) {
+        for mut settings in &mut atmosphere_settings {
+            settings.rendering_method = AtmosphereMode::Raymarched;
+            println!("Switched to raymarched rendering method");
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::Enter) {
+        game_state.paused = !game_state.paused;
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowUp) {
+        for mut exposure in &mut camera_exposure {
+            exposure.ev100 -= time.delta_secs() * 2.0;
+        }
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowDown) {
+        for mut exposure in &mut camera_exposure {
+            exposure.ev100 += time.delta_secs() * 2.0;
+        }
+    }
 }
 
 fn setup_camera_fog(mut commands: Commands) {
@@ -24,19 +97,13 @@ fn setup_camera_fog(mut commands: Commands) {
         Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
         // This is the component that enables atmospheric scattering for a camera
         Atmosphere::EARTH,
-        // The scene is in units of 10km, so we need to scale up the
-        // aerial view lut distance and set the scene scale accordingly.
-        // Most usages of this feature will not need to adjust this.
-        AtmosphereSettings {
-            aerial_view_lut_max_distance: 3.2e5,
-            scene_units_to_m: 1e+4,
-            ..Default::default()
-        },
+        // Can be adjusted to change the scene scale and rendering quality
+        AtmosphereSettings::default(),
         // The directional light illuminance used in this scene
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
         // bring the scene to a nicer brightness range.
-        Exposure::SUNLIGHT,
+        Exposure { ev100: 13.0 },
         // Tonemapper chosen just because it looked good with the scene, any
         // tonemapper would be fine :)
         Tonemapping::AcesFitted,
@@ -44,6 +111,11 @@ fn setup_camera_fog(mut commands: Commands) {
         Bloom::NATURAL,
         // Enables the atmosphere to drive reflections and ambient lighting (IBL) for this view
         AtmosphereEnvironmentMapLight::default(),
+        CameraController::default(),
+        VolumetricFog::default(),
+        Msaa::Off,
+        Fxaa::default(),
+        ScreenSpaceReflections::default(),
     ));
 }
 
@@ -59,7 +131,7 @@ fn setup_terrain_scene(
     // Configure a properly scaled cascade shadow map for this scene (defaults are too large, mesh units are in km)
     let cascade_shadow_config = CascadeShadowConfigBuilder {
         first_cascade_far_bound: 0.3,
-        maximum_distance: 3.0,
+        maximum_distance: 15.0,
         ..default()
     }
     .build();
@@ -76,8 +148,15 @@ fn setup_terrain_scene(
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
-        Transform::from_xyz(1.0, -0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(1.0, 0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        VolumetricLight,
         cascade_shadow_config,
+    ));
+
+    // spawn the fog volume
+    commands.spawn((
+        FogVolume::default(),
+        Transform::from_scale(Vec3::splat(10.0)),
     ));
 
     let sphere_mesh = meshes.add(Mesh::from(Sphere { radius: 1.0 }));
@@ -117,7 +196,14 @@ fn setup_terrain_scene(
     ));
 }
 
-fn dynamic_scene(mut suns: Query<&mut Transform, With<DirectionalLight>>, time: Res<Time>) {
-    suns.iter_mut()
-        .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+fn dynamic_scene(
+    mut suns: Query<&mut Transform, With<DirectionalLight>>,
+    time: Res<Time>,
+    sun_motion_state: Res<GameState>,
+) {
+    // Only rotate the sun if motion is not paused
+    if !sun_motion_state.paused {
+        suns.iter_mut()
+            .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
+    }
 }
