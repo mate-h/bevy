@@ -1,11 +1,14 @@
-use crate::{GpuLights, LightMeta};
+use crate::{GpuLights, LightMeta, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts};
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_camera::{Camera, Camera3d};
-use bevy_core_pipeline::FullscreenShader;
+use bevy_core_pipeline::{
+    prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
+    FullscreenShader,
+};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::With,
+    query::{Has, With},
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
     world::{FromWorld, World},
@@ -38,6 +41,7 @@ pub(crate) struct RenderSkyBindGroupLayouts {
     pub render_sky_msaa: BindGroupLayout,
     pub fullscreen_shader: FullscreenShader,
     pub fragment_shader: Handle<Shader>,
+    pub mesh_view_layouts: MeshPipelineViewLayouts,
 }
 
 impl FromWorld for AtmosphereBindGroupLayouts {
@@ -153,8 +157,6 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (0, uniform_buffer::<Atmosphere>(true)),
                     (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
                     (2, uniform_buffer::<AtmosphereTransform>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
                     (6, sampler(SamplerBindingType::Filtering)),
                     (7, texture_2d(TextureSampleType::Float { filterable: true })), //multiscattering lut and sampler
@@ -184,8 +186,6 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (0, uniform_buffer::<Atmosphere>(true)),
                     (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
                     (2, uniform_buffer::<AtmosphereTransform>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
                     (5, texture_2d(TextureSampleType::Float { filterable: true })), //transmittance lut and sampler
                     (6, sampler(SamplerBindingType::Filtering)),
                     (7, texture_2d(TextureSampleType::Float { filterable: true })), //multiscattering lut and sampler
@@ -212,6 +212,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
             render_sky_msaa,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             fragment_shader: load_embedded_asset!(world, "render_sky.wgsl"),
+            mesh_view_layouts: world.resource::<MeshPipelineViewLayouts>().clone(),
         }
     }
 }
@@ -277,10 +278,15 @@ impl FromWorld for AtmosphereLutPipelines {
     fn from_world(world: &mut World) -> Self {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<AtmosphereBindGroupLayouts>();
+        let mesh_view_layouts = world.resource::<MeshPipelineViewLayouts>();
+        let mesh_view_layout = mesh_view_layouts
+            .get_view_layout(MeshPipelineViewLayoutKey::empty())
+            .main_layout
+            .clone();
 
         let transmittance_lut = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("transmittance_lut_pipeline".into()),
-            layout: vec![layouts.transmittance_lut.clone()],
+            layout: vec![mesh_view_layout.clone(), layouts.transmittance_lut.clone()],
             shader: load_embedded_asset!(world, "transmittance_lut.wgsl"),
             ..default()
         });
@@ -288,21 +294,24 @@ impl FromWorld for AtmosphereLutPipelines {
         let multiscattering_lut =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("multi_scattering_lut_pipeline".into()),
-                layout: vec![layouts.multiscattering_lut.clone()],
+                layout: vec![
+                    mesh_view_layout.clone(),
+                    layouts.multiscattering_lut.clone(),
+                ],
                 shader: load_embedded_asset!(world, "multiscattering_lut.wgsl"),
                 ..default()
             });
 
         let sky_view_lut = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("sky_view_lut_pipeline".into()),
-            layout: vec![layouts.sky_view_lut.clone()],
+            layout: vec![mesh_view_layout.clone(), layouts.sky_view_lut.clone()],
             shader: load_embedded_asset!(world, "sky_view_lut.wgsl"),
             ..default()
         });
 
         let aerial_view_lut = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("aerial_view_lut_pipeline".into()),
-            layout: vec![layouts.aerial_view_lut.clone()],
+            layout: vec![mesh_view_layout.clone(), layouts.aerial_view_lut.clone()],
             shader: load_embedded_asset!(world, "aerial_view_lut.wgsl"),
             ..default()
         });
@@ -323,6 +332,7 @@ pub(crate) struct RenderSkyPipelineId(pub CachedRenderPipelineId);
 pub(crate) struct RenderSkyPipelineKey {
     pub msaa_samples: u32,
     pub dual_source_blending: bool,
+    pub mesh_pipeline_view_key: MeshPipelineViewLayoutKey,
 }
 
 impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
@@ -344,13 +354,22 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
             BlendFactor::SrcAlpha
         };
 
+        let mesh_view_layout = self
+            .mesh_view_layouts
+            .get_view_layout(key.mesh_pipeline_view_key)
+            .main_layout
+            .clone();
+
         RenderPipelineDescriptor {
             label: Some(format!("render_sky_pipeline_{}", key.msaa_samples).into()),
-            layout: vec![if key.msaa_samples == 1 {
-                self.render_sky.clone()
-            } else {
-                self.render_sky_msaa.clone()
-            }],
+            layout: vec![
+                mesh_view_layout,
+                if key.msaa_samples == 1 {
+                    self.render_sky.clone()
+                } else {
+                    self.render_sky_msaa.clone()
+                },
+            ],
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.fragment_shader.clone(),
@@ -383,14 +402,39 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
 }
 
 pub(super) fn queue_render_sky_pipelines(
-    views: Query<(Entity, &Msaa), (With<Camera>, With<Atmosphere>)>,
+    views: Query<
+        (
+            Entity,
+            &Msaa,
+            Has<NormalPrepass>,
+            Has<DepthPrepass>,
+            Has<MotionVectorPrepass>,
+            Has<DeferredPrepass>,
+        ),
+        (With<Camera>, With<Atmosphere>),
+    >,
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<RenderSkyBindGroupLayouts>,
     mut specializer: ResMut<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>,
     render_device: Res<RenderDevice>,
     mut commands: Commands,
 ) {
-    for (entity, msaa) in &views {
+    for (entity, msaa, normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass) in
+        &views
+    {
+        let mut mesh_view_key = MeshPipelineViewLayoutKey::from(*msaa);
+        mesh_view_key.set(MeshPipelineViewLayoutKey::NORMAL_PREPASS, normal_prepass);
+        mesh_view_key.set(MeshPipelineViewLayoutKey::DEPTH_PREPASS, depth_prepass);
+        mesh_view_key.set(
+            MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS,
+            motion_vector_prepass,
+        );
+        mesh_view_key.set(
+            MeshPipelineViewLayoutKey::DEFERRED_PREPASS,
+            deferred_prepass,
+        );
+        // Atmosphere-specific resources are available
+        mesh_view_key.set(MeshPipelineViewLayoutKey::ATMOSPHERE, true);
         let id = specializer.specialize(
             &pipeline_cache,
             &layouts,
@@ -399,6 +443,7 @@ pub(super) fn queue_render_sky_pipelines(
                 dual_source_blending: render_device
                     .features()
                     .contains(WgpuFeatures::DUAL_SOURCE_BLENDING),
+                mesh_pipeline_view_key: mesh_view_key,
             },
         );
         commands.entity(entity).insert(RenderSkyPipelineId(id));
@@ -675,8 +720,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (0, atmosphere_binding.clone()),
                 (1, settings_binding.clone()),
                 (2, transforms_binding.clone()),
-                (3, view_binding.clone()),
-                (4, lights_binding.clone()),
                 (5, &textures.transmittance_lut.default_view),
                 (6, &samplers.transmittance_lut),
                 (7, &textures.multiscattering_lut.default_view),
