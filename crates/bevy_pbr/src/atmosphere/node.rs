@@ -16,7 +16,7 @@ use super::{
         AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset,
         RenderSkyPipelineId,
     },
-    GpuAtmosphereSettings,
+    CloudLayer, GpuAtmosphereSettings,
 };
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
@@ -173,6 +173,7 @@ impl ViewNode for RenderSkyNode {
         Read<ViewUniformOffset>,
         Read<ViewLightsUniformOffset>,
         Read<RenderSkyPipelineId>,
+        Read<DynamicUniformIndex<CloudLayer>>,
     );
 
     fn run<'w>(
@@ -188,6 +189,7 @@ impl ViewNode for RenderSkyNode {
             view_uniforms_offset,
             lights_uniforms_offset,
             render_sky_pipeline_id,
+            cloud_layer_uniforms_offset,
         ): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
@@ -222,6 +224,7 @@ impl ViewNode for RenderSkyNode {
                 atmosphere_transforms_offset.index(),
                 view_uniforms_offset.offset,
                 lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
             ],
         );
         render_sky_pass.draw(0..3, 0..1);
