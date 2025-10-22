@@ -117,6 +117,11 @@ impl ScatteringMedium {
     }
 
     /// Returns a scattering medium representing an earthlike atmosphere.
+    ///
+    /// Uses physically-based scale heights from Earth's atmosphere:
+    /// - Rayleigh (molecular) scattering: 8 km scale height
+    /// - Mie (aerosol) scattering: 1.2 km scale height
+    /// Assuming a 60 km atmosphere height.
     pub fn earthlike(falloff_resolution: u32, phase_resolution: u32) -> Self {
         Self::new(
             falloff_resolution,
@@ -125,13 +130,17 @@ impl ScatteringMedium {
                 ScatteringTerm {
                     absorption: Vec3::ZERO,
                     scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
-                    falloff: Falloff::Exponential { strength: 12.5 },
+                    falloff: Falloff::Exponential {
+                        scale_height: 8.0 / 60.0, // ~0.133
+                    },
                     phase: PhaseFunction::Rayleigh,
                 },
                 ScatteringTerm {
                     absorption: Vec3::splat(3.996e-6),
                     scattering: Vec3::splat(0.444e-6),
-                    falloff: Falloff::Exponential { strength: 83.5 },
+                    falloff: Falloff::Exponential {
+                        scale_height: 1.2 / 60.0, // 0.02
+                    },
                     phase: PhaseFunction::Mie { asymmetry: 0.8 },
                 },
                 ScatteringTerm {
@@ -203,18 +212,26 @@ pub enum Falloff {
     /// f(p) = p
     #[default]
     Linear,
-    /// An exponential falloff function with adjustable strength.
+    /// An exponential falloff function with adjustable scale height.
+    ///
+    /// This follows the standard atmospheric density model where
+    /// density(h) = exp(-h/H), where H is the scale height.
     ///
     /// f(1) = 1
-    /// f(0) = 0
-    /// f(p) = (e^sp - 1)/(e^s - 1)
+    /// f(0) ≈ 0
+    /// f(p) = exp(-(1-p)/scale_height)
     Exponential {
-        /// The "strength" of the exponential falloff. The higher
-        /// this value is, the quicker the medium's density will
-        /// decrease with distance.
+        /// The "scale height" of the exponential falloff, as a fraction
+        /// of the total atmosphere height. Smaller values mean the density
+        /// decreases more rapidly with altitude.
         ///
-        /// domain: (-∞, ∞)
-        strength: f32,
+        /// For reference, Earth's atmosphere with Rayleigh scattering
+        /// has a scale height of ~8km, and Mie scattering ~1.2km.
+        /// If your atmosphere is 60km tall, these would correspond to
+        /// scale_height values of 8/60 ≈ 0.133 and 1.2/60 = 0.02 respectively.
+        ///
+        /// domain: (0, ∞)
+        scale_height: f32,
     },
     /// A tent-shaped falloff function, which produces a triangular
     /// peak at the center and linearly falls off to either side.
@@ -247,17 +264,11 @@ impl Falloff {
     fn sample(&self, falloff: f32) -> f32 {
         match self {
             Falloff::Linear => falloff,
-            Falloff::Exponential { strength } => {
-                // fill discontinuity at strength == 0
-                if *strength == 0.0 {
-                    falloff
-                } else {
-                    let scale_exp_m1 = ops::exp_m1(*strength);
-                    let domain_offset = ops::ln(scale_exp_m1.abs());
-                    let range_offset = scale_exp_m1.recip();
-                    let eval_pos = falloff * strength - domain_offset;
-                    scale_exp_m1.signum() * ops::exp(eval_pos) - range_offset
-                }
+            Falloff::Exponential { scale_height } => {
+                // Standard exponential atmosphere model: density(h) = exp(-h/H)
+                // where falloff=1 is at surface (h=0) and falloff=0 is at max height
+                // So: density(falloff) = exp(-(1-falloff)/scale_height)
+                ops::exp(-(1.0 - falloff) / scale_height)
             }
             Falloff::Tent { center, width } => {
                 (1.0 - (falloff - center).abs() / (0.5 * width)).max(0.0)

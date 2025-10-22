@@ -6,7 +6,10 @@ use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
     light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
-    pbr::{AtmosphereSettings, EarthlikeAtmosphere},
+    pbr::{
+        Atmosphere, AtmosphereSettings, EarthlikeAtmosphere, Falloff, PhaseFunction,
+        ScatteringMedium, ScatteringTerm,
+    },
     post_process::bloom::Bloom,
     prelude::*,
 };
@@ -19,18 +22,29 @@ fn main() {
         .run();
 }
 
-fn setup_camera_fog(mut commands: Commands, earth_atmosphere: Res<EarthlikeAtmosphere>) {
+fn setup_camera_fog(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium>>) {
+    // add a medium to the default earthlike atmosphere
+    let mut medium = ScatteringMedium::earthlike(256, 256);
+    // medium.terms.push(ScatteringTerm {
+    //     absorption: Vec3::splat(3.996e-6 * 100.0),
+    //     scattering: Vec3::splat(0.444e-6 * 100.0),
+    //     falloff: Falloff::Exponential {
+    //         scale_height: 0.2 / 60.0,
+    //     },
+    //     phase: PhaseFunction::Mie { asymmetry: 0.8 },
+    // });
+    let medium_handle = media.add(medium);
+    let atmosphere = Atmosphere::earthlike(medium_handle);
+
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(-1.2, 0.15, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
         // get the default `Atmosphere` component
-        earth_atmosphere.get(),
-        // The scene is in units of 10km, so we need to scale up the
-        // aerial view lut distance and set the scene scale accordingly.
-        // Most usages of this feature will not need to adjust this.
+        atmosphere,
+        // The default atmosphere settings balance performance and quality
+        // for most scenes.
         AtmosphereSettings {
-            aerial_view_lut_max_distance: 3.2e5,
-            scene_units_to_m: 1e+4,
+            scene_units_to_m: 1e+3,
             ..Default::default()
         },
         // The directional light illuminance used in this scene

@@ -27,13 +27,17 @@ fn setup_camera(
             ScatteringTerm {
                 absorption: Vec3::ZERO,
                 scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
-                falloff: Falloff::Exponential { strength: 12.5 },
+                falloff: Falloff::Exponential {
+                    scale_height: 8.0 / 60.0, // Rayleigh: 8km scale height
+                },
                 phase: PhaseFunction::Rayleigh,
             },
             ScatteringTerm {
                 absorption: Vec3::splat(3.996e-6),
                 scattering: Vec3::splat(0.444e-6),
-                falloff: Falloff::Exponential { strength: 83.5 },
+                falloff: Falloff::Exponential {
+                    scale_height: 1.2 / 60.0, // Mie: 1.2km scale height
+                },
                 phase: PhaseFunction::Mie { asymmetry: 0.8 },
             },
             ScatteringTerm {
