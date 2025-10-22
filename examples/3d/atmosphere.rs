@@ -25,14 +25,15 @@ fn main() {
 fn setup_camera_fog(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium>>) {
     // add a medium to the default earthlike atmosphere
     let mut medium = ScatteringMedium::earthlike(256, 256);
-    // medium.terms.push(ScatteringTerm {
-    //     absorption: Vec3::splat(3.996e-6 * 100.0),
-    //     scattering: Vec3::splat(0.444e-6 * 100.0),
-    //     falloff: Falloff::Exponential {
-    //         scale_height: 0.2 / 60.0,
-    //     },
-    //     phase: PhaseFunction::Mie { asymmetry: 0.8 },
-    // });
+    // add ground fog
+    medium.terms.push(ScatteringTerm {
+        absorption: Vec3::splat(3.996e-6 * 100.0),
+        scattering: Vec3::splat(0.444e-6 * 100.0),
+        falloff: Falloff::Exponential {
+            scale_height: 0.2 / 60.0,
+        },
+        phase: PhaseFunction::Mie { asymmetry: 0.8 },
+    });
     let medium_handle = media.add(medium);
     let atmosphere = Atmosphere::earthlike(medium_handle);
 
