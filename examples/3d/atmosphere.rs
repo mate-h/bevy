@@ -102,10 +102,6 @@ fn setup_camera_fog(mut commands: Commands, earth_atmosphere: Res<EarthlikeAtmos
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(-2.4, 0.04, 0.0).looking_at(Vec3::Y * 0.1, Vec3::Y),
-        // get the default `Atmosphere` component
-        earth_atmosphere.get(),
-        // Can be adjusted to change the scene scale and rendering quality
-        AtmosphereSettings::default(),
         // The directional light illuminance used in this scene
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
@@ -127,6 +123,13 @@ fn setup_camera_fog(mut commands: Commands, earth_atmosphere: Res<EarthlikeAtmos
         Msaa::Off,
         Fxaa::default(),
         ScreenSpaceReflections::default(),
+    ));
+
+    commands.spawn((
+        // get the default `Atmosphere` component
+        earth_atmosphere.get(),
+        // Can be adjusted to change the scene scale and rendering quality
+        AtmosphereSettings::default(),
     ));
 }
 

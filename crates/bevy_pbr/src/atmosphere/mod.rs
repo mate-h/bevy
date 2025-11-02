@@ -72,8 +72,9 @@ use environment::{
     prepare_probe_textures, AtmosphereEnvironmentMap, EnvironmentNode,
 };
 use resources::{
-    prepare_atmosphere_transforms, prepare_atmosphere_uniforms, queue_render_sky_pipelines,
-    AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts,
+    prepare_atmosphere_transforms, prepare_atmosphere_uniforms,
+    prepare_view_atmospheres, queue_render_sky_pipelines, AtmosphereTransforms, GpuAtmosphere,
+    RenderSkyBindGroupLayouts,
 };
 use tracing::warn;
 
@@ -179,6 +180,10 @@ impl Plugin for AtmospherePlugin {
                     prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_view_atmospheres
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_atmosphere_bind_groups)
+                        .after(prepare_atmosphere_uniforms),
                     write_atmosphere_buffer.in_set(RenderSystems::PrepareResources),
                 ),
             )
@@ -263,7 +268,7 @@ impl Atmosphere {
 impl ExtractComponent for Atmosphere {
     type QueryData = Read<Atmosphere>;
 
-    type QueryFilter = With<Camera3d>;
+    type QueryFilter = ();
 
     type Out = ExtractedAtmosphere;
 
@@ -427,7 +432,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
 impl ExtractComponent for GpuAtmosphereSettings {
     type QueryData = Read<AtmosphereSettings>;
 
-    type QueryFilter = (With<Camera3d>, With<Atmosphere>);
+    type QueryFilter = With<Atmosphere>;
 
     type Out = GpuAtmosphereSettings;
 
@@ -437,7 +442,7 @@ impl ExtractComponent for GpuAtmosphereSettings {
 }
 
 fn configure_camera_depth_usages(
-    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<ExtractedAtmosphere>)>,
+    mut cameras: Query<&mut Camera3d, Changed<Camera3d>>,
 ) {
     for mut camera in &mut cameras {
         camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();
