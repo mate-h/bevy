@@ -149,6 +149,7 @@ impl ViewNode for AtmosphereLutsNode {
                 &[
                     view_atmosphere.atmosphere_uniform_index,
                     view_atmosphere.settings_uniform_index,
+                    view_atmosphere.transform_offset.index(),
                     view_uniforms_offset.offset,
                     lights_uniforms_offset.offset,
                 ],

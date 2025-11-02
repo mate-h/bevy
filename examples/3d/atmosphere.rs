@@ -130,6 +130,8 @@ fn setup_camera_fog(mut commands: Commands, earth_atmosphere: Res<EarthlikeAtmos
         earth_atmosphere.get(),
         // Can be adjusted to change the scene scale and rendering quality
         AtmosphereSettings::default(),
+        // Testing the transform component
+        Transform::from_xyz(0.0, 9_000.0, 0.0),
     ));
 }
 

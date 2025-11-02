@@ -43,6 +43,7 @@ use bevy_camera::Camera3d;
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
     component::Component,
+    prelude::Commands,
     query::{Changed, QueryItem, With},
     resource::Resource,
     schedule::IntoScheduleConfigs,
@@ -54,6 +55,7 @@ use bevy_render::{
     extract_component::UniformComponentPlugin,
     render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
     view::Hdr,
+    Extract, ExtractSchedule,
     RenderStartup,
 };
 use bevy_render::{
@@ -61,11 +63,13 @@ use bevy_render::{
     render_graph::{RenderGraphExt, ViewNodeRunner},
     render_resource::{TextureFormat, TextureUsages},
     renderer::RenderAdapter,
+    sync_world::RenderEntity,
     Render, RenderApp, RenderSystems,
 };
 
 use bevy_core_pipeline::core_3d::graph::Core3d;
 use bevy_shader::load_shader_library;
+use bevy_transform::components::GlobalTransform;
 use environment::{
     init_atmosphere_probe_layout, init_atmosphere_probe_pipeline,
     prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
@@ -156,6 +160,7 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
+            .add_systems(ExtractSchedule, extract_atmosphere_transforms)
             .add_systems(
                 RenderStartup,
                 (
@@ -438,6 +443,15 @@ impl ExtractComponent for GpuAtmosphereSettings {
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(item.clone().into())
+    }
+}
+
+fn extract_atmosphere_transforms(
+    mut commands: Commands,
+    query: Extract<Query<(RenderEntity, &GlobalTransform), With<Atmosphere>>>,
+) {
+    for (render_entity, global_transform) in query.iter() {
+        commands.entity(render_entity).insert(*global_transform);
     }
 }
 

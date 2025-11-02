@@ -135,6 +135,7 @@ impl AtmosphereBindGroupLayouts {
                 (
                     (0, uniform_buffer::<GpuAtmosphere>(true)),
                     (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
                     (4, uniform_buffer::<GpuLights>(true)),
                     // scattering medium luts and sampler
@@ -782,6 +783,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 // uniforms
                 (0, atmosphere_binding.clone()),
                 (1, settings_binding.clone()),
+                (2, transforms_binding.clone()),
                 (3, view_binding.clone()),
                 (4, lights_binding.clone()),
                 // scattering medium luts and sampler
