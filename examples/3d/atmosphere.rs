@@ -46,7 +46,10 @@ fn main() {
         .add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, Water>>::default())
         .add_systems(
             Startup,
-            (setup_camera_fog, setup_terrain_scene, print_controls),
+            (
+                setup_camera_fog, 
+                // setup_terrain_scene, 
+                print_controls),
         )
         .add_systems(Update, (dynamic_scene, atmosphere_controls))
         .run();
@@ -125,13 +128,48 @@ fn setup_camera_fog(mut commands: Commands, earth_atmosphere: Res<EarthlikeAtmos
         ScreenSpaceReflections::default(),
     ));
 
+    let atmosphere = earth_atmosphere.get();
+    let bottom_radius = atmosphere.bottom_radius;
+
     commands.spawn((
         // get the default `Atmosphere` component
-        earth_atmosphere.get(),
+        atmosphere.clone(),
         // Can be adjusted to change the scene scale and rendering quality
         AtmosphereSettings::default(),
-        // Testing the transform component
-        Transform::from_xyz(0.0, 9_000.0, 0.0),
+        Transform::from_xyz(0.0, atmosphere.bottom_radius + 90_000.0, 0.0),
+    ));
+
+    commands.spawn((
+        // get the default `Atmosphere` component
+        atmosphere.clone(),
+        // Can be adjusted to change the scene scale and rendering quality
+        AtmosphereSettings::default(),
+        Transform::from_xyz(0.0, -atmosphere.bottom_radius - 90_000.0, 0.0),
+    ));
+
+    // Configure a properly scaled cascade shadow map for this scene (defaults are too large, mesh units are in km)
+    let cascade_shadow_config = CascadeShadowConfigBuilder {
+        first_cascade_far_bound: 0.3,
+        maximum_distance: 15.0,
+        ..default()
+    }
+    .build();
+
+    // Sun
+    commands.spawn((
+        DirectionalLight {
+            shadows_enabled: true,
+            // lux::RAW_SUNLIGHT is recommended for use with this feature, since
+            // other values approximate sunlight *post-scattering* in various
+            // conditions. RAW_SUNLIGHT in comparison is the illuminance of the
+            // sun unfiltered by the atmosphere, so it is the proper input for
+            // sunlight to be filtered by the atmosphere.
+            illuminance: lux::RAW_SUNLIGHT,
+            ..default()
+        },
+        Transform::from_xyz(1.0, 0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        VolumetricLight,
+        cascade_shadow_config,
     ));
 }
 
@@ -178,30 +216,6 @@ fn setup_terrain_scene(
     mut water_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, Water>>>,
     asset_server: Res<AssetServer>,
 ) {
-    // Configure a properly scaled cascade shadow map for this scene (defaults are too large, mesh units are in km)
-    let cascade_shadow_config = CascadeShadowConfigBuilder {
-        first_cascade_far_bound: 0.3,
-        maximum_distance: 15.0,
-        ..default()
-    }
-    .build();
-
-    // Sun
-    commands.spawn((
-        DirectionalLight {
-            shadows_enabled: true,
-            // lux::RAW_SUNLIGHT is recommended for use with this feature, since
-            // other values approximate sunlight *post-scattering* in various
-            // conditions. RAW_SUNLIGHT in comparison is the illuminance of the
-            // sun unfiltered by the atmosphere, so it is the proper input for
-            // sunlight to be filtered by the atmosphere.
-            illuminance: lux::RAW_SUNLIGHT,
-            ..default()
-        },
-        Transform::from_xyz(1.0, 0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
-        VolumetricLight,
-        cascade_shadow_config,
-    ));
 
     // spawn the fog volume
     commands.spawn((

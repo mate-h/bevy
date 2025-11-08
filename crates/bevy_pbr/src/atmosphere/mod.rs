@@ -358,10 +358,6 @@ pub struct AtmosphereSettings {
     /// units: m
     pub aerial_view_lut_max_distance: f32,
 
-    /// A conversion factor between scene units and meters, used to
-    /// ensure correctness at different length scales.
-    pub scene_units_to_m: f32,
-
     /// The number of points to sample for each fragment when the using
     /// ray marching to render the sky
     pub sky_max_samples: u32,
@@ -383,7 +379,6 @@ impl Default for AtmosphereSettings {
             aerial_view_lut_size: UVec3::new(32, 32, 32),
             aerial_view_lut_samples: 10,
             aerial_view_lut_max_distance: 3.2e4,
-            scene_units_to_m: 1.0,
             sky_max_samples: 16,
             rendering_method: AtmosphereMode::LookupTexture,
         }
@@ -403,7 +398,6 @@ pub struct GpuAtmosphereSettings {
     pub sky_view_lut_samples: u32,
     pub aerial_view_lut_samples: u32,
     pub aerial_view_lut_max_distance: f32,
-    pub scene_units_to_m: f32,
     pub sky_max_samples: u32,
     pub rendering_method: u32,
 }
@@ -427,7 +421,6 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             sky_view_lut_samples: s.sky_view_lut_samples,
             aerial_view_lut_samples: s.aerial_view_lut_samples,
             aerial_view_lut_max_distance: s.aerial_view_lut_max_distance,
-            scene_units_to_m: s.scene_units_to_m,
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
         }

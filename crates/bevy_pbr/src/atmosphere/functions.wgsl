@@ -152,9 +152,17 @@ fn sample_sky_view_lut(r: f32, ray_dir_as: vec3<f32>) -> vec3<f32> {
     return textureSampleLevel(sky_view_lut, atmosphere_lut_sampler, uv, 0.0).rgb;
 }
 
+/// Extracts the uniform scale from the atmosphere transform matrix.
+/// For uniform scale, we use the length of the X axis (first column).
+fn get_atmosphere_scale() -> f32 {
+    return length(atmosphere_transforms.world_from_atmosphere[0].xyz);
+}
+
 fn ndc_to_camera_dist(ndc: vec3<f32>) -> f32 {
     let view_pos = view.view_from_clip * vec4(ndc, 1.0);
-    let t = length(view_pos.xyz / view_pos.w) * settings.scene_units_to_m;
+    // Distance in view space (already in scene units), convert to atmosphere space units
+    let scale = get_atmosphere_scale();
+    let t = length(view_pos.xyz / view_pos.w) / scale;
     return t;
 }
 
@@ -289,25 +297,38 @@ fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
     return mix(t_top, t_bottom, f32(hits));
 }
 
-/// Returns the observer's position in the atmosphere
+/// Returns the observer's position in atmosphere space.
+/// In atmosphere space, the planet center is at the origin (0, 0, 0).
+/// The transform's translation represents where the planet center is in world space.
 fn get_view_position() -> vec3<f32> {
-    var world_pos = view.world_position * settings.scene_units_to_m + vec3(0.0, atmosphere.bottom_radius, 0.0);
-
-    // get the w axis from the transform matrix
-    let w_axis = atmosphere_transforms.world_from_atmosphere[3].xyz;
-    world_pos += w_axis;
+    // Camera position is in world space (scene units)
+    let camera_ws = view.world_position;
+    
+    // Extract the translation from the transform matrix (4th column, xyz components).
+    // For a Transform with translation T and scale S, the matrix stores the final world-space position.
+    // The translation column is in world space and already accounts for any scale/rotation.
+    let planet_center_ws = atmosphere_transforms.world_from_atmosphere[3].xyz;
+    
+    // Get scale from transform matrix to convert world-space positions to atmosphere-space positions.
+    // Atmosphere space positions are world-space positions divided by the scale.
+    let scale = get_atmosphere_scale();
+    
+    // Convert camera position from world space to atmosphere space.
+    // In atmosphere space, planet center is at (0, 0, 0), so we subtract the planet center's world position
+    // and divide by scale to get atmosphere-space coordinates.
+    var pos_as = (camera_ws - planet_center_ws) / scale;
+    
+    // Calculate distance from planet center
+    let r = length(pos_as);
     
     // If the camera is underground, clamp it to the ground surface along the local up.
-    let r = length(world_pos);
-    // Nudge r above ground to avoid sqrt cancellation, zero-length segments where 
-    // r is equal to bottom_radius, which show up as black pixels
     let min_radius = atmosphere.bottom_radius + EPSILON;
     if r < min_radius {
-        let up = normalize(world_pos);
-        world_pos = up * min_radius;
+        let up = normalize(pos_as);
+        pos_as = up * min_radius;
     }
 
-    return world_pos;
+    return pos_as;
 }
 
 // We assume the `up` vector at the view position is the y axis, since the world is locally flat/level.
@@ -333,12 +354,16 @@ fn ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
     return ndc * vec2(0.5, -0.5) + vec2(0.5);
 }
 
-/// Converts a direction in world space to atmosphere space
+/// Converts a direction in world space to atmosphere space.
+/// For translation-only transforms, directions are invariant, so this is just a coordinate frame conversion.
 fn direction_world_to_atmosphere(dir_ws: vec3<f32>, up: vec3<f32>) -> vec3<f32> {
+    // Build local coordinate frame at view position for the non-linear parameterization.
     // Camera forward in world space (-Z in view to world transform)
     let forward_ws = (view.world_from_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz;
     let tangent_z = normalize(up * dot(forward_ws, up) - forward_ws);
     let tangent_x = cross(up, tangent_z);
+    
+    // Project onto local frame for the parameterization
     return vec3(
         dot(dir_ws, tangent_x),
         dot(dir_ws, up),
@@ -346,10 +371,23 @@ fn direction_world_to_atmosphere(dir_ws: vec3<f32>, up: vec3<f32>) -> vec3<f32> 
     );
 }
 
-/// Converts a direction in atmosphere space to world space
+/// Converts a direction in atmosphere space to world space.
+/// For translation-only transforms, directions are invariant, so this reconstructs the coordinate frame.
 fn direction_atmosphere_to_world(dir_as: vec3<f32>) -> vec3<f32> {
-    let dir_ws = atmosphere_transforms.world_from_atmosphere * vec4(dir_as, 0.0);
-    return dir_ws.xyz;
+    // Get the view position to reconstruct the same local coordinate frame
+    // used by direction_world_to_atmosphere
+    let world_pos = get_view_position();
+    let up = normalize(world_pos);
+    
+    // Camera forward in world space (-Z in view to world transform)
+    let forward_ws = (view.world_from_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz;
+    let tangent_z = normalize(up * dot(forward_ws, up) - forward_ws);
+    let tangent_x = cross(up, tangent_z);
+    
+    // Reconstruct world-space direction from local frame components
+    // dir_as = (dot(dir_ws, tangent_x), dot(dir_ws, up), dot(dir_ws, tangent_z))
+    // Therefore: dir_ws = dir_as.x * tangent_x + dir_as.y * up + dir_as.z * tangent_z
+    return dir_as.x * tangent_x + dir_as.y * up + dir_as.z * tangent_z;
 }
 
 // Modified from skybox.wgsl. For this pass we don't need to apply a separate sky transform or consider camera viewport.

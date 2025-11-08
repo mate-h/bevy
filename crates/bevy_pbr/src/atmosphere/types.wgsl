@@ -19,7 +19,6 @@ struct AtmosphereSettings {
     sky_view_lut_samples: u32,
     aerial_view_lut_samples: u32,
     aerial_view_lut_max_distance: f32,
-    scene_units_to_m: f32,
     sky_max_samples: u32,
     rendering_method: u32,
 }
