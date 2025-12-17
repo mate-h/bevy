@@ -43,6 +43,7 @@ use bevy_camera::Camera3d;
 use bevy_core_pipeline::core_3d::graph::Node3d;
 use bevy_ecs::{
     component::Component,
+    prelude::Commands,
     query::{Changed, QueryItem, With},
     resource::Resource,
     schedule::IntoScheduleConfigs,
@@ -54,6 +55,7 @@ use bevy_render::{
     extract_component::UniformComponentPlugin,
     render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
     view::Hdr,
+    Extract, ExtractSchedule,
     RenderStartup,
 };
 use bevy_render::{
@@ -61,19 +63,22 @@ use bevy_render::{
     render_graph::{RenderGraphExt, ViewNodeRunner},
     render_resource::{TextureFormat, TextureUsages},
     renderer::RenderAdapter,
+    sync_world::RenderEntity,
     Render, RenderApp, RenderSystems,
 };
 
 use bevy_core_pipeline::core_3d::graph::Core3d;
 use bevy_shader::load_shader_library;
+use bevy_transform::components::GlobalTransform;
 use environment::{
     init_atmosphere_probe_layout, init_atmosphere_probe_pipeline,
     prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
     prepare_probe_textures, AtmosphereEnvironmentMap, EnvironmentNode,
 };
 use resources::{
-    prepare_atmosphere_transforms, prepare_atmosphere_uniforms, queue_render_sky_pipelines,
-    AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts,
+    prepare_atmosphere_transforms, prepare_atmosphere_uniforms,
+    prepare_view_atmospheres, queue_render_sky_pipelines, AtmosphereTransforms, GpuAtmosphere,
+    RenderSkyBindGroupLayouts,
 };
 use tracing::warn;
 
@@ -155,6 +160,7 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
+            .add_systems(ExtractSchedule, extract_atmosphere_transforms)
             .add_systems(
                 RenderStartup,
                 (
@@ -179,6 +185,10 @@ impl Plugin for AtmospherePlugin {
                     prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_view_atmospheres
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_atmosphere_bind_groups)
+                        .after(prepare_atmosphere_uniforms),
                     write_atmosphere_buffer.in_set(RenderSystems::PrepareResources),
                 ),
             )
@@ -263,7 +273,7 @@ impl Atmosphere {
 impl ExtractComponent for Atmosphere {
     type QueryData = Read<Atmosphere>;
 
-    type QueryFilter = With<Camera3d>;
+    type QueryFilter = ();
 
     type Out = ExtractedAtmosphere;
 
@@ -348,10 +358,6 @@ pub struct AtmosphereSettings {
     /// units: m
     pub aerial_view_lut_max_distance: f32,
 
-    /// A conversion factor between scene units and meters, used to
-    /// ensure correctness at different length scales.
-    pub scene_units_to_m: f32,
-
     /// The number of points to sample for each fragment when the using
     /// ray marching to render the sky
     pub sky_max_samples: u32,
@@ -373,7 +379,6 @@ impl Default for AtmosphereSettings {
             aerial_view_lut_size: UVec3::new(32, 32, 32),
             aerial_view_lut_samples: 10,
             aerial_view_lut_max_distance: 3.2e4,
-            scene_units_to_m: 1.0,
             sky_max_samples: 16,
             rendering_method: AtmosphereMode::LookupTexture,
         }
@@ -393,7 +398,6 @@ pub struct GpuAtmosphereSettings {
     pub sky_view_lut_samples: u32,
     pub aerial_view_lut_samples: u32,
     pub aerial_view_lut_max_distance: f32,
-    pub scene_units_to_m: f32,
     pub sky_max_samples: u32,
     pub rendering_method: u32,
 }
@@ -417,7 +421,6 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             sky_view_lut_samples: s.sky_view_lut_samples,
             aerial_view_lut_samples: s.aerial_view_lut_samples,
             aerial_view_lut_max_distance: s.aerial_view_lut_max_distance,
-            scene_units_to_m: s.scene_units_to_m,
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
         }
@@ -427,7 +430,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
 impl ExtractComponent for GpuAtmosphereSettings {
     type QueryData = Read<AtmosphereSettings>;
 
-    type QueryFilter = (With<Camera3d>, With<Atmosphere>);
+    type QueryFilter = With<Atmosphere>;
 
     type Out = GpuAtmosphereSettings;
 
@@ -436,8 +439,17 @@ impl ExtractComponent for GpuAtmosphereSettings {
     }
 }
 
+fn extract_atmosphere_transforms(
+    mut commands: Commands,
+    query: Extract<Query<(RenderEntity, &GlobalTransform), With<Atmosphere>>>,
+) {
+    for (render_entity, global_transform) in query.iter() {
+        commands.entity(render_entity).insert(*global_transform);
+    }
+}
+
 fn configure_camera_depth_usages(
-    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<ExtractedAtmosphere>)>,
+    mut cameras: Query<&mut Camera3d, Changed<Camera3d>>,
 ) {
     for mut camera in &mut cameras {
         camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();

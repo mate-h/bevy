@@ -36,7 +36,10 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     let world_pos = get_view_position();
     let r = length(world_pos);
     let up = normalize(world_pos);
-    let mu = dot(ray_dir_ws, up);
+    // Convert ray direction to atmosphere space before computing mu
+    // The coordinate frame conversion uses 'up' as the Y axis, so mu = ray_dir_as.y
+    let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws, up);
+    let mu = ray_dir_as.y; // Y component is dot(ray_dir_ws, up) in the local coordinate frame
     let max_samples = settings.sky_max_samples;
     let should_raymarch = settings.rendering_method == 1u;
 
@@ -46,7 +49,6 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     let sun_radiance = sample_sun_radiance(ray_dir_ws);
 
     if depth == 0.0 {
-        let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws, up);
         transmittance = sample_transmittance_lut(r, mu);
         inscattering = sample_sky_view_lut(r, ray_dir_as);
         if should_raymarch {
