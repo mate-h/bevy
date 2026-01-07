@@ -34,6 +34,8 @@
 //! [Unreal Engine Implementation]: https://github.com/sebh/UnrealEngineSkyAtmosphere
 
 mod environment;
+pub mod fbm_noise;
+pub mod perlin_worley_noise;
 mod node;
 pub mod resources;
 
@@ -71,6 +73,15 @@ use environment::{
     prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
     prepare_probe_textures, AtmosphereEnvironmentMap, EnvironmentNode,
 };
+use fbm_noise::{
+    generate_fbm_noise_once, init_fbm_noise_params_buffer, init_fbm_noise_texture,
+    prepare_fbm_noise_bind_group, FbmNoiseBindGroupLayout, FbmNoisePipeline, NoiseGenerated,
+};
+use perlin_worley_noise::{
+    generate_perlin_worley_noise_once, init_perlin_worley_noise_params_buffer,
+    init_perlin_worley_noise_texture, prepare_perlin_worley_noise_bind_group,
+    PerlinWorleyNoiseBindGroupLayout, PerlinWorleyNoiseGenerated, PerlinWorleyNoisePipeline,
+};
 use resources::{
     prepare_atmosphere_transforms, prepare_atmosphere_uniforms, queue_render_sky_pipelines,
     AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts,
@@ -86,7 +97,7 @@ use self::{
     node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
     resources::{
         prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereBindGroupLayouts,
-        AtmosphereLutPipelines, AtmosphereSampler,
+        AtmosphereLutPipelines, AtmosphereSampler, CloudNoiseSampler,
     },
 };
 
@@ -99,6 +110,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "functions.wgsl");
         load_shader_library!(app, "bruneton_functions.wgsl");
         load_shader_library!(app, "bindings.wgsl");
+        load_shader_library!(app, "clouds.wgsl");
 
         embedded_asset!(app, "transmittance_lut.wgsl");
         embedded_asset!(app, "multiscattering_lut.wgsl");
@@ -106,13 +118,19 @@ impl Plugin for AtmospherePlugin {
         embedded_asset!(app, "aerial_view_lut.wgsl");
         embedded_asset!(app, "render_sky.wgsl");
         embedded_asset!(app, "environment.wgsl");
+        embedded_asset!(app, "fbm_noise_3d.wgsl");
+        embedded_asset!(app, "perlin_worley_noise_3d.wgsl");
+        embedded_asset!(app, "cloud_shadow_map.wgsl");
+        embedded_asset!(app, "cloud_shadow_filter.wgsl");
 
         app.add_plugins((
             ExtractComponentPlugin::<Atmosphere>::default(),
             ExtractComponentPlugin::<GpuAtmosphereSettings>::default(),
             ExtractComponentPlugin::<AtmosphereEnvironmentMap>::default(),
+            ExtractComponentPlugin::<CloudLayer>::default(),
             UniformComponentPlugin::<GpuAtmosphere>::default(),
             UniformComponentPlugin::<GpuAtmosphereSettings>::default(),
+            UniformComponentPlugin::<CloudLayer>::default(),
         ))
         .add_systems(Update, prepare_atmosphere_probe_components);
 
@@ -152,15 +170,26 @@ impl Plugin for AtmospherePlugin {
             .insert_resource(AtmosphereBindGroupLayouts::new())
             .init_resource::<RenderSkyBindGroupLayouts>()
             .init_resource::<AtmosphereSampler>()
+            .init_resource::<CloudNoiseSampler>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
+            .init_resource::<FbmNoiseBindGroupLayout>()
+            .init_resource::<FbmNoisePipeline>()
+            .init_resource::<NoiseGenerated>()
+            .init_resource::<PerlinWorleyNoiseBindGroupLayout>()
+            .init_resource::<PerlinWorleyNoisePipeline>()
+            .init_resource::<PerlinWorleyNoiseGenerated>()
             .add_systems(
                 RenderStartup,
                 (
                     init_atmosphere_probe_layout,
                     init_atmosphere_probe_pipeline,
                     init_atmosphere_buffer,
+                    init_fbm_noise_texture,
+                    init_fbm_noise_params_buffer,
+                    init_perlin_worley_noise_texture,
+                    init_perlin_worley_noise_params_buffer,
                 )
                     .chain(),
             )
@@ -179,6 +208,14 @@ impl Plugin for AtmospherePlugin {
                     prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_fbm_noise_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_perlin_worley_noise_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    generate_fbm_noise_once
+                        .in_set(RenderSystems::Render)
+                        .after(RenderSystems::PrepareBindGroups),
+                    generate_perlin_worley_noise_once
+                        .in_set(RenderSystems::Render)
+                        .after(RenderSystems::PrepareBindGroups),
                     write_atmosphere_buffer.in_set(RenderSystems::PrepareResources),
                 ),
             )
@@ -358,6 +395,31 @@ pub struct AtmosphereSettings {
 
     /// The rendering method to use for the atmosphere.
     pub rendering_method: AtmosphereMode,
+
+    /// Resolution of the cloud shadow map used to shadow directional lights when
+    /// rendering in [`AtmosphereMode::Raymarched`].
+    ///
+    /// Higher resolution improves stability and reduces aliasing at grazing angles,
+    /// but increases compute cost.
+    pub cloud_shadow_map_size: UVec2,
+
+    /// Half-extent of the orthographic cloud shadow map volume in meters.
+    ///
+    /// The shadow map covers a square region of size \(2 \cdot extent\) around the view
+    /// position, oriented in light space.
+    pub cloud_shadow_map_extent: f32,
+
+    /// Number of samples used when building the cloud shadow map.
+    pub cloud_shadow_map_samples: u32,
+
+    /// Strength multiplier applied to the cloud shadow map's stored extinction / optical depth.
+    pub cloud_shadow_map_strength: f32,
+
+    /// Number of spatial filter iterations applied to the cloud shadow map after tracing.
+    ///
+    /// This is the main knob to trade performance for stability once the shadow map uses jittered sampling.
+    /// Values above 4 are usually not worth it.
+    pub cloud_shadow_map_spatial_filter_iterations: u32,
 }
 
 impl Default for AtmosphereSettings {
@@ -376,6 +438,13 @@ impl Default for AtmosphereSettings {
             scene_units_to_m: 1.0,
             sky_max_samples: 16,
             rendering_method: AtmosphereMode::LookupTexture,
+
+            // Cloud shadow map defaults (only used by Raymarched mode).
+            cloud_shadow_map_size: UVec2::new(512, 512),
+            cloud_shadow_map_extent: 64_000.0,
+            cloud_shadow_map_samples: 48,
+            cloud_shadow_map_strength: 1.0,
+            cloud_shadow_map_spatial_filter_iterations: 0,
         }
     }
 }
@@ -396,6 +465,11 @@ pub struct GpuAtmosphereSettings {
     pub scene_units_to_m: f32,
     pub sky_max_samples: u32,
     pub rendering_method: u32,
+    pub cloud_shadow_map_size: UVec2,
+    pub cloud_shadow_map_extent: f32,
+    pub cloud_shadow_map_samples: u32,
+    pub cloud_shadow_map_strength: f32,
+    pub cloud_shadow_map_spatial_filter_iterations: u32,
 }
 
 impl Default for GpuAtmosphereSettings {
@@ -420,6 +494,11 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             scene_units_to_m: s.scene_units_to_m,
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
+            cloud_shadow_map_size: s.cloud_shadow_map_size,
+            cloud_shadow_map_extent: s.cloud_shadow_map_extent,
+            cloud_shadow_map_samples: s.cloud_shadow_map_samples,
+            cloud_shadow_map_strength: s.cloud_shadow_map_strength,
+            cloud_shadow_map_spatial_filter_iterations: s.cloud_shadow_map_spatial_filter_iterations,
         }
     }
 }
@@ -462,4 +541,67 @@ pub enum AtmosphereMode {
     /// Best for cinematic shots, planets seen from orbit, and scenes requiring
     /// accurate long-distance lighting.
     Raymarched = 1,
+}
+
+/// Component that adds a volumetric cloud layer to the atmosphere.
+/// Add this component to a camera with [`Atmosphere`] to enable clouds.
+#[derive(Clone, Component, Reflect, ShaderType)]
+#[reflect(Clone, Default)]
+pub struct CloudLayer {
+    /// Altitude at which the cloud layer starts (from planet center)
+    /// units: m
+    pub cloud_layer_start: f32,
+
+    /// Altitude at which the cloud layer ends (from planet center)
+    /// units: m
+    pub cloud_layer_end: f32,
+
+    /// Density multiplier for the clouds
+    pub cloud_density: f32,
+
+    /// Absorption coefficient for clouds
+    pub cloud_absorption: f32,
+
+    /// Scattering coefficient for clouds
+    pub cloud_scattering: f32,
+
+    /// Scale of the noise texture in world space
+    pub noise_scale: f32,
+
+    /// Offset for animating the noise texture
+    pub noise_offset: Vec3,
+
+    /// Scale of the detail noise in world space (smaller = higher frequency detail).
+    /// units: m
+    pub detail_noise_scale: f32,
+
+    /// Strength of the detail noise modulation in [0,1].
+    /// 0 = disabled, 1 = full modulation.
+    pub detail_strength: f32,
+}
+
+impl Default for CloudLayer {
+    fn default() -> Self {
+        Self {
+            cloud_layer_start: 6_362_000.0, // 1km above Earth's surface
+            cloud_layer_end: 6_363_000.0,   // 5km above Earth's surface
+            cloud_density: 1.0,
+            cloud_absorption: 0.00005, // Physically correct: ~0.00005 m^-1 per unit density
+            cloud_scattering: 0.0008, // Physically correct: ~0.0008 m^-1 per unit density
+            noise_scale: 64_000.0,
+            noise_offset: Vec3::ZERO,
+            detail_noise_scale: 16_000.0,
+            detail_strength: 1.0,
+        }
+    }
+}
+
+impl ExtractComponent for CloudLayer {
+    type QueryData = Read<CloudLayer>;
+    type QueryFilter = (With<Camera3d>, With<Atmosphere>);
+    type Out = CloudLayer;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
+    }
 }
