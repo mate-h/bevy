@@ -48,6 +48,19 @@ impl Atmosphere {
             medium,
         }
     }
+
+    /// An Mars-like atmosphere; use this with a [`ScatteringMedium::marslike`] handle.
+    pub fn marslike(medium: Handle<ScatteringMedium>) -> Self {
+        const MARS_BOTTOM_RADIUS: f32 = 3_389_500.0;
+        const MARS_TOP_RADIUS: f32 = 3_509_500.0;
+        const MARS_ALBEDO: Vec3 = Vec3::splat(0.1);
+        Self {
+            bottom_radius: MARS_BOTTOM_RADIUS,
+            top_radius: MARS_TOP_RADIUS,
+            ground_albedo: MARS_ALBEDO,
+            medium,
+        }
+    }
 }
 
 /// An asset that defines how a material scatters light.
@@ -175,6 +188,42 @@ impl ScatteringMedium {
             ],
         )
         .with_label("earthlike_atmosphere")
+    }
+
+    /// Returns a scattering medium representing a Martian atmosphere.
+    ///
+    /// - Rayleigh (carbon dioxide): 10.4 km scale height
+    /// - Mie (martian dust): 3.1 km scale height
+    pub fn marslike(falloff_resolution: u32, phase_resolution: u32) -> Self {
+        const MARS_ATMOSPHERE_HEIGHT: f32 = 120_000.0;
+        const RAYLEIGH_SCALE_HEIGHT: f32 = 10_430.0;
+        const MIE_SCALE_HEIGHT: f32 = 3_095.0;
+
+        Self::new(
+            falloff_resolution,
+            phase_resolution,
+            [
+                // Carbon dioxide
+                ScatteringTerm {
+                    absorption: Vec3::ZERO,
+                    scattering: Vec3::new(19.918e-6, 13.57e-6, 5.75e-6),
+                    falloff: Falloff::Exponential {
+                        scale: RAYLEIGH_SCALE_HEIGHT / MARS_ATMOSPHERE_HEIGHT,
+                    },
+                    phase: PhaseFunction::Rayleigh,
+                },
+                // Martian dust
+                ScatteringTerm {
+                    absorption: Vec3::splat(0.553_083_8e-6),
+                    scattering: Vec3::splat(53.617_71e-6),
+                    falloff: Falloff::Exponential {
+                        scale: MIE_SCALE_HEIGHT / MARS_ATMOSPHERE_HEIGHT,
+                    },
+                    phase: PhaseFunction::Mie { asymmetry: 0.85 },
+                },
+            ],
+        )
+        .with_label("marslike_atmosphere")
     }
 }
 
