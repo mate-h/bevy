@@ -49,7 +49,7 @@ impl Atmosphere {
         }
     }
 
-    /// An Mars-like atmosphere; use this with a [`ScatteringMedium::marslike`] handle.
+    /// A Mars-like atmosphere; use this with a [`ScatteringMedium::marslike`] handle.
     pub fn marslike(medium: Handle<ScatteringMedium>) -> Self {
         const MARS_BOTTOM_RADIUS: f32 = 3_389_500.0;
         const MARS_TOP_RADIUS: f32 = 3_509_500.0;
