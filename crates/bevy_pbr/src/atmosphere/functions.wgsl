@@ -330,8 +330,7 @@ fn ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
 
 /// Converts a direction in world space to atmosphere space
 fn direction_world_to_atmosphere(dir_ws: vec3<f32>) -> vec3<f32> {
-    let atmosphere_from_world = transpose(atmosphere_transforms.world_from_atmosphere);
-    let dir_as = atmosphere_from_world * vec4(dir_ws, 0.0);
+    let dir_as = atmosphere_transforms.atmosphere_from_world * vec4(dir_ws, 0.0);
     return dir_as.xyz;
 }
 

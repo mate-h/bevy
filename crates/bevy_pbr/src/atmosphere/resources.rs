@@ -510,6 +510,7 @@ impl AtmosphereTransforms {
 #[derive(ShaderType)]
 pub struct AtmosphereTransform {
     world_from_atmosphere: Mat4,
+    atmosphere_from_world: Mat4,
 }
 
 #[derive(Component)]
@@ -526,9 +527,14 @@ impl AtmosphereTransformsOffset {
 
 pub(super) fn prepare_atmosphere_transforms(
     views: Query<
-        (Entity, &ExtractedView, &ExtractedAtmosphere, &GpuAtmosphereSettings),
-        (With<ExtractedAtmosphere>, With<Camera3d>)>
-    ,
+        (
+            Entity,
+            &ExtractedView,
+            &ExtractedAtmosphere,
+            &GpuAtmosphereSettings,
+        ),
+        (With<ExtractedAtmosphere>, With<Camera3d>),
+    >,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut atmo_uniforms: ResMut<AtmosphereTransforms>,
@@ -551,9 +557,7 @@ pub(super) fn prepare_atmosphere_transforms(
         );
 
         // Local up for horizon-detail parameterization
-        let atmo_y = cam_pos
-            .try_normalize()
-            .unwrap_or(Vec3A::Y);
+        let atmo_y = cam_pos.try_normalize().unwrap_or(Vec3A::Y);
 
         // World-fixed azimuth keeps the terminator stable when tilting the camera
         let world_ref = Vec3A::NEG_Z;
@@ -561,16 +565,18 @@ pub(super) fn prepare_atmosphere_transforms(
         let atmo_z = ref_horizontal.normalize();
         let atmo_x = atmo_y.cross(atmo_z).normalize();
 
-        let world_from_atmosphere = Affine3A::from_cols(
+        let world_from_atmosphere = Mat4::from(Affine3A::from_cols(
             atmo_x,
             atmo_y,
             atmo_z,
             view.world_from_view.translation_vec3a(),
-        );
+        ));
+        let atmosphere_from_world = world_from_atmosphere.transpose();
 
         commands.entity(entity).insert(AtmosphereTransformsOffset {
             index: writer.write(&AtmosphereTransform {
-                world_from_atmosphere: Mat4::from(world_from_atmosphere),
+                world_from_atmosphere,
+                atmosphere_from_world,
             }),
         });
     }

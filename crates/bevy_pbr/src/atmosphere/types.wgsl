@@ -29,6 +29,7 @@ struct AtmosphereSettings {
 // world-fixed reference so the terminator stays stable when tilting the camera.
 struct AtmosphereTransforms {
     world_from_atmosphere: mat4x4<f32>,
+    atmosphere_from_world: mat4x4<f32>,
 }
 
 struct AtmosphereData {
