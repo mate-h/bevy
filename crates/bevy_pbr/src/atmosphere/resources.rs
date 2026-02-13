@@ -525,7 +525,10 @@ impl AtmosphereTransformsOffset {
 }
 
 pub(super) fn prepare_atmosphere_transforms(
-    views: Query<(Entity, &ExtractedView), (With<ExtractedAtmosphere>, With<Camera3d>)>,
+    views: Query<
+        (Entity, &ExtractedView, &ExtractedAtmosphere, &GpuAtmosphereSettings),
+        (With<ExtractedAtmosphere>, With<Camera3d>)>
+    ,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut atmo_uniforms: ResMut<AtmosphereTransforms>,
@@ -540,24 +543,34 @@ pub(super) fn prepare_atmosphere_transforms(
         return;
     };
 
-    for (entity, view) in &views {
-        let world_from_view = view.world_from_view.affine();
-        let camera_z = world_from_view.matrix3.z_axis;
-        let camera_y = world_from_view.matrix3.y_axis;
-        let atmo_z = camera_z
-            .with_y(0.0)
-            .try_normalize()
-            .unwrap_or_else(|| camera_y.with_y(0.0).normalize());
-        let atmo_y = Vec3A::Y;
-        let atmo_x = atmo_y.cross(atmo_z).normalize();
-        let world_from_atmosphere =
-            Affine3A::from_cols(atmo_x, atmo_y, atmo_z, world_from_view.translation);
+    for (entity, view, atmosphere, settings) in &views {
+        // Camera position in atmosphere space
+        let cam_pos = Vec3A::from(
+            view.world_from_view.translation() * settings.scene_units_to_m
+                + Vec3::new(0.0, atmosphere.bottom_radius, 0.0),
+        );
 
-        let world_from_atmosphere = Mat4::from(world_from_atmosphere);
+        // Local up for horizon-detail parameterization
+        let atmo_y = cam_pos
+            .try_normalize()
+            .unwrap_or(Vec3A::Y);
+
+        // World-fixed azimuth keeps the terminator stable when tilting the camera
+        let world_ref = Vec3A::NEG_Z;
+        let ref_horizontal = world_ref - atmo_y * atmo_y.dot(world_ref);
+        let atmo_z = ref_horizontal.normalize();
+        let atmo_x = atmo_y.cross(atmo_z).normalize();
+
+        let world_from_atmosphere = Affine3A::from_cols(
+            atmo_x,
+            atmo_y,
+            atmo_z,
+            view.world_from_view.translation_vec3a(),
+        );
 
         commands.entity(entity).insert(AtmosphereTransformsOffset {
             index: writer.write(&AtmosphereTransform {
-                world_from_atmosphere,
+                world_from_atmosphere: Mat4::from(world_from_atmosphere),
             }),
         });
     }
