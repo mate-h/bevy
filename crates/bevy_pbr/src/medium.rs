@@ -98,21 +98,34 @@ impl RenderAsset for GpuScatteringMedium {
             source_asset.falloff_resolution as usize * source_asset.phase_resolution as usize,
         );
 
+        // Nonlinear phase mapping to mitigate banding in low-resolution LUTs.
+        const PHASE_MAPPING_N: f32 = 0.5;
+        let inv_n = 1.0 / PHASE_MAPPING_N;
+        let uv_to_x = |uv: f32| -> f32 {
+            if uv < 0.5 {
+                (2.0 * uv).powf(inv_n) / 2.0
+            } else {
+                1.0 - (2.0 * (1.0 - uv)).powf(inv_n) / 2.0
+            }
+        };
+
         scattering.extend(
             (0..source_asset.falloff_resolution * source_asset.phase_resolution).map(|raw_i| {
                 let i = raw_i % source_asset.phase_resolution;
                 let j = raw_i / source_asset.phase_resolution;
                 let falloff = (i as f32 + 0.5) / source_asset.falloff_resolution as f32;
-                let phase = (j as f32 + 0.5) / source_asset.phase_resolution as f32;
-                let neg_l_dot_v = phase * 2.0 - 1.0;
+                let phase_uv = (j as f32 + 0.5) / source_asset.phase_resolution as f32;
+                let x = uv_to_x(phase_uv);
+                let neg_l_dot_v = 2.0 * x - 1.0;
 
                 source_asset
                     .terms
                     .iter()
-                    .map(|term| {
-                        term.scattering.extend(0.0)
-                            * term.falloff.sample(falloff)
-                            * term.phase.sample(neg_l_dot_v)
+                    .filter_map(|term| {
+                        let f = term.falloff.sample(falloff);
+                        term.phase
+                            .sample(neg_l_dot_v)
+                            .map(|phase_vec| (term.scattering * phase_vec * f).extend(0.0))
                     })
                     .sum::<Vec4>()
             }),

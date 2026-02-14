@@ -1,13 +1,21 @@
 //! Provides types to specify atmosphere lighting, scattering terms, etc.
 
 use alloc::{borrow::Cow, sync::Arc};
-use bevy_asset::{Asset, Handle};
+use bevy_asset::{Asset, AssetEvent, Handle};
 use bevy_camera::Hdr;
-use bevy_ecs::component::Component;
+use bevy_color::ColorToComponents;
+use bevy_ecs::{
+    component::Component,
+    message::MessageReader,
+    system::{Res, ResMut},
+};
+use bevy_image::Image;
+use bevy_math::curve::{FunctionCurve, Interval, SampleAutoCurve};
 use bevy_math::{ops, Curve, FloatPow, Vec3};
 use bevy_reflect::TypePath;
 use core::f32::{self, consts::PI};
 use smallvec::SmallVec;
+use wgpu_types::TextureFormat;
 
 /// Enables atmospheric scattering for an HDR camera.
 #[derive(Clone, Component)]
@@ -36,8 +44,8 @@ pub struct Atmosphere {
 }
 
 impl Atmosphere {
-    /// An atmosphere like that of earth; use this with a [`ScatteringMedium::earthlike`] handle.
-    pub fn earthlike(medium: Handle<ScatteringMedium>) -> Self {
+    /// An atmosphere like that of earth. Use this with a [`ScatteringMedium::earth`] handle.
+    pub fn earth(medium: Handle<ScatteringMedium>) -> Self {
         const EARTH_BOTTOM_RADIUS: f32 = 6_360_000.0;
         const EARTH_TOP_RADIUS: f32 = 6_460_000.0;
         const EARTH_ALBEDO: Vec3 = Vec3::splat(0.3);
@@ -49,8 +57,10 @@ impl Atmosphere {
         }
     }
 
-    /// A Mars-like atmosphere; use this with a [`ScatteringMedium::marslike`] handle.
-    pub fn marslike(medium: Handle<ScatteringMedium>) -> Self {
+    /// Mars-like atmosphere; use this with a [`ScatteringMedium::mars`] handle.
+    ///
+    /// Mean radius 3389.50 ± 0.2 km [Seidelmann et al. 2007, Table 4].
+    pub fn mars(medium: Handle<ScatteringMedium>) -> Self {
         const MARS_BOTTOM_RADIUS: f32 = 3_389_500.0;
         const MARS_TOP_RADIUS: f32 = 3_509_500.0;
         const MARS_ALBEDO: Vec3 = Vec3::splat(0.1);
@@ -111,7 +121,7 @@ pub struct ScatteringMedium {
 
 impl Default for ScatteringMedium {
     fn default() -> Self {
-        ScatteringMedium::earthlike(256, 256)
+        ScatteringMedium::earth(256, 256)
     }
 }
 
@@ -150,13 +160,13 @@ impl ScatteringMedium {
         self
     }
 
-    /// Returns a scattering medium representing an earthlike atmosphere.
+    /// Returns a scattering medium representing an earth atmosphere.
     ///
     /// Uses physically-based scale heights from Earth's atmosphere, assuming
     /// a 60 km atmosphere height:
     /// - Rayleigh (molecular) scattering: 8 km scale height
     /// - Mie (aerosol) scattering: 1.2 km scale height
-    pub fn earthlike(falloff_resolution: u32, phase_resolution: u32) -> Self {
+    pub fn earth(falloff_resolution: u32, phase_resolution: u32) -> Self {
         Self::new(
             falloff_resolution,
             phase_resolution,
@@ -187,43 +197,52 @@ impl ScatteringMedium {
                 },
             ],
         )
-        .with_label("earthlike_atmosphere")
+        .with_label("earth_atmosphere")
     }
 
-    /// Returns a scattering medium representing a Martian atmosphere.
+    /// Returns a scattering medium representing a Martian atmosphere [Schneegans et al. 2024].
     ///
-    /// - Rayleigh (carbon dioxide): 10.4 km scale height
-    /// - Mie (martian dust): 3.1 km scale height
-    pub fn marslike(falloff_resolution: u32, phase_resolution: u32) -> Self {
+    /// Constituents:
+    /// - Rayleigh: carbon dioxide
+    /// - Dust: wavelength-dependent Mie phase, double-exponential density
+    ///
+    /// Requires an Nx1 chromatic phase texture for the dust term.
+    ///
+    /// [Schneegans et al. 2024]: https://doi.org/10.1111/cgf.15010
+    pub fn mars(falloff_resolution: u32, phase_resolution: u32, dust_phase: Handle<Image>) -> Self {
         const MARS_ATMOSPHERE_HEIGHT: f32 = 120_000.0;
-        const RAYLEIGH_SCALE_HEIGHT: f32 = 10_430.0;
-        const MIE_SCALE_HEIGHT: f32 = 3_095.0;
+        const RAYLEIGH_SCALE_HEIGHT: f32 = 8_000.0;
+
+        // Dust density, from Fig. 8.
+        let dust_falloff = Falloff::from_curve(FunctionCurve::new(Interval::UNIT, |p| {
+            let h = (1.0 - p) * MARS_ATMOSPHERE_HEIGHT;
+            0.75 * ops::exp(1.0 - ops::exp(h / 4_000.0))
+                + 0.25 * ops::exp(1.0 - ops::exp(h / 20_000.0))
+        }));
 
         Self::new(
             falloff_resolution,
             phase_resolution,
             [
-                // Carbon dioxide
                 ScatteringTerm {
+                    // Table 1: Eq. 3 with delta=0.09, refractive index=1.00000337
                     absorption: Vec3::ZERO,
-                    scattering: Vec3::new(19.918e-6, 13.57e-6, 5.75e-6),
+                    scattering: Vec3::new(9.91e-8, 2.32e-7, 5.65e-7),
                     falloff: Falloff::Exponential {
                         scale: RAYLEIGH_SCALE_HEIGHT / MARS_ATMOSPHERE_HEIGHT,
                     },
                     phase: PhaseFunction::Rayleigh,
                 },
-                // Martian dust
                 ScatteringTerm {
-                    absorption: Vec3::splat(0.553_083_8e-6),
-                    scattering: Vec3::splat(53.617_71e-6),
-                    falloff: Falloff::Exponential {
-                        scale: MIE_SCALE_HEIGHT / MARS_ATMOSPHERE_HEIGHT,
-                    },
-                    phase: PhaseFunction::Mie { asymmetry: 0.85 },
+                    // Table 1: number density=5×10^9 m^-3, Mie Theory
+                    absorption: Vec3::new(1.26e-6, 5.25e-6, 9.33e-6), // beta_abs per channel
+                    scattering: Vec3::new(30.67e-6, 25.39e-6, 20.93e-6), // beta_sca per channel
+                    falloff: dust_falloff,
+                    phase: PhaseFunction::from_chromatic_texture(dust_phase),
                 },
             ],
         )
-        .with_label("marslike_atmosphere")
+        .with_label("mars_atmosphere")
     }
 }
 
@@ -423,6 +442,16 @@ pub enum PhaseFunction {
     /// domain: [-1, 1]
     /// range: [0, 1]
     Curve(Arc<dyn Curve<f32> + Send + Sync>),
+
+    /// A wavelength-dependent (chromatic) phase function returning a Vec3
+    /// (R, G, B) of phase values per channel. Used when the phase varies
+    /// with wavelength, e.g. Mie scattering on Mars dust.
+    ChromaticCurve(Arc<dyn Curve<Vec3> + Send + Sync>),
+
+    /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
+    /// Image must be Rgba32Float, column 0 = cos θ = -1, column N-1 = cos θ = 1.
+    /// Resolved to [`ChromaticCurve`] when the image loads.
+    ChromaticTexture(Handle<Image>),
 }
 
 impl PhaseFunction {
@@ -431,18 +460,38 @@ impl PhaseFunction {
         Self::Curve(Arc::new(curve))
     }
 
-    /// Samples the phase function at the given value in [-1, 1], output is in [0, 1].
-    pub fn sample(&self, neg_l_dot_v: f32) -> f32 {
+    /// A wavelength-dependent phase function from a curve that returns Vec3 (R,G,B).
+    pub fn from_chromatic_curve(curve: impl Curve<Vec3> + Send + Sync + 'static) -> Self {
+        Self::ChromaticCurve(Arc::new(curve))
+    }
+
+    /// A chromatic phase function from an N×1 texture. Resolved to a curve when loaded.
+    pub fn from_chromatic_texture(image: Handle<Image>) -> Self {
+        Self::ChromaticTexture(image)
+    }
+
+    /// Samples the phase function at the given value in [-1, 1].
+    ///
+    /// Returns `Some(Vec3)` with per-channel phase values (scalar phases use R=G=B).
+    /// Returns `None` when the phase is not yet available (e.g. [`ChromaticTexture`] before load).
+    pub fn sample(&self, neg_l_dot_v: f32) -> Option<Vec3> {
         const FRAC_4_PI: f32 = 0.25 / PI;
         const FRAC_3_16_PI: f32 = 0.1875 / PI;
         match self {
-            PhaseFunction::Isotropic => FRAC_4_PI,
-            PhaseFunction::Rayleigh => FRAC_3_16_PI * (1.0 + neg_l_dot_v * neg_l_dot_v),
+            PhaseFunction::Isotropic => Some(Vec3::splat(FRAC_4_PI)),
+            PhaseFunction::Rayleigh => Some(Vec3::splat(
+                FRAC_3_16_PI * (1.0 + neg_l_dot_v * neg_l_dot_v),
+            )),
             PhaseFunction::Mie { asymmetry } => {
                 let denom = 1.0 + asymmetry.squared() - 2.0 * asymmetry * neg_l_dot_v;
-                FRAC_4_PI * (1.0 - asymmetry.squared()) / (denom * denom.sqrt())
+                Some(FRAC_4_PI * (1.0 - asymmetry.squared()) / (denom * denom.sqrt()) * Vec3::ONE)
             }
-            PhaseFunction::Curve(curve) => curve.sample(neg_l_dot_v).unwrap_or(0.0),
+            PhaseFunction::Curve(curve) => curve
+                .sample(neg_l_dot_v)
+                .map(Vec3::splat)
+                .or(Some(Vec3::ZERO)),
+            PhaseFunction::ChromaticCurve(curve) => curve.sample(neg_l_dot_v).or(Some(Vec3::ZERO)),
+            PhaseFunction::ChromaticTexture(_) => None,
         }
     }
 }
@@ -450,5 +499,60 @@ impl PhaseFunction {
 impl Default for PhaseFunction {
     fn default() -> Self {
         Self::Mie { asymmetry: 0.8 }
+    }
+}
+
+/// Resolves [`PhaseFunction::ChromaticTexture`] to [`ChromaticCurve`] when the image loads.
+pub fn extract_chromatic_phase_textures(
+    mut reader: MessageReader<AssetEvent<Image>>,
+    images: Res<bevy_asset::Assets<Image>>,
+    mut scattering_media: ResMut<bevy_asset::Assets<ScatteringMedium>>,
+) {
+    for event in reader.read() {
+        let AssetEvent::LoadedWithDependencies { id } = event else {
+            continue;
+        };
+        let Some(image) = images.get(*id) else {
+            continue;
+        };
+        if image.texture_descriptor.format != TextureFormat::Rgba32Float {
+            continue;
+        }
+
+        let width = image.texture_descriptor.size.width;
+        if width == 0 {
+            continue;
+        }
+
+        let Some(samples): Option<Vec<Vec3>> = (0..width)
+            .map(|x| {
+                image
+                    .get_color_at_1d(x)
+                    .ok()
+                    .map(|c| c.to_linear().to_vec3())
+            })
+            .collect()
+        else {
+            continue;
+        };
+
+        let Ok(curve) = SampleAutoCurve::new(
+            Interval::new(-1.0, 1.0).expect("[-1, 1] valid for cos θ"),
+            samples,
+        ) else {
+            continue;
+        };
+
+        let new_phase = PhaseFunction::from_chromatic_curve(curve);
+
+        for (_id, medium) in scattering_media.iter_mut() {
+            for term in medium.terms.iter_mut() {
+                if let PhaseFunction::ChromaticTexture(handle) = &term.phase {
+                    if handle.id() == *id {
+                        term.phase = new_phase.clone();
+                    }
+                }
+            }
+        }
     }
 }

@@ -196,9 +196,17 @@ fn sample_density_lut(r: f32, component: f32) -> vec3<f32> {
 
 // samples from the atmosphere scattering LUT. `neg_LdotV` is the dot product
 // of the light direction and the incoming view vector.
+// Nonlinear phase mapping to mitigate banding in low-resolution LUTs.
+const PHASE_MAPPING_N: f32 = 0.5;
 fn sample_scattering_lut(r: f32, neg_LdotV: f32) -> vec3<f32> {
     let normalized_altitude = (r - atmosphere.bottom_radius) / (atmosphere.top_radius - atmosphere.bottom_radius);
-    let uv = vec2(1.0 - normalized_altitude, neg_LdotV * 0.5 + 0.5);
+    let x = neg_LdotV * 0.5 + 0.5;
+    let phase_uv = select(
+        1.0 - pow(2.0 * (1.0 - x), PHASE_MAPPING_N) * 0.5,
+        pow(2.0 * x, PHASE_MAPPING_N) * 0.5,
+        x < 0.5
+    );
+    let uv = vec2(1.0 - normalized_altitude, phase_uv);
     return textureSampleLevel(medium_scattering_lut, medium_sampler, uv, 0.0).xyz;
 }
 
