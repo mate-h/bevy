@@ -6,7 +6,7 @@ use bevy_ecs::{
     resource::Resource,
     system::{Commands, Res, SystemParamItem},
 };
-use bevy_math::Vec4;
+use bevy_math::{ops, Vec4};
 use bevy_render::{
     render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin},
     render_resource::{
@@ -103,9 +103,9 @@ impl RenderAsset for GpuScatteringMedium {
         let inv_n = 1.0 / PHASE_MAPPING_N;
         let uv_to_x = |uv: f32| -> f32 {
             if uv < 0.5 {
-                (2.0 * uv).powf(inv_n) / 2.0
+                ops::powf(2.0 * uv, inv_n) / 2.0
             } else {
-                1.0 - (2.0 * (1.0 - uv)).powf(inv_n) / 2.0
+                1.0 - ops::powf(2.0 * (1.0 - uv), inv_n) / 2.0
             }
         };
 

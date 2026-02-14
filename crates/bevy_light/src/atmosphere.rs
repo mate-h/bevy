@@ -450,7 +450,7 @@ pub enum PhaseFunction {
 
     /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
     /// Image must be `Rgba32Float`, column 0 = cos θ = -1, column N-1 = cos θ = 1.
-    /// Resolved to [`ChromaticCurve`] when the image loads.
+    /// Resolved to [`PhaseFunction::ChromaticCurve`] when the image loads.
     ChromaticTexture(Handle<Image>),
 }
 
@@ -473,7 +473,7 @@ impl PhaseFunction {
     /// Samples the phase function at the given value in [-1, 1].
     ///
     /// Returns `Some(Vec3)` with per-channel phase values (scalar phases use R=G=B).
-    /// Returns `None` when the phase is not yet available (e.g. [`ChromaticTexture`] before load).
+    /// Returns `None` when the phase is not yet available (e.g. [`PhaseFunction::ChromaticTexture`] before load).
     pub fn sample(&self, neg_l_dot_v: f32) -> Option<Vec3> {
         const FRAC_4_PI: f32 = 0.25 / PI;
         const FRAC_3_16_PI: f32 = 0.1875 / PI;
@@ -502,7 +502,7 @@ impl Default for PhaseFunction {
     }
 }
 
-/// Resolves [`PhaseFunction::ChromaticTexture`] to [`ChromaticCurve`] when the image loads.
+/// Resolves [`PhaseFunction::ChromaticTexture`] to [`PhaseFunction::ChromaticCurve`] when the image loads.
 pub fn extract_chromatic_phase_textures(
     mut reader: MessageReader<AssetEvent<Image>>,
     images: Res<bevy_asset::Assets<Image>>,
