@@ -449,7 +449,7 @@ pub enum PhaseFunction {
     ChromaticCurve(Arc<dyn Curve<Vec3> + Send + Sync>),
 
     /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
-    /// Image must be Rgba32Float, column 0 = cos θ = -1, column N-1 = cos θ = 1.
+    /// Image must be `Rgba32Float`, column 0 = cos θ = -1, column N-1 = cos θ = 1.
     /// Resolved to [`ChromaticCurve`] when the image loads.
     ChromaticTexture(Handle<Image>),
 }
@@ -547,10 +547,10 @@ pub fn extract_chromatic_phase_textures(
 
         for (_id, medium) in scattering_media.iter_mut() {
             for term in medium.terms.iter_mut() {
-                if let PhaseFunction::ChromaticTexture(handle) = &term.phase {
-                    if handle.id() == *id {
-                        term.phase = new_phase.clone();
-                    }
+                if let PhaseFunction::ChromaticTexture(handle) = &term.phase
+                    && handle.id() == *id
+                {
+                    term.phase = new_phase.clone();
                 }
             }
         }
