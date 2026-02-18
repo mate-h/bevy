@@ -457,7 +457,7 @@ pub enum PhaseFunction {
     /// Resolved to [`PhaseFunction::ChromaticCurve`] when the image loads.
     ///
     /// To generate your own, compute the phase function using Mie theory (for example,
-    /// using the `miepython` package) and write it as a 32-bit float texture (OpenEXR or KTX2).
+    /// using the `miepython` package) and write it as a 32-bit float texture (`OpenEXR` or `KTX2`).
     ChromaticTexture(Handle<Image>),
 }
 
