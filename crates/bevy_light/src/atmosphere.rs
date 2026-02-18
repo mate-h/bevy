@@ -60,6 +60,8 @@ impl Atmosphere {
     /// Mars-like atmosphere; use this with a [`ScatteringMedium::mars`] handle.
     ///
     /// Mean radius 3389.50 ± 0.2 km [Seidelmann et al. 2007, Table 4].
+    ///
+    /// [Seidelmann et al. 2007, Table 4]: https://doi.org/10.1007/s10569-007-9072-y
     pub fn mars(medium: Handle<ScatteringMedium>) -> Self {
         const MARS_BOTTOM_RADIUS: f32 = 3_389_500.0;
         const MARS_TOP_RADIUS: f32 = 3_509_500.0;
