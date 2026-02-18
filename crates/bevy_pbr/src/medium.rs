@@ -1,3 +1,4 @@
+use bevy_color::ColorToComponents;
 use bevy_light::atmosphere::{ScatteringMedium, ScatteringTerm};
 
 use bevy_app::{App, Plugin};
@@ -125,7 +126,7 @@ impl RenderAsset for GpuScatteringMedium {
                         let f = term.falloff.sample(falloff);
                         term.phase
                             .sample(neg_l_dot_v)
-                            .map(|phase_vec| (term.scattering * phase_vec * f).extend(0.0))
+                            .map(|phase| (term.scattering * phase.to_vec3() * f).extend(0.0))
                     })
                     .sum::<Vec4>()
             }),

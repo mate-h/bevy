@@ -3,7 +3,7 @@
 use alloc::{borrow::Cow, sync::Arc};
 use bevy_asset::{Asset, AssetEvent, Handle};
 use bevy_camera::Hdr;
-use bevy_color::ColorToComponents;
+use bevy_color::{ColorToComponents, Gray, LinearRgba};
 use bevy_ecs::{
     component::Component,
     message::MessageReader,
@@ -445,10 +445,10 @@ pub enum PhaseFunction {
     /// range: [0, 1]
     Curve(Arc<dyn Curve<f32> + Send + Sync>),
 
-    /// A wavelength-dependent (chromatic) phase function returning a Vec3
-    /// (R, G, B) of phase values per channel. Used when the phase varies
-    /// with wavelength, for instance Mie scattering on Martian dust.
-    ChromaticCurve(Arc<dyn Curve<Vec3> + Send + Sync>),
+    /// A wavelength-dependent (chromatic) phase function returning linear RGB
+    /// phase values per channel. Used when the phase varies with wavelength,
+    /// for instance Mie scattering on Martian dust.
+    ChromaticCurve(Arc<dyn Curve<LinearRgba> + Send + Sync>),
 
     /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
     ///
@@ -467,8 +467,8 @@ impl PhaseFunction {
         Self::Curve(Arc::new(curve))
     }
 
-    /// A wavelength-dependent phase function from a curve that returns Vec3 (R,G,B).
-    pub fn from_chromatic_curve(curve: impl Curve<Vec3> + Send + Sync + 'static) -> Self {
+    /// A wavelength-dependent phase function from a curve that returns linear RGBA.
+    pub fn from_chromatic_curve(curve: impl Curve<LinearRgba> + Send + Sync + 'static) -> Self {
         Self::ChromaticCurve(Arc::new(curve))
     }
 
@@ -479,25 +479,29 @@ impl PhaseFunction {
 
     /// Samples the phase function at the given value in [-1, 1].
     ///
-    /// Returns `Some(Vec3)` with per-channel phase values (scalar phases use R=G=B).
+    /// Returns `Some(LinearRgba)` with per-channel phase values (scalar phases use R=G=B).
     /// Returns `None` when the phase is not yet available (e.g. [`PhaseFunction::ChromaticTexture`] before load).
-    pub fn sample(&self, neg_l_dot_v: f32) -> Option<Vec3> {
+    pub fn sample(&self, neg_l_dot_v: f32) -> Option<LinearRgba> {
         const FRAC_4_PI: f32 = 0.25 / PI;
         const FRAC_3_16_PI: f32 = 0.1875 / PI;
         match self {
-            PhaseFunction::Isotropic => Some(Vec3::splat(FRAC_4_PI)),
-            PhaseFunction::Rayleigh => Some(Vec3::splat(
+            PhaseFunction::Isotropic => Some(LinearRgba::gray(FRAC_4_PI)),
+            PhaseFunction::Rayleigh => Some(LinearRgba::gray(
                 FRAC_3_16_PI * (1.0 + neg_l_dot_v * neg_l_dot_v),
             )),
             PhaseFunction::Mie { asymmetry } => {
                 let denom = 1.0 + asymmetry.squared() - 2.0 * asymmetry * neg_l_dot_v;
-                Some(FRAC_4_PI * (1.0 - asymmetry.squared()) / (denom * denom.sqrt()) * Vec3::ONE)
+                Some(LinearRgba::from_vec3(Vec3::splat(
+                    FRAC_4_PI * (1.0 - asymmetry.squared()) / (denom * denom.sqrt()),
+                )))
             }
             PhaseFunction::Curve(curve) => curve
                 .sample(neg_l_dot_v)
-                .map(Vec3::splat)
-                .or(Some(Vec3::ZERO)),
-            PhaseFunction::ChromaticCurve(curve) => curve.sample(neg_l_dot_v).or(Some(Vec3::ZERO)),
+                .map(LinearRgba::gray)
+                .or(Some(LinearRgba::gray(0.0))),
+            PhaseFunction::ChromaticCurve(curve) => {
+                curve.sample(neg_l_dot_v).or(Some(LinearRgba::gray(0.0)))
+            }
             PhaseFunction::ChromaticTexture(_) => None,
         }
     }
@@ -531,13 +535,8 @@ pub fn extract_chromatic_phase_textures(
             continue;
         }
 
-        let Some(samples): Option<Vec<Vec3>> = (0..width)
-            .map(|x| {
-                image
-                    .get_color_at_1d(x)
-                    .ok()
-                    .map(|c| c.to_linear().to_vec3())
-            })
+        let Some(samples): Option<Vec<LinearRgba>> = (0..width)
+            .map(|x| image.get_color_at_1d(x).ok().map(|c| c.to_linear()))
             .collect()
         else {
             continue;
