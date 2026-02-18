@@ -57,7 +57,7 @@ impl Atmosphere {
         }
     }
 
-    /// Mars-like atmosphere; use this with a [`ScatteringMedium::mars`] handle.
+    /// Martian atmosphere; use this with a [`ScatteringMedium::mars`] handle.
     ///
     /// Mean radius 3389.50 ± 0.2 km [Seidelmann et al. 2007, Table 4].
     ///
@@ -447,12 +447,17 @@ pub enum PhaseFunction {
 
     /// A wavelength-dependent (chromatic) phase function returning a Vec3
     /// (R, G, B) of phase values per channel. Used when the phase varies
-    /// with wavelength, e.g. Mie scattering on Mars dust.
+    /// with wavelength, for instance Mie scattering on Martian dust.
     ChromaticCurve(Arc<dyn Curve<Vec3> + Send + Sync>),
 
     /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
-    /// Image must be `Rgba32Float`, column 0 = cos θ = -1, column N-1 = cos θ = 1.
+    ///
+    /// Use `Rgba32Float` format. Columns map linearly to cos θ: the first column is
+    /// back-scattering (θ = 180°) and the last is forward-scattering (θ = 0°).
     /// Resolved to [`PhaseFunction::ChromaticCurve`] when the image loads.
+    ///
+    /// To generate your own, compute the phase function using Mie theory (for example,
+    /// using the `miepython` package) and write it as a 32-bit float texture (OpenEXR or KTX2).
     ChromaticTexture(Handle<Image>),
 }
 
