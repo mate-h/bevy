@@ -1,6 +1,5 @@
 use crate::{primitives::Frustum, Camera, CameraProjection, OrthographicProjection, Projection};
 use bevy_ecs::prelude::*;
-use bevy_log::warn;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect, ReflectDeserialize, ReflectSerialize};
 use bevy_transform::prelude::{GlobalTransform, Transform};
 use serde::{Deserialize, Serialize};
