@@ -291,7 +291,7 @@ pub struct ExtractedView {
     // stability matters and there is a more direct way to derive the view-projection matrix.
     pub clip_from_world: Option<Mat4>,
     pub hdr: bool,
-    /// When [`CompositingSpace::Srgb`], the main texture uses linear storage (Rgba8Unorm)
+    /// When [`CompositingSpace::Srgb`], the main texture uses linear storage (`Rgba8Unorm`)
     /// and shaders output sRGB-encoded values for gamma-encoded blending.
     pub compositing_space: Option<CompositingSpace>,
     // uvec4(origin.x, origin.y, width, height)
@@ -1179,7 +1179,7 @@ pub fn prepare_view_targets(
                 a.clone(),
                 sampled.clone(),
                 None,
-                converted_clear_color.clone(),
+                converted_clear_color,
             ),
             b: ColorAttachment::new(b.clone(), sampled.clone(), None, converted_clear_color),
             main_texture: main_texture.clone(),
