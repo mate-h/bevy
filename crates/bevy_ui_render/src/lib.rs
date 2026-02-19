@@ -744,6 +744,7 @@ pub fn extract_ui_camera_view(
                         ),
                         clip_from_world: None,
                         hdr,
+                        compositing_space: None,
                         viewport: UVec4::from((
                             physical_viewport_rect.min,
                             physical_viewport_rect.size(),

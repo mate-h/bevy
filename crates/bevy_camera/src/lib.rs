@@ -6,20 +6,25 @@ pub mod primitives;
 mod projection;
 pub mod visibility;
 
-use bevy_ecs::schedule::SystemSet;
+use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 pub use camera::*;
 pub use clear_color::*;
 pub use components::*;
 pub use projection::*;
 
-use bevy_app::{App, Plugin};
+use bevy_app::{App, Plugin, PostUpdate};
 
 #[derive(Default)]
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ClearColor>().add_plugins((
+        app.add_systems(
+            PostUpdate,
+            validate_compositing_space_requires_hdr.in_set(CameraUpdateSystems),
+        )
+        .init_resource::<ClearColor>()
+        .add_plugins((
             CameraProjectionPlugin,
             visibility::VisibilityPlugin,
             visibility::VisibilityRangePlugin,
@@ -34,7 +39,7 @@ pub mod prelude {
     #[doc(hidden)]
     pub use crate::{
         visibility::{InheritedVisibility, ViewVisibility, Visibility},
-        Camera, Camera2d, Camera3d, ClearColor, ClearColorConfig, MsaaWriteback,
+        Camera, Camera2d, Camera3d, ClearColor, ClearColorConfig, CompositingSpace, MsaaWriteback,
         OrthographicProjection, PerspectiveProjection, Projection,
     };
 }

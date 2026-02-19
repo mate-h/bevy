@@ -1,5 +1,6 @@
 use crate::{primitives::Frustum, Camera, CameraProjection, OrthographicProjection, Projection};
 use bevy_ecs::prelude::*;
+use bevy_log::warn;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect, ReflectDeserialize, ReflectSerialize};
 use bevy_transform::prelude::{GlobalTransform, Transform};
 use serde::{Deserialize, Serialize};
@@ -87,3 +88,47 @@ impl From<Camera3dDepthLoadOp> for LoadOp<f32> {
 #[derive(Component, Default, Copy, Clone, Reflect, PartialEq, Eq, Hash, Debug)]
 #[reflect(Component, Default, PartialEq, Hash, Debug)]
 pub struct Hdr;
+
+/// Controls the color space used for alpha compositing during rendering.
+///
+/// Alpha blending mixes colors from overlapping semi-transparent surfaces. The result
+/// depends on whether blending happens in linear light space or sRGB (gamma-encoded) space.
+///
+/// - **Linear**: Physically correct. Matches tools like ColorAide with `--space srgb-linear`.
+///   Requires [`Hdr`] on the camera; a validation warning is emitted if missing.
+/// - **Srgb**: Matches many image editors (e.g. Photoshop) that blend in gamma-encoded space.
+///   Uses the default sRGB render target.
+/// - **Oklab**: Perceptually uniform compositing. Often produces smoother gradients than
+///   sRGB or linear. Requires [`Hdr`] on the camera; a validation warning is emitted if missing.
+#[derive(Component, Copy, Clone, Reflect, PartialEq, Eq, Hash, Debug, Default)]
+#[reflect(Component, PartialEq, Hash, Debug, Default)]
+pub enum CompositingSpace {
+    /// sRGB compositing. Matches many image editors.
+    /// Uses the default sRGB render target; blending behavior may vary by GPU/driver.
+    #[default]
+    Srgb,
+    /// Linear light compositing. Physically correct.
+    /// Requires [`Hdr`] to be present on the camera.
+    Linear,
+    /// Oklab compositing. Perceptually uniform; often produces smoother gradients.
+    /// Requires [`Hdr`] to be present on the camera.
+    Oklab,
+}
+
+/// Validates that cameras using [`CompositingSpace::Linear`] or [`CompositingSpace::Oklab`]
+/// have the [`Hdr`] component. Emits a warning if not.
+pub fn validate_compositing_space_requires_hdr(
+    query: Query<(Entity, &CompositingSpace), Without<Hdr>>,
+) {
+    for (entity, compositing_space) in &query {
+        if matches!(
+            compositing_space,
+            CompositingSpace::Linear | CompositingSpace::Oklab
+        ) {
+            warn!(
+                "Camera entity {entity:?} uses CompositingSpace::Linear or CompositingSpace::Oklab \
+                but is missing the Hdr component. Add Hdr to the camera for correct rendering."
+            );
+        }
+    }
+}
