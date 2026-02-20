@@ -106,6 +106,7 @@ This is the complete `bevy` cargo feature list, without "profiles" or "collectio
 |bevy_window|Windowing layer|
 |bevy_winit|winit window and input backend|
 |bluenoise_texture|Include spatio-temporal blue noise KTX2 file used by generated environment maps, Solari and atmosphere|
+|brdf_lut|Use preintegrated BRDF LUT for specular IBL|
 |bmp|BMP image format support|
 |compressed_image_saver|Enables compressed KTX2 UASTC texture output on the asset processor|
 |critical-section|`critical-section` provides the building blocks for synchronization primitives on all platforms, including `no_std`.|

@@ -47,7 +47,7 @@ use crate::{
     },
     prepass,
     resources::{AtmosphereBuffer, AtmosphereData, AtmosphereSampler, AtmosphereTextures},
-    Bluenoise, EnvironmentMapUniformBuffer, ExtractedAtmosphere, FogMeta,
+    Bluenoise, BrdfLut, EnvironmentMapUniformBuffer, ExtractedAtmosphere, FogMeta,
     GlobalClusterableObjectMeta, GpuClusteredLights, GpuFog, GpuLights, LightMeta,
     LightProbesBuffer, LightProbesUniform, MeshPipeline, MeshPipelineKey, RenderViewLightProbes,
     ScreenSpaceAmbientOcclusionResources, ScreenSpaceReflectionsBuffer,
@@ -88,6 +88,7 @@ bitflags::bitflags! {
         const OIT_ENABLED                 = 1 << 5;
         const ATMOSPHERE                  = 1 << 6;
         const STBN                        = 1 << 7;
+        const BRDF_LUT                    = 1 << 8;
     }
 }
 
@@ -100,7 +101,7 @@ impl MeshPipelineViewLayoutKey {
         use MeshPipelineViewLayoutKey as Key;
 
         format!(
-            "mesh_view_layout{}{}{}{}{}{}{}{}",
+            "mesh_view_layout{}{}{}{}{}{}{}{}{}",
             if self.contains(Key::MULTISAMPLED) {
                 "_multisampled"
             } else {
@@ -141,6 +142,11 @@ impl MeshPipelineViewLayoutKey {
             } else {
                 Default::default()
             },
+            if self.contains(Key::BRDF_LUT) {
+                "_brdf_lut"
+            } else {
+                Default::default()
+            },
         )
     }
 }
@@ -173,6 +179,9 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
 
         if cfg!(feature = "bluenoise_texture") {
             result |= MeshPipelineViewLayoutKey::STBN;
+        }
+        if cfg!(feature = "brdf_lut") {
+            result |= MeshPipelineViewLayoutKey::BRDF_LUT;
         }
 
         result
@@ -439,6 +448,17 @@ pub fn layout_entries(
         ),));
     }
 
+    // BRDF LUT
+    if layout_key.contains(MeshPipelineViewLayoutKey::BRDF_LUT) {
+        entries = entries.extend_with_indices((
+            (
+                36,
+                texture_2d(TextureSampleType::Float { filterable: true }),
+            ),
+            (37, sampler(SamplerBindingType::Filtering)),
+        ));
+    }
+
     let mut binding_array_entries = DynamicBindGroupLayoutEntries::new(ShaderStages::FRAGMENT);
     binding_array_entries = binding_array_entries.extend_with_indices((
         (0, environment_map_entries[0]),
@@ -636,12 +656,13 @@ pub fn prepare_mesh_view_bind_groups(
         Res<ContactShadowsBuffer>,
     ),
     oit_buffers: Res<OitBuffers>,
-    (decals_buffer, render_decals, atmosphere_buffer, atmosphere_sampler, blue_noise): (
+    (decals_buffer, render_decals, atmosphere_buffer, atmosphere_sampler, blue_noise, brdf_lut): (
         Res<DecalsBuffer>,
         Res<RenderClusteredDecals>,
         Option<Res<AtmosphereBuffer>>,
         Option<Res<AtmosphereSampler>>,
         Res<Bluenoise>,
+        Option<Res<BrdfLut>>,
     ),
 ) {
     if let (
@@ -704,6 +725,9 @@ pub fn prepare_mesh_view_bind_groups(
             }
             if cfg!(feature = "bluenoise_texture") {
                 layout_key |= MeshPipelineViewLayoutKey::STBN;
+            }
+            if brdf_lut.is_some() {
+                layout_key |= MeshPipelineViewLayoutKey::BRDF_LUT;
             }
 
             let layout = mesh_pipeline.get_view_layout(layout_key);
@@ -811,6 +835,18 @@ pub fn prepare_mesh_view_bind_groups(
                     .expect("STBN texture is added unconditionally with at least a placeholder")
                     .texture_view;
                 entries = entries.extend_with_indices(((35, stbn_view),));
+            }
+
+            if layout_key.contains(MeshPipelineViewLayoutKey::BRDF_LUT)
+                && let Some(brdf_lut) = brdf_lut.as_ref()
+            {
+                let brdf_lut_image = images.get(&brdf_lut.texture).expect(
+                    "BRDF LUT texture should be loaded when brdf_lut feature is enabled",
+                );
+                entries = entries.extend_with_indices((
+                    (36, &brdf_lut_image.texture_view),
+                    (37, &brdf_lut_image.sampler),
+                ));
             }
 
             let mut entries_binding_array = DynamicBindGroupEntries::new();

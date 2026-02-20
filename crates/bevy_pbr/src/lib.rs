@@ -101,7 +101,7 @@ use bevy_asset::{AssetApp, AssetPath, Assets, Handle, RenderAssetUsages};
 use bevy_core_pipeline::mip_generation::experimental::depth::early_downsample_depth;
 use bevy_core_pipeline::schedule::{Core3d, Core3dSystems};
 use bevy_ecs::prelude::*;
-#[cfg(feature = "bluenoise_texture")]
+#[cfg(any(feature = "bluenoise_texture", feature = "brdf_lut"))]
 use bevy_image::{CompressedImageFormats, ImageType};
 use bevy_image::{Image, ImageSampler};
 use bevy_material::AlphaMode;
@@ -159,6 +159,13 @@ impl Default for PbrPlugin {
 #[derive(Resource)]
 pub struct Bluenoise {
     /// Texture handle for spatio-temporal blue noise
+    pub texture: Handle<Image>,
+}
+
+/// A resource that stores the preintegrated BRDF LUT (scale/bias) texture for specular IBL.
+#[derive(Resource)]
+pub struct BrdfLut {
+    /// Texture handle for the BRDF LUT (RG, roughness x NdotV)
     pub texture: Handle<Image>,
 }
 
@@ -271,6 +278,32 @@ impl Plugin for PbrPlugin {
                 render_app
                     .world_mut()
                     .insert_resource(Bluenoise { texture: handle });
+            }
+        }
+
+        #[cfg(feature = "brdf_lut")]
+        {
+            let has_brdf_lut = app
+                .get_sub_app(RenderApp)
+                .is_some_and(|render_app| render_app.world().is_resource_added::<BrdfLut>());
+
+            if !has_brdf_lut {
+                let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+                let image = Image::from_buffer(
+                    include_bytes!("../../../assets/brdf_lut.ktx2"),
+                    ImageType::Extension("ktx2"),
+                    CompressedImageFormats::NONE,
+                    false,
+                    ImageSampler::Default,
+                    RenderAssetUsages::RENDER_WORLD,
+                )
+                .expect("Failed to decode embedded BRDF LUT texture");
+                let handle = images.add(image);
+                if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+                    render_app
+                        .world_mut()
+                        .insert_resource(BrdfLut { texture: handle });
+                }
             }
         }
 

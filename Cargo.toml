@@ -575,6 +575,9 @@ smaa_luts = ["bevy_internal/smaa_luts"]
 # Include spatio-temporal blue noise KTX2 file used by generated environment maps, Solari and atmosphere
 bluenoise_texture = ["bevy_internal/bluenoise_texture"]
 
+# Use preintegrated BRDF LUT for more accurate specular IBL (avoids fireflies at grazing angles)
+brdf_lut = ["bevy_internal/brdf_lut"]
+
 # NVIDIA Deep Learning Super Sampling
 dlss = ["bevy_internal/dlss"]
 

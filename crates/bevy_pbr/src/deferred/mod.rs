@@ -327,6 +327,9 @@ impl SpecializedRenderPipeline for DeferredLightingLayout {
             shader_defs.push("MULTIPLE_LIGHT_PROBES_IN_ARRAY".into());
             shader_defs.push("MULTIPLE_LIGHTMAPS_IN_ARRAY".into());
         }
+        if cfg!(feature = "brdf_lut") {
+            shader_defs.push("BRDF_LUT".into());
+        }
 
         #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
         shader_defs.push("SIXTEEN_BYTE_ALIGNMENT".into());

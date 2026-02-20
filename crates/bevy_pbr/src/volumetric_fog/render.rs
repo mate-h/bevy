@@ -540,6 +540,12 @@ impl SpecializedRenderPipeline for VolumetricFogPipeline {
         {
             shader_defs.push("DENSITY_TEXTURE".into());
         }
+        if key
+            .mesh_pipeline_view_key
+            .contains(MeshPipelineViewLayoutKey::BRDF_LUT)
+        {
+            shader_defs.push("BRDF_LUT".into());
+        }
 
         let layout = self
             .mesh_view_layouts
@@ -648,6 +654,9 @@ pub fn prepare_volumetric_fog_pipelines(
         mesh_pipeline_view_key.set(MeshPipelineViewLayoutKey::ATMOSPHERE, atmosphere);
         if cfg!(feature = "bluenoise_texture") {
             mesh_pipeline_view_key |= MeshPipelineViewLayoutKey::STBN;
+        }
+        if cfg!(feature = "brdf_lut") {
+            mesh_pipeline_view_key |= MeshPipelineViewLayoutKey::BRDF_LUT;
         }
 
         let mut textureless_flags = VolumetricFogPipelineKeyFlags::empty();

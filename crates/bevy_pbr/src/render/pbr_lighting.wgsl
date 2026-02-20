@@ -517,15 +517,23 @@ fn Fd_Burley(
     return lightScatter * viewScatter * (1.0 / PI);
 }
 
-// Scale/bias approximation
+// Scale/bias for split-sum IBL. When BRDF_LUT is defined, sample from the
+// preintegrated LUT (more accurate, avoids fireflies at grazing angles).
+// Otherwise use the polynomial approximation from:
 // https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile
-// TODO: Use a LUT (more accurate)
 fn F_AB(perceptual_roughness: f32, NdotV: f32) -> vec2<f32> {
+#ifdef BRDF_LUT
+    let uv = vec2<f32>(perceptual_roughness, NdotV);
+    let lut_val = textureSample(view_bindings::brdf_lut_texture, view_bindings::brdf_lut_sampler, uv);
+    return vec2<f32>(lut_val.r, lut_val.g);
+#else
     let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
     let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
     let r = perceptual_roughness * c0 + c1;
     let a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
     return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    // return vec2<f32>(-1, -1);
+#endif
 }
 
 fn EnvBRDFApprox(F0: vec3<f32>, F_ab: vec2<f32>) -> vec3<f32> {

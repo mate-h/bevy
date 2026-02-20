@@ -466,6 +466,9 @@ pub fn prepare_ssr_pipelines(
         if cfg!(feature = "bluenoise_texture") {
             mesh_pipeline_view_key |= MeshPipelineViewLayoutKey::STBN;
         }
+        if cfg!(feature = "brdf_lut") {
+            mesh_pipeline_view_key |= MeshPipelineViewLayoutKey::BRDF_LUT;
+        }
 
         // Build the pipeline.
         let pipeline_id = pipelines.specialize(
@@ -566,6 +569,9 @@ impl SpecializedRenderPipeline for ScreenSpaceReflectionsPipeline {
 
         if cfg!(feature = "bluenoise_texture") {
             shader_defs.push("BLUE_NOISE_TEXTURE".into());
+        }
+        if cfg!(feature = "brdf_lut") {
+            shader_defs.push("BRDF_LUT".into());
         }
 
         #[cfg(not(target_arch = "wasm32"))]
