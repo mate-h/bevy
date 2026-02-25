@@ -18,8 +18,8 @@ use bevy::{
         FogVolume, VolumetricFog, VolumetricLight,
     },
     pbr::{
-        AtmosphereMode, AtmosphereSettings, DefaultOpaqueRendererMethod, ExtendedMaterial,
-        MaterialExtension, ScreenSpaceReflections,
+        AtmosphereMode, AtmosphereSettings, CloudLayer, DefaultOpaqueRendererMethod,
+        ExtendedMaterial, MaterialExtension, ScreenSpaceReflections,
     },
     post_process::bloom::Bloom,
     prelude::*,
@@ -56,6 +56,8 @@ fn print_controls() {
     println!("Atmosphere Example Controls:");
     println!("    1          - Switch to lookup texture rendering method");
     println!("    2          - Switch to raymarched rendering method");
+    println!("    C          - Toggle cloud layer");
+    println!("    Left/Right - Decrease/Increase cloud density");
     println!("    Enter      - Pause/Resume sun motion");
     println!("    Up/Down    - Increase/Decrease exposure");
 }
@@ -63,6 +65,9 @@ fn print_controls() {
 fn atmosphere_controls(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut atmosphere_settings: Query<&mut AtmosphereSettings>,
+    mut cloud_layers: Query<&mut CloudLayer>,
+    mut commands: Commands,
+    cameras: Query<Entity, With<Camera3d>>,
     mut game_state: ResMut<GameState>,
     mut camera_exposure: Query<&mut Exposure, With<Camera3d>>,
     time: Res<Time>,
@@ -81,6 +86,38 @@ fn atmosphere_controls(
         }
     }
 
+    if keyboard_input.just_pressed(KeyCode::KeyC) {
+        if cloud_layers.iter().count() > 0 {
+            // Remove cloud layer
+            for entity in &cameras {
+                commands.entity(entity).remove::<CloudLayer>();
+            }
+            println!("Cloud layer disabled");
+        } else {
+            // Add cloud layer
+            for entity in &cameras {
+                commands.entity(entity).insert(CloudLayer::default());
+            }
+            println!("Cloud layer enabled");
+        }
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowLeft) {
+        for mut cloud_layer in &mut cloud_layers {
+            cloud_layer.cloud_density =
+                (cloud_layer.cloud_density - time.delta_secs() * 0.5).max(0.0);
+            println!("Cloud density: {:.2}", cloud_layer.cloud_density);
+        }
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowRight) {
+        for mut cloud_layer in &mut cloud_layers {
+            cloud_layer.cloud_density =
+                (cloud_layer.cloud_density + time.delta_secs() * 0.5).min(2.0);
+            println!("Cloud density: {:.2}", cloud_layer.cloud_density);
+        }
+    }
+
     if keyboard_input.just_pressed(KeyCode::Enter) {
         game_state.paused = !game_state.paused;
     }
@@ -96,6 +133,11 @@ fn atmosphere_controls(
             exposure.ev100 += time.delta_secs() * 2.0;
         }
     }
+
+    // Animate clouds by updating noise offset
+    for mut cloud_layer in &mut cloud_layers {
+        cloud_layer.noise_offset.x += time.delta_secs() * 100.0;
+    }
 }
 
 fn setup_camera_fog(
@@ -108,7 +150,32 @@ fn setup_camera_fog(
         // Earthlike atmosphere
         Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
         // Can be adjusted to change the scene scale and rendering quality
-        AtmosphereSettings::default(),
+        AtmosphereSettings {
+            rendering_method: AtmosphereMode::Raymarched,
+            scene_units_to_m: 1000.0,
+            ..default()
+        },
+        // Add a volumetric cloud layer using 3D FBM noise
+        // Physically realistic parameters (units: m^-1 per unit density):
+        // - Density is normalized to [0, 1] in the shader
+        // - cloud_scattering: 0.0008 m^-1 per unit density (physically correct for water droplets)
+        //   At max density (1.0): scattering_coeff = 0.0008
+        //   After phase amplification (~6.5x at forward angles): 0.0008 * 6.5 ≈ 0.005
+        //   This matches atmospheric scattering magnitudes (~0.001-0.01 range)
+        // - cloud_absorption: 0.00005 m^-1 per unit density (realistic for water clouds)
+        //   Single-scattering albedo ≈ 0.94 (typical water clouds have albedo 0.95-0.99)
+        CloudLayer {
+            cloud_layer_start: 6_362_000.0, // 2km above Earth's surface
+            cloud_layer_end: 6_364_000.0,   // 4km above Earth's surface (7km thick layer)
+            cloud_density: 1.0, // Used for enabling/disabling, actual density comes from noise (normalized [0, 1])
+            cloud_absorption: 0.00005, // Physically correct: ~0.00005 m^-1 per unit density
+            cloud_scattering: 0.0008, // Physically correct: ~0.0008 m^-1 per unit density
+            // Larger scale = larger cloud features (more “big cumulus”, less “small puffs”)
+            noise_scale: 64_000.0,
+            noise_offset: Vec3::ZERO,
+            detail_noise_scale: 16_000.0, // Smaller scale = higher-frequency breakup
+            detail_strength: 1.0,
+        },
         // The directional light illuminance used in this scene
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
@@ -194,7 +261,7 @@ fn setup_terrain_scene(
         VolumetricLight,
     ));
 
-    // spawn the fog volume
+    // // spawn the fog volume
     commands.spawn((
         FogVolume::default(),
         Transform::from_scale(Vec3::new(10.0, 1.0, 10.0)).with_translation(Vec3::Y * 0.5),
