@@ -1797,7 +1797,7 @@ pub fn extract_meshes_for_gpu_building(
     // some previous frame, but its material hadn't been prepared yet, perhaps
     // because the material hadn't yet been loaded. We reextract such materials
     // on subsequent frames so that `collect_meshes_for_gpu_building` will check
-    // to see if their materials have been prepared. Exclude entities already 
+    // to see if their materials have been prepared. Exclude entities already
     // processed by changed_meshes_query to avoid duplicates.
     let iters = meshes_to_reextract_next_frame
         .iter()
