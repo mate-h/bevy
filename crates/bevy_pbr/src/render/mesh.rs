@@ -1004,6 +1004,17 @@ pub enum RenderMeshInstanceGpuQueue {
     },
 }
 
+impl RenderMeshInstanceGpuQueue {
+    /// Returns the entities in this queue's `changed` list.
+    fn changed_entities(&self) -> Vec<MainEntity> {
+        match self {
+            Self::CpuCulling { changed, .. } => changed.iter().map(|(e, _)| *e).collect(),
+            Self::GpuCulling { changed, .. } => changed.iter().map(|(e, _, _)| *e).collect(),
+            Self::None => Vec::new(),
+        }
+    }
+}
+
 /// The per-thread queues containing mesh instances, populated during the
 /// extract phase.
 ///
@@ -1797,8 +1808,7 @@ pub fn extract_meshes_for_gpu_building(
     // some previous frame, but its material hadn't been prepared yet, perhaps
     // because the material hadn't yet been loaded. We reextract such materials
     // on subsequent frames so that `collect_meshes_for_gpu_building` will check
-    // to see if their materials have been prepared. Exclude entities already
-    // processed by changed_meshes_query to avoid duplicates.
+    // to see if their materials have been prepared.
     let iters = meshes_to_reextract_next_frame
         .iter()
         .map(|&e| *e)
@@ -1812,10 +1822,17 @@ pub fn extract_meshes_for_gpu_building(
         .chain(removed_not_shadow_caster_query.read())
         .chain(removed_no_automatic_batching_query.read())
         .chain(removed_visibility_range_query.read())
-        .chain(removed_skinned_mesh_query.read())
-        .filter(|entity| !changed_meshes_query.contains(*entity));
+        .chain(removed_skinned_mesh_query.read());
 
-    reextract_entities.extend_from_iter(iters);
+    // Exclude entities already processed by changed_meshes_query to avoid duplicates.
+    // Collect entities from queues into a HashSet so the filter can avoid repeated table scans.
+    let changed_entities: MainEntityHashSet = render_mesh_instance_queues
+        .iter_mut()
+        .flat_map(|queue| queue.changed_entities())
+        .collect();
+    reextract_entities.extend_from_iter(
+        iters.filter(move |entity| !changed_entities.contains(&MainEntity::from(*entity))),
+    );
 
     let mut queue = render_mesh_instance_queues.borrow_local_mut();
     for entity in &reextract_entities {
