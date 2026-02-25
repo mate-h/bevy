@@ -1797,7 +1797,8 @@ pub fn extract_meshes_for_gpu_building(
     // some previous frame, but its material hadn't been prepared yet, perhaps
     // because the material hadn't yet been loaded. We reextract such materials
     // on subsequent frames so that `collect_meshes_for_gpu_building` will check
-    // to see if their materials have been prepared.
+    // to see if their materials have been prepared. Exclude entities already 
+    // processed by changed_meshes_query to avoid duplicates.
     let iters = meshes_to_reextract_next_frame
         .iter()
         .map(|&e| *e)
@@ -1811,7 +1812,8 @@ pub fn extract_meshes_for_gpu_building(
         .chain(removed_not_shadow_caster_query.read())
         .chain(removed_no_automatic_batching_query.read())
         .chain(removed_visibility_range_query.read())
-        .chain(removed_skinned_mesh_query.read());
+        .chain(removed_skinned_mesh_query.read())
+        .filter(|entity| !changed_meshes_query.contains(*entity));
 
     reextract_entities.extend_from_iter(iters);
 
