@@ -577,6 +577,8 @@ pub(super) fn prepare_atmosphere_transforms(
             atmo_z,
             view.world_from_view.translation_vec3a(),
         ));
+        // The shader only uses the upper-left 3x3 block, where transpose equals inverse for
+        // orthonormal matrices and is cheaper than computing the full inverse.
         let atmosphere_from_world = world_from_atmosphere.transpose();
 
         commands.entity(entity).insert(AtmosphereTransformsOffset {
