@@ -5022,6 +5022,7 @@ hidden = true
 [[example]]
 name = "testbed_white_furnace"
 path = "examples/testbed/white_furnace.rs"
+doc-scrape-examples = true
 
 [package.metadata.example.testbed_white_furnace]
 hidden = true
