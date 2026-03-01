@@ -449,6 +449,12 @@ pub enum PhaseFunction {
     /// A wavelength-dependent (chromatic) phase function returning linear RGB
     /// phase values per channel. Used when the phase varies with wavelength,
     /// for instance Mie scattering on Martian dust.
+    ///
+    /// Energy conservation applies per channel. Each of the channels must independently
+    /// satisfy the equation above.
+    ///
+    /// domain: [-1, 1]
+    /// range: [0, 1] per channel (R, G, B)
     ChromaticCurve(Arc<dyn Curve<LinearRgba> + Send + Sync>),
 
     /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
