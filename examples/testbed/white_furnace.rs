@@ -81,7 +81,7 @@ fn setup(
             commands.spawn((
                 Mesh3d(sphere_mesh.clone()),
                 MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Srgba::WHITE.into(),
+                    base_color: LinearRgba::WHITE.into(),
                     // vary key PBR parameters on a grid of spheres to show the effect
                     metallic: y01,
                     perceptual_roughness: x01,
@@ -95,7 +95,7 @@ fn setup(
     commands.spawn((
         Mesh3d(sphere_mesh.clone()),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Srgba::WHITE.into(),
+            base_color: LinearRgba::WHITE.into(),
             unlit: true,
             ..default()
         })),
