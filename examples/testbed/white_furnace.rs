@@ -4,22 +4,27 @@
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::ScalingMode,
+    camera::{Hdr, ScalingMode},
     core_pipeline::{tonemapping::Tonemapping, Skybox},
     image::Image,
+    light::GeneratedEnvironmentMapLight,
     prelude::*,
-    render::{
-        render_resource::{
-            Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
-        },
-        view::Hdr,
+    render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
     },
 };
+
+#[derive(Resource)]
+struct LightConfigs {
+    solid_color: EnvironmentMapLight,
+    generated: GeneratedEnvironmentMapLight,
+}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup)
+        .add_systems(Update, switch_light_mode)
         .run();
 }
 
@@ -88,10 +93,9 @@ fn setup(
     }
     // unlit sphere
     commands.spawn((
-        Mesh3d(sphere_mesh),
+        Mesh3d(sphere_mesh.clone()),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Srgba::WHITE.into(),
-            // vary key PBR parameters on a grid of spheres to show the effect
             unlit: true,
             ..default()
         })),
@@ -102,7 +106,7 @@ fn setup(
     commands.spawn((
         Text::new("Perceptual Roughness"),
         TextFont {
-            font_size: 30.0,
+            font_size: FontSize::Px(30.0),
             ..default()
         },
         Node {
@@ -116,7 +120,7 @@ fn setup(
     commands.spawn((
         Text::new("Metallic"),
         TextFont {
-            font_size: 30.0,
+            font_size: FontSize::Px(30.0),
             ..default()
         },
         Node {
@@ -135,6 +139,20 @@ fn setup(
     let white_cubemap = create_white_cubemap(256);
     let white_cubemap_handle = images.add(white_cubemap);
 
+    let mut solid_color_light = EnvironmentMapLight::solid_color(&mut images, Color::WHITE);
+    solid_color_light.intensity = 500.0;
+
+    let generated_light = GeneratedEnvironmentMapLight {
+        environment_map: white_cubemap_handle.clone(),
+        intensity: 500.0,
+        ..default()
+    };
+
+    commands.insert_resource(LightConfigs {
+        solid_color: solid_color_light.clone(),
+        generated: generated_light.clone(),
+    });
+
     // camera
     commands.spawn((
         Camera3d::default(),
@@ -152,12 +170,40 @@ fn setup(
             brightness: 500.0,
             ..default()
         },
-        // EnvironmentMapLight::solid_color(&mut images, Color::WHITE),
-        GeneratedEnvironmentMapLight {
-            environment_map: white_cubemap_handle,
-            // middle gray
-            intensity: 500.0,
+        solid_color_light,
+    ));
+
+    // usage instructions
+    commands.spawn((
+        Text::new(
+            "Press '1' for solid color light\n\
+             Press '2' for generated environment map light",
+        ),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(12),
+            left: px(12),
             ..default()
         },
     ));
+}
+
+fn switch_light_mode(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    light_configs: Res<LightConfigs>,
+    mut commands: Commands,
+    camera_query: Query<Entity, With<Camera3d>>,
+) {
+    for camera in &camera_query {
+        let mut entity = commands.entity(camera);
+        if keyboard.just_pressed(KeyCode::Digit1) {
+            entity
+                .remove::<(EnvironmentMapLight, GeneratedEnvironmentMapLight)>()
+                .insert(light_configs.solid_color.clone());
+        } else if keyboard.just_pressed(KeyCode::Digit2) {
+            entity
+                .remove::<(EnvironmentMapLight, GeneratedEnvironmentMapLight)>()
+                .insert(light_configs.generated.clone());
+        }
+    }
 }

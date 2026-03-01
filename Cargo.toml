@@ -5022,8 +5022,6 @@ hidden = true
 [[example]]
 name = "testbed_white_furnace"
 path = "examples/testbed/white_furnace.rs"
-# Causes an ICE on docs.rs
-doc-scrape-examples = false
 
 [package.metadata.example.testbed_white_furnace]
 hidden = true
