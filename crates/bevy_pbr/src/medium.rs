@@ -100,13 +100,16 @@ impl RenderAsset for GpuScatteringMedium {
         );
 
         // Nonlinear phase mapping to mitigate banding in low-resolution LUTs.
+        // Phase functions peak at forward/backward scattering. Linearly
+        // sampling these regions causes banding. The power curve (n < 1)
+        // allocates more texels near the peaks.
         const PHASE_MAPPING_N: f32 = 0.5;
         let inv_n = 1.0 / PHASE_MAPPING_N;
-        let uv_to_x = |uv: f32| -> f32 {
-            if uv < 0.5 {
-                ops::powf(2.0 * uv, inv_n) / 2.0
+        let phase_mapping = |phase: f32| -> f32 {
+            if phase < 0.5 {
+                ops::powf(2.0 * phase, inv_n) / 2.0
             } else {
-                1.0 - ops::powf(2.0 * (1.0 - uv), inv_n) / 2.0
+                1.0 - ops::powf(2.0 * (1.0 - phase), inv_n) / 2.0
             }
         };
 
@@ -115,9 +118,8 @@ impl RenderAsset for GpuScatteringMedium {
                 let i = raw_i % source_asset.phase_resolution;
                 let j = raw_i / source_asset.phase_resolution;
                 let falloff = (i as f32 + 0.5) / source_asset.falloff_resolution as f32;
-                let phase_uv = (j as f32 + 0.5) / source_asset.phase_resolution as f32;
-                let x = uv_to_x(phase_uv);
-                let neg_l_dot_v = 2.0 * x - 1.0;
+                let phase = (j as f32 + 0.5) / source_asset.phase_resolution as f32;
+                let neg_l_dot_v = 2.0 * phase_mapping(phase) - 1.0;
 
                 source_asset
                     .terms

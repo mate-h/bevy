@@ -1,7 +1,7 @@
 //! Provides types to specify atmosphere lighting, scattering terms, etc.
 
 use alloc::{borrow::Cow, sync::Arc};
-use bevy_asset::{Asset, AssetEvent, Handle};
+use bevy_asset::{Asset, AssetEvent, AssetId, Handle};
 use bevy_camera::Hdr;
 use bevy_color::{ColorToComponents, Gray, LinearRgba};
 use bevy_ecs::{
@@ -12,6 +12,7 @@ use bevy_ecs::{
 use bevy_image::Image;
 use bevy_math::curve::{FunctionCurve, Interval, SampleAutoCurve};
 use bevy_math::{ops, Curve, FloatPow, Vec3};
+use bevy_platform::collections::HashSet;
 use bevy_reflect::TypePath;
 use core::f32::{self, consts::PI};
 use smallvec::SmallVec;
@@ -452,8 +453,9 @@ pub enum PhaseFunction {
 
     /// A chromatic phase function sampled from an N×1 texture (R,G,B per column).
     ///
-    /// Use `Rgba32Float` format. Columns map linearly to cos θ: the first column is
-    /// back-scattering (θ = 180°) and the last is forward-scattering (θ = 0°).
+    /// Use `Rgba32Float` format. Columns map linearly to cos θ. The LUT spans the
+    /// scattering hemisphere: first column is back-scattering (θ = π), last is
+    /// forward-scattering (θ = 0).
     /// Resolved to [`PhaseFunction::ChromaticCurve`] when the image loads.
     ///
     /// To generate your own, compute the phase function using Mie theory (for example,
@@ -519,10 +521,25 @@ pub fn extract_chromatic_phase_textures(
     images: Res<bevy_asset::Assets<Image>>,
     mut scattering_media: ResMut<bevy_asset::Assets<ScatteringMedium>>,
 ) {
+    let extract_ids: HashSet<AssetId<Image>> = scattering_media
+        .iter()
+        .flat_map(|(_, m)| m.terms.iter())
+        .filter_map(|t| {
+            let PhaseFunction::ChromaticTexture(h) = &t.phase else {
+                return None;
+            };
+            Some(h.id())
+        })
+        .collect();
+
     for event in reader.read() {
         let AssetEvent::LoadedWithDependencies { id } = event else {
             continue;
         };
+        if !extract_ids.contains(id) {
+            continue;
+        }
+
         let Some(image) = images.get(*id) else {
             continue;
         };
