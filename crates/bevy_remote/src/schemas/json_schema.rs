@@ -182,7 +182,7 @@ impl From<(&TypeRegistration, &SchemaTypesMetadata)> for JsonSchemaBevyType {
     }
 }
 
-/// JSON Schema type for Bevy Registry Types
+/// JSON Schema type for Bevy Registry Types.
 /// It tries to follow this standard: <https://json-schema.org/specification>
 ///
 /// To take the full advantage from info provided by Bevy registry it provides extra fields
@@ -396,10 +396,6 @@ mod tests {
         let (_, schema) = export_type(&foo_registration, &SchemaTypesMetadata::default());
 
         assert!(
-            !schema.reflect_types.contains(&"Component".to_owned()),
-            "Should not be a component"
-        );
-        assert!(
             schema.reflect_types.contains(&"Resource".to_owned()),
             "Should be a resource"
         );
@@ -597,6 +593,7 @@ mod tests {
           "modulePath": "bevy_remote::schemas::json_schema::tests",
           "crateName": "bevy_remote",
           "reflectTypes": [
+            "Component",
             "Resource",
             "Default",
           ],
