@@ -507,6 +507,12 @@ impl AtmosphereTransforms {
     }
 }
 
+/// Transforms between world space and atmosphere space.
+///
+/// Up is the local planet surface normal, so the horizon stays along the x-z
+/// plane for horizon-detail parameterization. Back is chosen from a constant
+/// world-horizontal direction such as `Vec3A::NEG_Z`, then projected orthogonal
+/// to up. It may drift slightly from world-horizontal but stays camera-independent.
 #[derive(ShaderType)]
 pub struct AtmosphereTransform {
     world_from_atmosphere: Mat4,
@@ -556,10 +562,10 @@ pub(super) fn prepare_atmosphere_transforms(
                 + Vec3::new(0.0, atmosphere.bottom_radius, 0.0),
         );
 
-        // Local up for horizon-detail parameterization
+        // Up is the local planet surface normal.
         let atmo_y = cam_pos.try_normalize().unwrap_or(Vec3A::Y);
 
-        // World-fixed azimuth keeps the terminator stable when tilting the camera
+        // World-horizontal reference for back, projected orthogonal to atmo_y.
         let world_ref = Vec3A::NEG_Z;
         let ref_horizontal = world_ref - atmo_y * atmo_y.dot(world_ref);
         let atmo_z = ref_horizontal.normalize();
