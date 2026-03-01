@@ -17,7 +17,7 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   # If nightly is breaking CI, modify this variable to target a specific nightly version.
-  NIGHTLY_TOOLCHAIN: "nightly-2026-02-11"
+  NIGHTLY_TOOLCHAIN: nightly
   RUSTFLAGS: "-D warnings"
 
 concurrency:
@@ -374,7 +374,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check for typos
-        uses: crate-ci/typos@ad3053d3adbcce7f2e3c60fd4ddfc239787d1eff # v1.43.2
+        uses: crate-ci/typos@57b11c6b7e54c402ccd9cda953f1072ec4f78e33 # v1.43.5
       - name: Typos info
         if: failure()
         run: |
