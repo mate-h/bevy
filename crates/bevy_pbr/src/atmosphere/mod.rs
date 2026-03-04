@@ -97,6 +97,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "functions.wgsl");
         load_shader_library!(app, "bruneton_functions.wgsl");
         load_shader_library!(app, "bindings.wgsl");
+        load_shader_library!(app, "shadows.wgsl");
 
         embedded_asset!(app, "transmittance_lut.wgsl");
         embedded_asset!(app, "multiscattering_lut.wgsl");
@@ -306,6 +307,9 @@ pub struct AtmosphereSettings {
 
     /// The rendering method to use for the atmosphere.
     pub rendering_method: AtmosphereMode,
+
+    /// Whether to sample shadow maps for volumetric shadow shafts.
+    pub shadows_enabled: bool,
 }
 
 impl Default for AtmosphereSettings {
@@ -324,6 +328,7 @@ impl Default for AtmosphereSettings {
             scene_units_to_m: 1.0,
             sky_max_samples: 16,
             rendering_method: AtmosphereMode::LookupTexture,
+            shadows_enabled: true,
         }
     }
 }
@@ -344,6 +349,7 @@ pub struct GpuAtmosphereSettings {
     pub scene_units_to_m: f32,
     pub sky_max_samples: u32,
     pub rendering_method: u32,
+    pub shadows_enabled: u32,
 }
 
 impl Default for GpuAtmosphereSettings {
@@ -368,6 +374,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             scene_units_to_m: s.scene_units_to_m,
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
+            shadows_enabled: s.shadows_enabled as u32,
         }
     }
 }

@@ -11,6 +11,13 @@
 
 @group(0) @binding(13) var aerial_view_lut_out: texture_storage_3d<rgba16float, write>;
 
+#ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
+@group(0) @binding(14) var point_shadow_textures: texture_depth_cube;
+#else
+@group(0) @binding(14) var point_shadow_textures: texture_depth_cube_array;
+#endif
+@group(0) @binding(15) var point_shadow_textures_comparison_sampler: sampler_comparison;
+
 @compute
 @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
@@ -45,7 +52,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             let sample_transmittance = exp(-sample_optical_depth);
 
             // evaluate one segment of the integral
-            var inscattering = sample_local_inscattering(scattering, ray_dir, sample_pos);
+            let inscattering = sample_local_inscattering(scattering, ray_dir, sample_pos);
 
             // Analytical integration of the single scattering term in the radiance transfer equation
             let s_int = (inscattering - inscattering * sample_transmittance) / max(extinction, MIN_EXTINCTION);

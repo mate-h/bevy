@@ -22,6 +22,7 @@ struct AtmosphereSettings {
     scene_units_to_m: f32,
     sky_max_samples: u32,
     rendering_method: u32,
+    shadows_enabled: u32,
 }
 
 // "Atmosphere space" uses local up for the zenith so the horizon-detail

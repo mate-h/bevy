@@ -1,5 +1,6 @@
 use crate::{
     ExtractedAtmosphere, GpuLights, GpuScatteringMedium, LightMeta, ScatteringMediumSampler,
+    ShadowSamplers, ViewShadowBindings,
 };
 use bevy_asset::{load_embedded_asset, AssetId, Handle};
 use bevy_camera::{Camera, Camera3d};
@@ -29,6 +30,42 @@ use bevy_shader::Shader;
 use bevy_utils::default;
 
 use super::GpuAtmosphereSettings;
+
+/// Shadow map bind group layout entries
+fn shadow_map_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<4> {
+    (
+        (
+            14,
+            #[cfg(all(
+                not(target_abi = "sim"),
+                any(
+                    not(feature = "webgl"),
+                    not(target_arch = "wasm32"),
+                    feature = "webgpu"
+                )
+            ))]
+            texture_cube_array(TextureSampleType::Depth),
+            #[cfg(any(
+                target_abi = "sim",
+                all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
+            ))]
+            texture_cube(TextureSampleType::Depth),
+        ),
+        (15, sampler(SamplerBindingType::Comparison)),
+        (
+            16,
+            #[cfg(any(
+                not(feature = "webgl"),
+                not(target_arch = "wasm32"),
+                feature = "webgpu"
+            ))]
+            texture_2d_array(TextureSampleType::Depth),
+            #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
+            texture_2d(TextureSampleType::Depth),
+        ),
+        (17, sampler(SamplerBindingType::Comparison)),
+    )
+}
 
 #[derive(Resource)]
 pub(crate) struct AtmosphereBindGroupLayouts {
@@ -97,63 +134,59 @@ impl AtmosphereBindGroupLayouts {
             ),
         );
 
-        let sky_view_lut = BindGroupLayoutDescriptor::new(
-            "sky_view_lut_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::COMPUTE,
+        let sky_view_lut_entries = DynamicBindGroupLayoutEntries::new_with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (0, uniform_buffer::<GpuAtmosphere>(true)),
+                (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                (2, uniform_buffer::<AtmosphereTransform>(true)),
+                (3, uniform_buffer::<ViewUniform>(true)),
+                (4, uniform_buffer::<GpuLights>(true)),
+                // scattering medium luts and sampler
+                (5, texture_2d(TextureSampleType::default())),
+                (6, texture_2d(TextureSampleType::default())),
+                (7, sampler(SamplerBindingType::Filtering)),
+                // atmosphere luts and sampler
+                (8, texture_2d(TextureSampleType::default())), // transmittance
+                (9, texture_2d(TextureSampleType::default())), // multiscattering
+                (12, sampler(SamplerBindingType::Filtering)),
+                // sky view lut storage texture
                 (
-                    (0, uniform_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                    (2, uniform_buffer::<AtmosphereTransform>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
-                    // scattering medium luts and sampler
-                    (5, texture_2d(TextureSampleType::default())),
-                    (6, texture_2d(TextureSampleType::default())),
-                    (7, sampler(SamplerBindingType::Filtering)),
-                    // atmosphere luts and sampler
-                    (8, texture_2d(TextureSampleType::default())), // transmittance
-                    (9, texture_2d(TextureSampleType::default())), // multiscattering
-                    (12, sampler(SamplerBindingType::Filtering)),
-                    // sky view lut storage texture
-                    (
-                        13,
-                        texture_storage_2d(
-                            TextureFormat::Rgba16Float,
-                            StorageTextureAccess::WriteOnly,
-                        ),
-                    ),
+                    13,
+                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                 ),
             ),
-        );
+        )
+        .extend_with_indices(shadow_map_layout_entries());
+        let sky_view_lut =
+            BindGroupLayoutDescriptor::new("sky_view_lut_bind_group_layout", &sky_view_lut_entries);
 
+        let aerial_view_lut_entries = DynamicBindGroupLayoutEntries::new_with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (0, uniform_buffer::<GpuAtmosphere>(true)),
+                (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                (3, uniform_buffer::<ViewUniform>(true)),
+                (4, uniform_buffer::<GpuLights>(true)),
+                // scattering medium luts and sampler
+                (5, texture_2d(TextureSampleType::default())),
+                (6, texture_2d(TextureSampleType::default())),
+                (7, sampler(SamplerBindingType::Filtering)),
+                // atmosphere luts and sampler
+                (8, texture_2d(TextureSampleType::default())), // transmittance
+                (9, texture_2d(TextureSampleType::default())), // multiscattering
+                (12, sampler(SamplerBindingType::Filtering)),
+                // aerial view lut storage texture
+                (
+                    13,
+                    texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        )
+        .extend_with_indices(shadow_map_layout_entries());
         let aerial_view_lut = BindGroupLayoutDescriptor::new(
             "aerial_view_lut_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::COMPUTE,
-                (
-                    (0, uniform_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
-                    // scattering medium luts and sampler
-                    (5, texture_2d(TextureSampleType::default())),
-                    (6, texture_2d(TextureSampleType::default())),
-                    (7, sampler(SamplerBindingType::Filtering)),
-                    // atmosphere luts and sampler
-                    (8, texture_2d(TextureSampleType::default())), // transmittance
-                    (9, texture_2d(TextureSampleType::default())), // multiscattering
-                    (12, sampler(SamplerBindingType::Filtering)),
-                    // eerial view lut storage texture
-                    (
-                        13,
-                        texture_storage_3d(
-                            TextureFormat::Rgba16Float,
-                            StorageTextureAccess::WriteOnly,
-                        ),
-                    ),
-                ),
-            ),
+            &aerial_view_lut_entries,
         );
 
         Self {
@@ -167,56 +200,58 @@ impl AtmosphereBindGroupLayouts {
 
 impl FromWorld for RenderSkyBindGroupLayouts {
     fn from_world(world: &mut World) -> Self {
-        let render_sky = BindGroupLayoutDescriptor::new(
-            "render_sky_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::FRAGMENT,
-                (
-                    (0, uniform_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                    (2, uniform_buffer::<AtmosphereTransform>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
-                    // scattering medium luts and sampler
-                    (5, texture_2d(TextureSampleType::default())),
-                    (6, texture_2d(TextureSampleType::default())),
-                    (7, sampler(SamplerBindingType::Filtering)),
-                    // atmosphere luts and sampler
-                    (8, texture_2d(TextureSampleType::default())), // transmittance
-                    (9, texture_2d(TextureSampleType::default())), // multiscattering
-                    (10, texture_2d(TextureSampleType::default())), // sky view
-                    (11, texture_3d(TextureSampleType::default())), // aerial view
-                    (12, sampler(SamplerBindingType::Filtering)),
-                    // view depth texture
-                    (13, texture_2d(TextureSampleType::Depth)),
-                ),
+        let render_sky_entries = DynamicBindGroupLayoutEntries::new_with_indices(
+            ShaderStages::FRAGMENT,
+            (
+                (0, uniform_buffer::<GpuAtmosphere>(true)),
+                (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                (2, uniform_buffer::<AtmosphereTransform>(true)),
+                (3, uniform_buffer::<ViewUniform>(true)),
+                (4, uniform_buffer::<GpuLights>(true)),
+                // scattering medium luts and sampler
+                (5, texture_2d(TextureSampleType::default())),
+                (6, texture_2d(TextureSampleType::default())),
+                (7, sampler(SamplerBindingType::Filtering)),
+                // atmosphere luts and sampler
+                (8, texture_2d(TextureSampleType::default())), // transmittance
+                (9, texture_2d(TextureSampleType::default())), // multiscattering
+                (10, texture_2d(TextureSampleType::default())), // sky view
+                (11, texture_3d(TextureSampleType::default())), // aerial view
+                (12, sampler(SamplerBindingType::Filtering)),
+                // view depth texture
+                (13, texture_2d(TextureSampleType::Depth)),
             ),
-        );
+        )
+        .extend_with_indices(shadow_map_layout_entries());
+        let render_sky =
+            BindGroupLayoutDescriptor::new("render_sky_bind_group_layout", &render_sky_entries);
 
+        let render_sky_msaa_entries = DynamicBindGroupLayoutEntries::new_with_indices(
+            ShaderStages::FRAGMENT,
+            (
+                (0, uniform_buffer::<GpuAtmosphere>(true)),
+                (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                (2, uniform_buffer::<AtmosphereTransform>(true)),
+                (3, uniform_buffer::<ViewUniform>(true)),
+                (4, uniform_buffer::<GpuLights>(true)),
+                // scattering medium luts and sampler
+                (5, texture_2d(TextureSampleType::default())),
+                (6, texture_2d(TextureSampleType::default())),
+                (7, sampler(SamplerBindingType::Filtering)),
+                // atmosphere luts and sampler
+                (8, texture_2d(TextureSampleType::default())), // transmittance
+                (9, texture_2d(TextureSampleType::default())), // multiscattering
+                (10, texture_2d(TextureSampleType::default())), // sky view
+                (11, texture_3d(TextureSampleType::default())), // aerial view
+                (12, sampler(SamplerBindingType::Filtering)),
+                // view depth texture
+                (13, texture_2d_multisampled(TextureSampleType::Depth)),
+            ),
+        )
+        .extend_with_indices(shadow_map_layout_entries());
         let render_sky_msaa = BindGroupLayoutDescriptor::new(
             "render_sky_msaa_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::FRAGMENT,
-                (
-                    (0, uniform_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                    (2, uniform_buffer::<AtmosphereTransform>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
-                    // scattering medium luts and sampler
-                    (5, texture_2d(TextureSampleType::default())),
-                    (6, texture_2d(TextureSampleType::default())),
-                    (7, sampler(SamplerBindingType::Filtering)),
-                    // atmosphere luts and sampler
-                    (8, texture_2d(TextureSampleType::default())), // transmittance
-                    (9, texture_2d(TextureSampleType::default())), // multiscattering
-                    (10, texture_2d(TextureSampleType::default())), // sky view
-                    (11, texture_3d(TextureSampleType::default())), // aerial view
-                    (12, sampler(SamplerBindingType::Filtering)),
-                    // view depth texture
-                    (13, texture_2d_multisampled(TextureSampleType::Depth)),
-                ),
-            ),
+            &render_sky_msaa_entries,
         );
 
         Self {
@@ -622,6 +657,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             &ExtractedAtmosphere,
             &AtmosphereTextures,
             &ViewDepthTexture,
+            &ViewShadowBindings,
             &Msaa,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
@@ -630,6 +666,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
     layouts: Res<AtmosphereBindGroupLayouts>,
     render_sky_layouts: Res<RenderSkyBindGroupLayouts>,
     atmosphere_sampler: Res<AtmosphereSampler>,
+    shadow_samplers: Res<ShadowSamplers>,
     view_uniforms: Res<ViewUniforms>,
     lights_uniforms: Res<LightMeta>,
     atmosphere_transforms: Res<AtmosphereTransforms>,
@@ -667,7 +704,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         .binding()
         .ok_or(AtmosphereBindGroupError::LightUniforms)?;
 
-    for (entity, atmosphere, textures, view_depth_texture, msaa) in &views {
+    for (entity, atmosphere, textures, view_depth_texture, shadow_bindings, msaa) in &views {
         let gpu_medium = gpu_media
             .get(atmosphere.medium)
             .ok_or(ScatteringMediumMissingError(atmosphere.medium))?;
@@ -727,11 +764,16 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &**atmosphere_sampler),
                 // sky view lut storage texture
                 (13, &textures.sky_view_lut.default_view),
+                // shadow maps
+                (14, &shadow_bindings.point_light_depth_texture_view),
+                (15, &shadow_samplers.point_light_comparison_sampler),
+                (16, &shadow_bindings.directional_light_depth_texture_view),
+                (17, &shadow_samplers.directional_light_comparison_sampler),
             )),
         );
 
         let aerial_view_lut = render_device.create_bind_group(
-            "sky_view_lut_bind_group",
+            "aerial_view_lut_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.aerial_view_lut),
             &BindGroupEntries::with_indices((
                 // uniforms
@@ -749,6 +791,11 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &**atmosphere_sampler),
                 // aerial view lut storage texture
                 (13, &textures.aerial_view_lut.default_view),
+                // shadow maps
+                (14, &shadow_bindings.point_light_depth_texture_view),
+                (15, &shadow_samplers.point_light_comparison_sampler),
+                (16, &shadow_bindings.directional_light_depth_texture_view),
+                (17, &shadow_samplers.directional_light_comparison_sampler),
             )),
         );
 
@@ -778,6 +825,11 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &**atmosphere_sampler),
                 // view depth texture
                 (13, view_depth_texture.view()),
+                // shadow maps
+                (14, &shadow_bindings.point_light_depth_texture_view),
+                (15, &shadow_samplers.point_light_comparison_sampler),
+                (16, &shadow_bindings.directional_light_depth_texture_view),
+                (17, &shadow_samplers.directional_light_comparison_sampler),
             )),
         );
 

@@ -13,6 +13,7 @@
         transmittance_lut_r_mu_to_uv, ray_intersects_ground,
         distance_to_top_atmosphere_boundary, distance_to_bottom_atmosphere_boundary
     },
+    shadows::fetch_directional_shadow,
 }
 
 // NOTE FOR CONVENTIONS: 
@@ -223,8 +224,14 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
         let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
         let scattering_coeff = sample_scattering_lut(local_r, neg_LdotV);
 
+        // Sample directional light shadow map for volumetric shadow shafts
+        var shadow_map_factor: f32 = 1.0;
+        if (settings.shadows_enabled != 0u) {
+            shadow_map_factor = fetch_directional_shadow(light_i, vec4(world_pos, 1.0), -ray_dir);
+        }
+
         // Transmittance from scattering event to light source
-        let scattering_factor = shadow_factor * scattering_coeff;
+        let scattering_factor = shadow_factor * shadow_map_factor * scattering_coeff;
 
         // Additive factor from the multiscattering LUT
         let psi_ms = sample_multiscattering_lut(local_r, mu_light);
@@ -485,14 +492,14 @@ fn raymarch_atmosphere(
 
     // include reflected luminance from planet ground 
     if ground && ray_intersects_ground(r, mu) {
+        // position on the sphere and get the sphere normal (up)
+        let sphere_point = pos + ray_dir * t_end;
+        let sphere_normal = normalize(sphere_point);
         for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
             let light = &lights.directional_lights[light_i];
             let light_dir = (*light).direction_to_light;
             let light_color = (*light).color.rgb;
             let transmittance_to_ground = exp(-optical_depth);
-            // position on the sphere and get the sphere normal (up)
-            let sphere_point = pos + ray_dir * t_end;
-            let sphere_normal = normalize(sphere_point);
             let mu_light = dot(light_dir, sphere_normal);
             let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
             let light_luminance = transmittance_to_light * max(mu_light, 0.0) * light_color;
