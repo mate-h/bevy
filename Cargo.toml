@@ -1202,6 +1202,18 @@ category = "3D Rendering"
 wasm = true
 
 [[example]]
+name = "height_fog"
+path = "examples/3d/height_fog.rs"
+doc-scrape-examples = true
+required-features = ["free_camera"]
+
+[package.metadata.example.height_fog]
+name = "Height Fog"
+description = "A scattering medium of height-based fog with no earth sky"
+category = "3D Rendering"
+wasm = false
+
+[[example]]
 name = "fog"
 path = "examples/3d/fog.rs"
 doc-scrape-examples = true
