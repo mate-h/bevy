@@ -30,7 +30,7 @@ fn setup_camera(
             [ScatteringTerm {
                 absorption: Vec3::splat(4e-4),
                 scattering: Vec3::splat(0.04),
-                falloff: Falloff::Exponential { scale: 0.1 / 100.0 },
+                falloff: Falloff::Exponential { scale: 0.1 / 10.0 },
                 phase: PhaseFunction::Mie { asymmetry: 0.8 },
             }],
         )
@@ -39,7 +39,7 @@ fn setup_camera(
 
     let atmosphere = Atmosphere {
         bottom_radius: 6_360_000.0,
-        top_radius: 6_460_000.0,
+        top_radius: 6_370_000.0,
         ground_albedo: Vec3::splat(0.3),
         medium: height_fog_medium,
     };
