@@ -1,5 +1,9 @@
 use super::{
-    prepare::{SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_SIZE},
+    prepare::{
+        SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET,
+        WORLD_CACHE_INDIRECT_DISPATCH_ARGS_SIZE, WORLD_CACHE_INDIRECT_DISPATCH_OFFSET,
+        WORLD_CACHE_SIZE,
+    },
     SolariLighting,
 };
 use crate::scene::RaytracingSceneBindings;
@@ -32,7 +36,6 @@ use bevy_utils::default;
 #[derive(Resource)]
 pub struct SolariLightingPipelines {
     bind_group_layout: BindGroupLayoutDescriptor,
-    bind_group_layout_world_cache_active_cells_dispatch: BindGroupLayoutDescriptor,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     bind_group_layout_resolve_dlss_rr_textures: BindGroupLayoutDescriptor,
     decay_world_cache_pipeline: CachedComputePipelineId,
@@ -198,23 +201,8 @@ pub fn solari_lighting(
             previous_depth_buffer,
             view_uniforms_binding,
             previous_view_uniforms_binding,
-            s.world_cache_checksums.as_entire_binding(),
-            s.world_cache_life.as_entire_binding(),
-            s.world_cache_radiance.as_entire_binding(),
-            s.world_cache_geometry_data.as_entire_binding(),
-            s.world_cache_luminance_deltas.as_entire_binding(),
-            s.world_cache_active_cells_new_radiance.as_entire_binding(),
-            s.world_cache_a.as_entire_binding(),
-            s.world_cache_b.as_entire_binding(),
-            s.world_cache_active_cell_indices.as_entire_binding(),
-            s.world_cache_active_cells_count.as_entire_binding(),
+            s.world_cache.as_entire_binding(),
         )),
-    );
-    let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
-        "solari_lighting_bind_group_world_cache_active_cells_dispatch",
-        &pipeline_cache
-            .get_bind_group_layout(&pipelines.bind_group_layout_world_cache_active_cells_dispatch),
-        &BindGroupEntries::single(s.world_cache_active_cells_dispatch.as_entire_binding()),
     );
 
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -288,8 +276,6 @@ pub fn solari_lighting(
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/world_cache");
 
-    pass.set_bind_group(2, &bind_group_world_cache_active_cells_dispatch, &[]);
-
     pass.set_pipeline(decay_world_cache_pipeline);
     pass.dispatch_workgroups((WORLD_CACHE_SIZE / 1024) as u32, 1, 1);
 
@@ -302,33 +288,50 @@ pub fn solari_lighting(
     pass.set_pipeline(compact_world_cache_write_active_cells_pipeline);
     pass.dispatch_workgroups((WORLD_CACHE_SIZE / 1024) as u32, 1, 1);
 
-    pass.set_bind_group(2, None, &[]);
+    d.end(&mut pass);
+    drop(pass);
+
+    command_encoder.copy_buffer_to_buffer(
+        &s.world_cache,
+        WORLD_CACHE_INDIRECT_DISPATCH_OFFSET,
+        &s.world_cache_indirect_args,
+        0,
+        Some(WORLD_CACHE_INDIRECT_DISPATCH_ARGS_SIZE),
+    );
+
+    let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("solari_lighting_world_cache_indirect"),
+        timestamp_writes: None,
+    });
+
+    pass.set_bind_group(0, scene_bind_group, &[]);
+    pass.set_bind_group(
+        1,
+        &bind_group,
+        &[
+            view_uniform_offset.offset,
+            previous_view_uniform_offset.offset,
+        ],
+    );
+
+    let d = diagnostics.time_span(&mut pass, "solari_lighting/world_cache_indirect");
 
     pass.set_pipeline(sample_di_for_world_cache_pipeline);
     pass.set_immediates(
         0,
         bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
     );
-    pass.dispatch_workgroups_indirect(
-        &solari_lighting_resources.world_cache_active_cells_dispatch,
-        0,
-    );
+    pass.dispatch_workgroups_indirect(&solari_lighting_resources.world_cache_indirect_args, 0);
 
     pass.set_pipeline(sample_gi_for_world_cache_pipeline);
     pass.set_immediates(
         0,
         bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
     );
-    pass.dispatch_workgroups_indirect(
-        &solari_lighting_resources.world_cache_active_cells_dispatch,
-        0,
-    );
+    pass.dispatch_workgroups_indirect(&solari_lighting_resources.world_cache_indirect_args, 0);
 
     pass.set_pipeline(blend_new_world_cache_samples_pipeline);
-    pass.dispatch_workgroups_indirect(
-        &solari_lighting_resources.world_cache_active_cells_dispatch,
-        0,
-    );
+    pass.dispatch_workgroups_indirect(&solari_lighting_resources.world_cache_indirect_args, 0);
 
     d.end(&mut pass);
 
@@ -385,7 +388,9 @@ pub fn solari_lighting(
 
     diagnostics.record_u32(
         ctx.command_encoder(),
-        &s.world_cache_active_cells_count.slice(..),
+        &s.world_cache.slice(
+            WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET..WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + 4,
+        ),
         "solari_lighting/world_cache_active_cells_count",
     );
 }
@@ -420,22 +425,8 @@ pub fn init_solari_lighting_pipelines(
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer::<PreviousViewData>(true),
                 storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
             ),
         ),
-    );
-
-    let bind_group_layout_world_cache_active_cells_dispatch = BindGroupLayoutDescriptor::new(
-        "solari_lighting_bind_group_layout_world_cache_active_cells_dispatch",
-        &BindGroupLayoutEntries::single(ShaderStages::COMPUTE, storage_buffer_sized(false, None)),
     );
 
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -484,8 +475,6 @@ pub fn init_solari_lighting_pipelines(
 
     commands.insert_resource(SolariLightingPipelines {
         bind_group_layout: bind_group_layout.clone(),
-        bind_group_layout_world_cache_active_cells_dispatch:
-            bind_group_layout_world_cache_active_cells_dispatch.clone(),
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         bind_group_layout_resolve_dlss_rr_textures: bind_group_layout_resolve_dlss_rr_textures
             .clone(),
@@ -493,28 +482,28 @@ pub fn init_solari_lighting_pipelines(
             "solari_lighting_decay_world_cache_pipeline",
             "decay_world_cache",
             load_embedded_asset!(asset_server.as_ref(), "world_cache_compact.wgsl"),
-            Some(&bind_group_layout_world_cache_active_cells_dispatch),
+            None,
             vec!["WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into()],
         ),
         compact_world_cache_single_block_pipeline: create_pipeline(
             "solari_lighting_compact_world_cache_single_block_pipeline",
             "compact_world_cache_single_block",
             load_embedded_asset!(asset_server.as_ref(), "world_cache_compact.wgsl"),
-            Some(&bind_group_layout_world_cache_active_cells_dispatch),
+            None,
             vec!["WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into()],
         ),
         compact_world_cache_blocks_pipeline: create_pipeline(
             "solari_lighting_compact_world_cache_blocks_pipeline",
             "compact_world_cache_blocks",
             load_embedded_asset!(asset_server.as_ref(), "world_cache_compact.wgsl"),
-            Some(&bind_group_layout_world_cache_active_cells_dispatch),
+            None,
             vec![],
         ),
         compact_world_cache_write_active_cells_pipeline: create_pipeline(
             "solari_lighting_compact_world_cache_write_active_cells_pipeline",
             "compact_world_cache_write_active_cells",
             load_embedded_asset!(asset_server.as_ref(), "world_cache_compact.wgsl"),
-            Some(&bind_group_layout_world_cache_active_cells_dispatch),
+            None,
             vec!["WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into()],
         ),
         sample_di_for_world_cache_pipeline: create_pipeline(
