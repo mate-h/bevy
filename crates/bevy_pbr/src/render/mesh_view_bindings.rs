@@ -45,13 +45,13 @@ use crate::{
         self, RenderViewIrradianceVolumeBindGroupEntries, IRRADIANCE_VOLUMES_ARE_USABLE,
     },
     prepass,
-    resources::{AtmosphereBuffer, AtmosphereData, AtmosphereSampler, AtmosphereTextures},
-    Bluenoise, EnvironmentMapUniformBuffer, ExtractedAtmosphere, FogMeta,
-    GlobalClusterableObjectMeta, GpuClusteredLights, GpuFog, GpuLights, LightMeta,
-    LightProbesBuffer, LightProbesUniform, MeshPipeline, MeshPipelineKey, RenderViewLightProbes,
-    ScreenSpaceAmbientOcclusionResources, ScreenSpaceReflectionsBuffer,
-    ScreenSpaceReflectionsUniform, ShadowSamplers, ViewClusterBindings, ViewShadowBindings,
-    ViewTransmissionTexture, CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT,
+    resources::{AtmosphereBuffer, AtmosphereData, AtmosphereSampler, ViewAtmosphereTextures},
+    Bluenoise, EnvironmentMapUniformBuffer, FogMeta, GlobalClusterableObjectMeta,
+    GpuClusteredLights, GpuFog, GpuLights, LightMeta, LightProbesBuffer, LightProbesUniform,
+    MeshPipeline, MeshPipelineKey, RenderViewLightProbes, ScreenSpaceAmbientOcclusionResources,
+    ScreenSpaceReflectionsBuffer, ScreenSpaceReflectionsUniform, ShadowSamplers,
+    ViewClusterBindings, ViewShadowBindings, ViewTransmissionTexture,
+    CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT,
 };
 
 #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
@@ -616,8 +616,8 @@ pub fn prepare_mesh_view_bind_groups(
         Option<&RenderViewLightProbes<EnvironmentMapLight>>,
         Option<&RenderViewLightProbes<IrradianceVolume>>,
         Has<OrderIndependentTransparencySettings>,
-        Option<&AtmosphereTextures>,
-        Has<ExtractedAtmosphere>,
+        Option<&ViewAtmosphereTextures>,
+        Has<ViewAtmosphereTextures>,
         Option<&ViewContactShadowsUniformOffset>,
     )>,
     (images, mut fallback_images, fallback_image, fallback_image_zero): (
@@ -792,13 +792,13 @@ pub fn prepare_mesh_view_bind_groups(
             }
 
             if has_atmosphere
-                && let Some(atmosphere_textures) = atmosphere_textures
+                && let Some(view_atmosphere_textures) = atmosphere_textures
                 && let Some(atmosphere_buffer) = atmosphere_buffer.as_ref()
                 && let Some(atmosphere_sampler) = atmosphere_sampler.as_ref()
                 && let Some(atmosphere_buffer_binding) = atmosphere_buffer.buffer.binding()
             {
                 entries = entries.extend_with_indices((
-                    (32, &atmosphere_textures.transmittance_lut.default_view),
+                    (32, &view_atmosphere_textures.transmittance_lut.default_view),
                     (33, &***atmosphere_sampler),
                     (34, atmosphere_buffer_binding),
                 ));

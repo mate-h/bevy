@@ -1,7 +1,7 @@
 use crate::{
     resources::{
         AtmosphereSampler, AtmosphereTextures, AtmosphereTransform, AtmosphereTransforms,
-        AtmosphereTransformsOffset, GpuAtmosphere,
+        GpuAtmosphere, ViewAtmosphereIndices, ViewAtmospheres, ViewAtmosphereTextures,
     },
     ExtractedAtmosphere, GpuAtmosphereSettings, GpuLights, LightMeta, ViewLightsUniformOffset,
 };
@@ -13,11 +13,12 @@ use bevy_ecs::{
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
 };
+use bevy_camera::Camera;
 use bevy_image::Image;
 use bevy_light::{AtmosphereEnvironmentMapLight, GeneratedEnvironmentMapLight};
 use bevy_math::{Quat, UVec2};
 use bevy_render::{
-    extract_component::{ComponentUniforms, DynamicUniformIndex, ExtractComponent},
+    extract_component::{ComponentUniforms, ExtractComponent},
     render_asset::RenderAssets,
     render_resource::{binding_types::*, *},
     renderer::{RenderContext, RenderDevice, ViewQuery},
@@ -133,7 +134,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
 }
 
 pub(super) fn prepare_probe_textures(
-    view_textures: Query<&AtmosphereTextures, With<ExtractedAtmosphere>>,
+    views: Query<(&ViewAtmospheres, &ViewAtmosphereTextures), With<Camera>>,
+    atmospheres: Query<&AtmosphereTextures, With<ExtractedAtmosphere>>,
     probes: Query<
         (Entity, &AtmosphereEnvironmentMap),
         (
@@ -144,6 +146,16 @@ pub(super) fn prepare_probe_textures(
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut commands: Commands,
 ) {
+    let Some((view_atmospheres, view_textures)) = views.iter().next() else {
+        return;
+    };
+    let Some(first) = view_atmospheres.0.first() else {
+        return;
+    };
+    let Ok(atmosphere_textures) = atmospheres.get(first.atmosphere_entity) else {
+        return;
+    };
+
     for (probe, render_env_map) in &probes {
         let environment = gpu_images.get(&render_env_map.environment_map).unwrap();
         // create a cube view
@@ -151,16 +163,18 @@ pub(super) fn prepare_probe_textures(
             dimension: Some(TextureViewDimension::D2Array),
             ..Default::default()
         });
-        // Get the first view entity's textures to borrow
-        if let Some(view_textures) = view_textures.iter().next() {
-            commands.entity(probe).insert(AtmosphereProbeTextures {
-                environment: environment_view,
-                transmittance_lut: view_textures.transmittance_lut.clone(),
-                multiscattering_lut: view_textures.multiscattering_lut.clone(),
-                sky_view_lut: view_textures.sky_view_lut.clone(),
-                aerial_view_lut: view_textures.aerial_view_lut.clone(),
-            });
-        }
+        let sky_view_lut = view_textures
+            .sky_view_luts
+            .first()
+            .cloned()
+            .unwrap_or_else(|| view_textures.transmittance_lut.clone());
+        commands.entity(probe).insert(AtmosphereProbeTextures {
+            environment: environment_view,
+            transmittance_lut: view_textures.transmittance_lut.clone(),
+            multiscattering_lut: atmosphere_textures.multiscattering_lut.clone(),
+            sky_view_lut,
+            aerial_view_lut: view_textures.aerial_view_lut.clone(),
+        });
     }
 }
 
@@ -243,9 +257,7 @@ pub fn prepare_atmosphere_probe_components(
 }
 pub fn atmosphere_environment(
     view: ViewQuery<(
-        &DynamicUniformIndex<GpuAtmosphere>,
-        &DynamicUniformIndex<GpuAtmosphereSettings>,
-        &AtmosphereTransformsOffset,
+        &ViewAtmosphereIndices,
         &ViewUniformOffset,
         &ViewLightsUniformOffset,
     )>,
@@ -259,13 +271,7 @@ pub fn atmosphere_environment(
         return;
     };
 
-    let (
-        atmosphere_uniforms_offset,
-        settings_uniforms_offset,
-        atmosphere_transforms_offset,
-        view_uniforms_offset,
-        lights_uniforms_offset,
-    ) = view.into_inner();
+    let (indices, view_uniforms_offset, lights_uniforms_offset) = view.into_inner();
 
     for (bind_groups, env_map_light) in probe_query.iter() {
         let command_encoder = ctx.command_encoder();
@@ -279,9 +285,9 @@ pub fn atmosphere_environment(
             0,
             &bind_groups.environment,
             &[
-                atmosphere_uniforms_offset.index(),
-                settings_uniforms_offset.index(),
-                atmosphere_transforms_offset.index(),
+                indices.atmosphere_uniform_index,
+                indices.settings_uniform_index,
+                indices.transform_offset,
                 view_uniforms_offset.offset,
                 lights_uniforms_offset.offset,
             ],

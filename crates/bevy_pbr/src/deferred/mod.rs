@@ -1,5 +1,5 @@
 use crate::{
-    DistanceFog, ExtractedAtmosphere, MeshPipeline, MeshPipelineKey, MeshPipelineSet,
+    resources::ViewAtmosphereTextures, DistanceFog, MeshPipeline, MeshPipelineKey, MeshPipelineSet,
     MeshViewBindGroup, RenderViewLightProbes, ScreenSpaceAmbientOcclusion,
     ScreenSpaceReflectionsUniform, ViewContactShadowsUniformOffset,
     ViewEnvironmentMapUniformOffset, ViewFogUniformOffset, ViewLightProbesUniformOffset,
@@ -438,7 +438,7 @@ pub fn prepare_deferred_lighting_pipelines(
         Has<RenderViewLightProbes<EnvironmentMapLight>>,
         Has<RenderViewLightProbes<IrradianceVolume>>,
         Has<SkipDeferredLighting>,
-        Has<ExtractedAtmosphere>,
+        Has<ViewAtmosphereTextures>,
     )>,
 ) {
     for (

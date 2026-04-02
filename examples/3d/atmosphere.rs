@@ -126,6 +126,8 @@ fn setup_camera_fog(
     mut commands: Commands,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
     let mars_phase = asset_server.load("textures/mars_mie_phase.ktx2");
@@ -136,13 +138,60 @@ fn setup_camera_fog(
         mars: mars_medium.clone(),
     });
 
+    let atmosphere = Atmosphere::earth(earth_medium.clone());
+    let bottom_radius = atmosphere.bottom_radius;
+
+    // Spawn atmosphere entities (can be positioned in the world)
+    let upper_planet_center = Vec3::new(0.0, bottom_radius + 90_000.0, 0.0);
+    let lower_planet_center = Vec3::new(0.0, -bottom_radius - 90_000.0, 0.0);
+
+    commands.spawn((
+        atmosphere.clone(),
+        AtmosphereSettings { scene_units_to_m: 1.0, ..default() },
+        Transform::from_translation(upper_planet_center),
+    ));
+
+    commands.spawn((
+        atmosphere.clone(),
+        AtmosphereSettings { scene_units_to_m: 1.0, ..default() },
+        Transform::from_translation(lower_planet_center),
+    ));
+
+    // Marker spheres on each planet surface (hemisphere facing the world origin).
+    const SURFACE_SPHERE_RADIUS: f32 = 20_000.0;
+    let upper_surface = upper_planet_center - Vec3::Y * bottom_radius;
+    let lower_surface = lower_planet_center + Vec3::Y * bottom_radius;
+    let upper_outward = -Vec3::Y;
+    let lower_outward = Vec3::Y;
+    let sphere_mesh = meshes.add(
+        Sphere::new(SURFACE_SPHERE_RADIUS)
+            .mesh()
+            .ico(4)
+            .expect("icosphere subdivision count within mesh limits"),
+    );
+    let sphere_material_upper = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.35, 0.25).into(),
+        ..default()
+    });
+    let sphere_material_lower = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.45, 0.85).into(),
+        ..default()
+    });
+
+    commands.spawn((
+        Mesh3d(sphere_mesh.clone()),
+        MeshMaterial3d(sphere_material_upper),
+        Transform::from_translation(upper_surface + upper_outward * SURFACE_SPHERE_RADIUS),
+    ));
+    commands.spawn((
+        Mesh3d(sphere_mesh),
+        MeshMaterial3d(sphere_material_lower),
+        Transform::from_translation(lower_surface + lower_outward * SURFACE_SPHERE_RADIUS),
+    ));
+
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(-2.8, 0.045, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
-        // Earth atmosphere
-        Atmosphere::earth(earth_medium),
-        // Can be adjusted to change the scene scale and rendering quality
-        AtmosphereSettings::default(),
         // The directional light illuminance used in this scene
         // (the one recommended for use with this feature) is
         // quite bright, so raising the exposure compensation helps
@@ -229,28 +278,28 @@ fn setup_terrain_scene(
     ));
 
     // spawn the fog volume
-    commands.spawn((
-        FogVolume::default(),
-        Transform::from_scale(Vec3::new(10.0, 1.0, 10.0)).with_translation(Vec3::Y * 0.5),
-    ));
+    // commands.spawn((
+    //     FogVolume::default(),
+    //     Transform::from_scale(Vec3::new(10.0, 1.0, 10.0)).with_translation(Vec3::Y * 0.5),
+    // ));
 
-    // Terrain
-    commands.spawn((
-        Terrain,
-        SceneRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/terrain/terrain.glb")),
-        ),
-        Transform::from_xyz(-1.0, 0.0, -0.5)
-            .with_scale(Vec3::splat(0.5))
-            .with_rotation(Quat::from_rotation_y(PI / 2.0)),
-    ));
+    // // Terrain
+    // commands.spawn((
+    //     Terrain,
+    //     SceneRoot(
+    //         asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/terrain/terrain.glb")),
+    //     ),
+    //     Transform::from_xyz(-1.0, 0.0, -0.5)
+    //         .with_scale(Vec3::splat(0.5))
+    //         .with_rotation(Quat::from_rotation_y(PI / 2.0)),
+    // ));
 
-    spawn_water(
-        &mut commands,
-        &asset_server,
-        &mut meshes,
-        &mut water_materials,
-    );
+    // spawn_water(
+    //     &mut commands,
+    //     &asset_server,
+    //     &mut meshes,
+    //     &mut water_materials,
+    // );
 }
 
 // Spawns the water plane.

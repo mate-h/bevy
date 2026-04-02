@@ -302,10 +302,13 @@ fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
     return mix(t_top, t_bottom, f32(hits));
 }
 
-/// Returns the observer's position in the atmosphere
+/// Returns the observer's position in atmosphere space.
+/// In atmosphere space, the planet center is at the origin (0, 0, 0).
+/// The transform converts between world space and atmosphere space.
 fn get_view_position() -> vec3<f32> {
-    var world_pos = view.world_position * settings.scene_units_to_m + vec3(0.0, atmosphere.bottom_radius, 0.0);
-    return clamp_to_surface(atmosphere, world_pos);
+    let camera_ws = view.world_position;
+    let pos_as = (atmosphere_transforms.atmosphere_from_world * vec4(camera_ws, 1.0)).xyz;
+    return clamp_to_surface(atmosphere, pos_as);
 }
 
 // We assume the `up` vector at the view position is the y axis, since the world is locally flat/level.

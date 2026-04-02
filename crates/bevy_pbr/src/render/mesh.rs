@@ -1,6 +1,7 @@
 use crate::contact_shadows::ViewContactShadowsUniformOffset;
 use crate::{
-    material_bind_groups::MaterialBindGroupSlot, resources::write_atmosphere_buffer,
+    material_bind_groups::{MaterialBindGroupIndex, MaterialBindGroupSlot},
+    resources::{write_atmosphere_buffer, ViewAtmosphereTextures},
     skin::skin_uniforms_from_world,
 };
 use alloc::sync::Arc;
@@ -378,7 +379,7 @@ pub fn check_views_need_specialization(
             Has<RenderViewLightProbes<IrradianceVolume>>,
         ),
         Has<OrderIndependentTransparencySettings>,
-        Has<ExtractedAtmosphere>,
+        Has<ViewAtmosphereTextures>,
         Has<ScreenSpaceReflectionsUniform>,
     )>,
 ) {
