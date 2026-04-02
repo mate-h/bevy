@@ -48,7 +48,7 @@ use tracing::info;
 
 use crate::{
     binding_arrays_are_usable, contact_shadows::ViewContactShadowsUniformOffset,
-    deferred::deferred_lighting, Bluenoise, ExtractedAtmosphere, MeshPipelineSet,
+    deferred::deferred_lighting, resources::ViewAtmosphereTextures, Bluenoise, MeshPipelineSet,
     MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, RenderViewLightProbes,
     ViewEnvironmentMapUniformOffset, ViewFogUniformOffset, ViewLightProbesUniformOffset,
     ViewLightsUniformOffset,
@@ -434,7 +434,7 @@ pub fn prepare_ssr_pipelines(
             Has<RenderViewLightProbes<EnvironmentMapLight>>,
             Has<NormalPrepass>,
             Has<MotionVectorPrepass>,
-            Has<ExtractedAtmosphere>,
+            Has<ViewAtmosphereTextures>,
         ),
         (
             With<ScreenSpaceReflectionsUniform>,

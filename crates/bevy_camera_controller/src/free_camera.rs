@@ -132,8 +132,8 @@ impl Default for FreeCamera {
             key_run: KeyCode::ShiftLeft,
             mouse_key_cursor_grab: MouseButton::Right,
             keyboard_key_toggle_cursor_grab: KeyCode::KeyM,
-            walk_speed: 5.0,
-            run_speed: 15.0,
+            walk_speed: 50000.0,
+            run_speed: 150000.0,
             // Approximation of ln(1.05)
             scroll_factor: 0.04879016,
             friction: 40.0,

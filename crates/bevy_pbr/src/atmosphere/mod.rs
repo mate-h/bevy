@@ -46,7 +46,8 @@ use bevy_core_pipeline::{
 };
 use bevy_ecs::{
     component::Component,
-    query::{Changed, QueryItem, With},
+    entity::Entity,
+    query::{Changed, QueryItem, With, Without},
     schedule::IntoScheduleConfigs,
     system::{lifetimeless::Read, Commands, Local, Query},
 };
@@ -58,7 +59,7 @@ use bevy_render::{
     render_resource::{DownlevelFlags, ShaderType, SpecializedRenderPipelines},
     renderer::RenderDevice,
     sync_component::SyncComponent,
-    sync_world::RenderEntity,
+    sync_world::{RenderEntity, SyncToRenderWorld},
     Extract, ExtractSchedule, RenderStartup,
 };
 use bevy_render::{
@@ -68,16 +69,21 @@ use bevy_render::{
     GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 
+use bevy_core_pipeline::schedule::camera_driver;
+use bevy_render::renderer::RenderGraphSystems;
 use bevy_shader::load_shader_library;
+use bevy_transform::components::GlobalTransform;
 use environment::{
     atmosphere_environment, init_atmosphere_probe_layout, init_atmosphere_probe_pipeline,
     prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
     prepare_probe_textures, AtmosphereEnvironmentMap,
 };
-use node::{atmosphere_luts, render_sky};
+use node::{atmosphere_luts, atmosphere_transmittance_multiscattering_luts, render_sky};
 use resources::{
-    prepare_atmosphere_transforms, prepare_atmosphere_uniforms, queue_render_sky_pipelines,
-    AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts,
+    prepare_atmosphere_transforms, prepare_atmosphere_uniforms,
+    prepare_view_atmosphere_bind_groups, prepare_view_atmosphere_textures,
+    prepare_view_atmospheres, queue_render_sky_pipelines, AtmosphereTransforms, GpuAtmosphere,
+    RenderSkyBindGroupLayouts,
 };
 use tracing::warn;
 
@@ -112,7 +118,13 @@ impl Plugin for AtmospherePlugin {
             UniformComponentPlugin::<GpuAtmosphereSettings>::default(),
         ))
         .register_required_components::<Atmosphere, AtmosphereSettings>()
-        .add_systems(Update, prepare_atmosphere_probe_components);
+        .add_systems(
+            Update,
+            (
+                prepare_atmosphere_probe_components,
+                sync_atmosphere_entities,
+            ),
+        );
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(ExtractSchedule, extract_atmosphere);
@@ -184,8 +196,25 @@ impl Plugin for AtmospherePlugin {
                     prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_view_atmospheres
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_atmosphere_bind_groups)
+                        .after(prepare_atmosphere_uniforms),
+                    prepare_view_atmosphere_textures
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_view_atmospheres)
+                        .after(prepare_atmosphere_textures),
+                    prepare_view_atmosphere_bind_groups
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_view_atmosphere_textures),
                     write_atmosphere_buffer.in_set(RenderSystems::PrepareResources),
                 ),
+            )
+            .add_systems(
+                bevy_render::renderer::RenderGraph,
+                atmosphere_transmittance_multiscattering_luts
+                    .in_set(RenderGraphSystems::Render)
+                    .before(camera_driver),
             )
             .add_systems(
                 Core3d,
@@ -207,18 +236,21 @@ impl Plugin for AtmospherePlugin {
 pub fn extract_atmosphere(
     mut commands: Commands,
     mut previous_len: Local<usize>,
-    query: Extract<Query<(RenderEntity, &Atmosphere), With<Camera3d>>>,
+    query: Extract<Query<(RenderEntity, &Atmosphere, &GlobalTransform)>>,
 ) {
     let mut values = Vec::with_capacity(*previous_len);
-    for (entity, item) in &query {
+    for (entity, item, transform) in &query {
         values.push((
             entity,
-            ExtractedAtmosphere {
-                bottom_radius: item.bottom_radius,
-                top_radius: item.top_radius,
-                ground_albedo: item.ground_albedo,
-                medium: item.medium.id(),
-            },
+            (
+                ExtractedAtmosphere {
+                    bottom_radius: item.bottom_radius,
+                    top_radius: item.top_radius,
+                    ground_albedo: item.ground_albedo,
+                    medium: item.medium.id(),
+                },
+                *transform,
+            ),
         ));
     }
     *previous_len = values.len();
@@ -378,7 +410,7 @@ impl SyncComponent for GpuAtmosphereSettings {
 
 impl ExtractComponent for GpuAtmosphereSettings {
     type QueryData = Read<AtmosphereSettings>;
-    type QueryFilter = (With<Camera3d>, With<Atmosphere>);
+    type QueryFilter = With<Atmosphere>;
     type Out = Self;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
@@ -386,9 +418,23 @@ impl ExtractComponent for GpuAtmosphereSettings {
     }
 }
 
-fn configure_camera_depth_usages(
-    mut cameras: Query<&mut Camera3d, (Changed<Camera3d>, With<ExtractedAtmosphere>)>,
+/// Ensures entities with [`Atmosphere`] are synced to the render world.
+fn sync_atmosphere_entities(
+    mut commands: Commands,
+    atmospheres: Query<Entity, (With<Atmosphere>, Without<SyncToRenderWorld>)>,
 ) {
+    for entity in &atmospheres {
+        commands.entity(entity).insert(SyncToRenderWorld);
+    }
+}
+
+fn configure_camera_depth_usages(
+    mut cameras: Query<&mut Camera3d, Changed<Camera3d>>,
+    has_atmospheres: Query<(), With<ExtractedAtmosphere>>,
+) {
+    if has_atmospheres.is_empty() {
+        return;
+    }
     for mut camera in &mut cameras {
         camera.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();
     }

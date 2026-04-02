@@ -16,16 +16,17 @@ use bevy_ecs::{
 };
 use bevy_image::ToExtents;
 use bevy_light::atmosphere::ScatteringMedium;
-use bevy_math::{Affine3A, Mat4, Vec3, Vec3A};
+use bevy_math::{Mat4, Vec3};
 use bevy_render::{
-    extract_component::ComponentUniforms,
+    extract_component::{ComponentUniforms, DynamicUniformIndex},
     render_asset::RenderAssets,
-    render_resource::{binding_types::*, *},
+    render_resource::{binding_types::*, PipelineCache, *},
     renderer::{RenderDevice, RenderQueue},
     texture::{CachedTexture, TextureCache},
-    view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
+    view::{Msaa, ViewUniform, ViewUniforms},
 };
 use bevy_shader::Shader;
+use bevy_transform::components::GlobalTransform;
 use bevy_utils::default;
 
 use super::GpuAtmosphereSettings;
@@ -134,6 +135,7 @@ impl AtmosphereBindGroupLayouts {
                 (
                     (0, uniform_buffer::<GpuAtmosphere>(true)),
                     (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
                     (4, uniform_buffer::<GpuLights>(true)),
                     // scattering medium luts and sampler
@@ -363,8 +365,80 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
     }
 }
 
+/// Information that the render world needs about each atmosphere for a view.
+#[derive(Clone, Copy)]
+pub struct ViewAtmosphere {
+    /// The atmosphere entity.
+    pub atmosphere_entity: Entity,
+    /// The offset of this atmosphere's transform within the [`AtmosphereTransforms`] buffer.
+    pub transform_offset: AtmosphereTransformsOffset,
+    /// The index of this atmosphere's uniforms within the component uniform buffers.
+    pub atmosphere_uniform_index: u32,
+    /// The index of this atmosphere's settings within the component uniform buffers.
+    pub settings_uniform_index: u32,
+}
+
+/// Specifies the list of atmospheres to render for a specific view.
+/// All atmosphere entities in the scene are rendered for every view.
+#[derive(Component)]
+pub struct ViewAtmospheres(pub Vec<ViewAtmosphere>);
+
+/// Indices for the primary (first) atmosphere, used by environment probe.
+#[derive(Component, Clone)]
+pub struct ViewAtmosphereIndices {
+    pub atmosphere_uniform_index: u32,
+    pub settings_uniform_index: u32,
+    pub transform_offset: u32,
+}
+
+/// Prepares the list of atmospheres to render for each view.
+/// Assigns all atmosphere entities to all views (cameras).
+pub(crate) fn prepare_view_atmospheres(
+    views: Query<Entity, With<Camera>>,
+    atmospheres: Query<
+        (
+            Entity,
+            &GpuAtmosphere,
+            &GpuAtmosphereSettings,
+            &AtmosphereTransformsOffset,
+            &DynamicUniformIndex<GpuAtmosphere>,
+            &DynamicUniformIndex<GpuAtmosphereSettings>,
+        ),
+        With<ExtractedAtmosphere>,
+    >,
+    mut commands: Commands,
+) {
+    let atmosphere_list: Vec<ViewAtmosphere> = atmospheres
+        .iter()
+        .map(
+            |(entity, _, _, transform_offset, atmosphere_idx, settings_idx)| ViewAtmosphere {
+                atmosphere_entity: entity,
+                transform_offset: *transform_offset,
+                atmosphere_uniform_index: atmosphere_idx.index(),
+                settings_uniform_index: settings_idx.index(),
+            },
+        )
+        .collect();
+
+    if atmosphere_list.is_empty() {
+        return;
+    }
+
+    let first = &atmosphere_list[0];
+    for view_entity in &views {
+        commands.entity(view_entity).insert((
+            ViewAtmospheres(atmosphere_list.clone()),
+            ViewAtmosphereIndices {
+                atmosphere_uniform_index: first.atmosphere_uniform_index,
+                settings_uniform_index: first.settings_uniform_index,
+                transform_offset: first.transform_offset.index(),
+            },
+        ));
+    }
+}
+
 pub(super) fn queue_render_sky_pipelines(
-    views: Query<(Entity, &Msaa), (With<Camera>, With<ExtractedAtmosphere>)>,
+    views: Query<(Entity, &Msaa), (With<Camera>, With<ViewAtmospheres>)>,
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<RenderSkyBindGroupLayouts>,
     mut specializer: ResMut<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>,
@@ -386,21 +460,31 @@ pub(super) fn queue_render_sky_pipelines(
     }
 }
 
+/// Per-atmosphere LUTs (view-independent).
 #[derive(Component)]
 pub struct AtmosphereTextures {
     pub transmittance_lut: CachedTexture,
     pub multiscattering_lut: CachedTexture,
-    pub sky_view_lut: CachedTexture,
+}
+
+/// Per-view LUTs (view-dependent).
+/// - `aerial_view_lut`: one frustum-aligned voxel grid per view (combines all atmospheres).
+/// - `sky_view_luts`: one sky dome per (view, atmosphere) pair, indexed by ViewAtmospheres order.
+/// - `transmittance_lut`: from the primary (first) atmosphere, for mesh pipeline.
+#[derive(Component)]
+pub struct ViewAtmosphereTextures {
     pub aerial_view_lut: CachedTexture,
+    pub sky_view_luts: Vec<CachedTexture>,
+    pub transmittance_lut: CachedTexture,
 }
 
 pub(super) fn prepare_atmosphere_textures(
-    views: Query<(Entity, &GpuAtmosphereSettings), With<ExtractedAtmosphere>>,
+    atmospheres: Query<(Entity, &GpuAtmosphereSettings), With<ExtractedAtmosphere>>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
     mut commands: Commands,
 ) {
-    for (entity, lut_settings) in &views {
+    for (entity, lut_settings) in &atmospheres {
         let transmittance_lut = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -429,25 +513,37 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let sky_view_lut = texture_cache.get(
-            &render_device,
-            TextureDescriptor {
-                label: Some("sky_view_lut"),
-                size: lut_settings.sky_view_lut_size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
+        commands.entity(entity).insert(AtmosphereTextures {
+            transmittance_lut,
+            multiscattering_lut,
+        });
+    }
+}
+
+pub(super) fn prepare_view_atmosphere_textures(
+    views: Query<(Entity, &ViewAtmospheres), With<Camera>>,
+    atmospheres: Query<(&GpuAtmosphereSettings, &AtmosphereTextures), With<ExtractedAtmosphere>>,
+    render_device: Res<RenderDevice>,
+    mut texture_cache: ResMut<TextureCache>,
+    mut commands: Commands,
+) {
+    for (view_entity, view_atmospheres) in &views {
+        if view_atmospheres.0.is_empty() {
+            continue;
+        }
+
+        let first_atmosphere = view_atmospheres.0.first().unwrap();
+        let Ok((first_settings, first_textures)) =
+            atmospheres.get(first_atmosphere.atmosphere_entity)
+        else {
+            continue;
+        };
 
         let aerial_view_lut = texture_cache.get(
             &render_device,
             TextureDescriptor {
                 label: Some("aerial_view_lut"),
-                size: lut_settings.aerial_view_lut_size.to_extents(),
+                size: first_settings.aerial_view_lut_size.to_extents(),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D3,
@@ -457,14 +553,162 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        commands.entity(entity).insert({
-            AtmosphereTextures {
-                transmittance_lut,
-                multiscattering_lut,
-                sky_view_lut,
+        let sky_view_luts: Vec<CachedTexture> = view_atmospheres
+            .0
+            .iter()
+            .filter_map(|va| {
+                let (settings, _) = atmospheres.get(va.atmosphere_entity).ok()?;
+                Some(texture_cache.get(
+                    &render_device,
+                    TextureDescriptor {
+                        label: Some("sky_view_lut"),
+                        size: settings.sky_view_lut_size.to_extents(),
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: TextureDimension::D2,
+                        format: TextureFormat::Rgba16Float,
+                        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                ))
+            })
+            .collect();
+
+        if sky_view_luts.len() == view_atmospheres.0.len() {
+            commands.entity(view_entity).insert(ViewAtmosphereTextures {
                 aerial_view_lut,
-            }
-        });
+                sky_view_luts,
+                transmittance_lut: first_textures.transmittance_lut.clone(),
+            });
+        }
+    }
+}
+
+/// Bind groups for sky view and aerial view LUT compute passes, stored per view.
+#[derive(Component)]
+pub(crate) struct ViewAtmosphereLutBindGroups {
+    pub sky_view_luts: Vec<BindGroup>,
+    pub aerial_view_lut: BindGroup,
+}
+
+pub(super) fn prepare_view_atmosphere_bind_groups(
+    views: Query<(Entity, &ViewAtmospheres, &ViewAtmosphereTextures), With<Camera>>,
+    atmospheres: Query<
+        (
+            &ExtractedAtmosphere,
+            &AtmosphereTextures,
+            &GpuAtmosphereSettings,
+        ),
+        With<ExtractedAtmosphere>,
+    >,
+    render_device: Res<RenderDevice>,
+    layouts: Res<AtmosphereBindGroupLayouts>,
+    atmosphere_sampler: Res<AtmosphereSampler>,
+    view_uniforms: Res<ViewUniforms>,
+    lights_uniforms: Res<LightMeta>,
+    atmosphere_transforms: Res<AtmosphereTransforms>,
+    atmosphere_uniforms: Res<ComponentUniforms<GpuAtmosphere>>,
+    settings_uniforms: Res<ComponentUniforms<GpuAtmosphereSettings>>,
+    gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
+    medium_sampler: Res<ScatteringMediumSampler>,
+    pipeline_cache: Res<PipelineCache>,
+    mut commands: Commands,
+) {
+    let atmosphere_binding = match atmosphere_uniforms.binding() {
+        Some(b) => b.clone(),
+        None => return,
+    };
+    let settings_binding = match settings_uniforms.binding() {
+        Some(b) => b.clone(),
+        None => return,
+    };
+    let transforms_binding = match atmosphere_transforms.uniforms().binding() {
+        Some(b) => b.clone(),
+        None => return,
+    };
+    let view_binding = match view_uniforms.uniforms.binding() {
+        Some(b) => b.clone(),
+        None => return,
+    };
+    let lights_binding = match lights_uniforms.view_gpu_lights.binding() {
+        Some(b) => b.clone(),
+        None => return,
+    };
+
+    for (view_entity, view_atmospheres, view_textures) in &views {
+        let mut sky_view_luts = Vec::with_capacity(view_atmospheres.0.len());
+        for (i, view_atmosphere) in view_atmospheres.0.iter().enumerate() {
+            let Ok((atmosphere, textures, _settings)) =
+                atmospheres.get(view_atmosphere.atmosphere_entity)
+            else {
+                continue;
+            };
+            let gpu_medium = match gpu_media.get(atmosphere.medium) {
+                Some(m) => m,
+                None => continue,
+            };
+            let sky_view_lut = match view_textures.sky_view_luts.get(i) {
+                Some(t) => t,
+                None => continue,
+            };
+            let bind_group = render_device.create_bind_group(
+                "sky_view_lut_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.sky_view_lut),
+                &BindGroupEntries::with_indices((
+                    (0, atmosphere_binding.clone()),
+                    (1, settings_binding.clone()),
+                    (2, transforms_binding.clone()),
+                    (3, view_binding.clone()),
+                    (4, lights_binding.clone()),
+                    (5, &gpu_medium.density_lut_view),
+                    (6, &gpu_medium.scattering_lut_view),
+                    (7, medium_sampler.sampler()),
+                    (8, &textures.transmittance_lut.default_view),
+                    (9, &textures.multiscattering_lut.default_view),
+                    (12, &**atmosphere_sampler),
+                    (13, &sky_view_lut.default_view),
+                )),
+            );
+            sky_view_luts.push(bind_group);
+        }
+
+        if sky_view_luts.len() != view_atmospheres.0.len() {
+            continue;
+        }
+
+        let first = view_atmospheres.0.first().unwrap();
+        let Ok((atmosphere, textures, _settings)) = atmospheres.get(first.atmosphere_entity) else {
+            continue;
+        };
+        let gpu_medium = match gpu_media.get(atmosphere.medium) {
+            Some(m) => m,
+            None => continue,
+        };
+        let aerial_view_lut = render_device.create_bind_group(
+            "aerial_view_lut_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.aerial_view_lut),
+            &BindGroupEntries::with_indices((
+                (0, atmosphere_binding.clone()),
+                (1, settings_binding.clone()),
+                (2, transforms_binding.clone()),
+                (3, view_binding.clone()),
+                (4, lights_binding.clone()),
+                (5, &gpu_medium.density_lut_view),
+                (6, &gpu_medium.scattering_lut_view),
+                (7, medium_sampler.sampler()),
+                (8, &textures.transmittance_lut.default_view),
+                (9, &textures.multiscattering_lut.default_view),
+                (12, &**atmosphere_sampler),
+                (13, &view_textures.aerial_view_lut.default_view),
+            )),
+        );
+
+        commands
+            .entity(view_entity)
+            .insert(ViewAtmosphereLutBindGroups {
+                sky_view_luts,
+                aerial_view_lut,
+            });
     }
 }
 
@@ -519,7 +763,7 @@ pub struct AtmosphereTransform {
     atmosphere_from_world: Mat4,
 }
 
-#[derive(Component)]
+#[derive(Component, Copy, Clone)]
 pub struct AtmosphereTransformsOffset {
     index: u32,
 }
@@ -532,21 +776,21 @@ impl AtmosphereTransformsOffset {
 }
 
 pub(super) fn prepare_atmosphere_transforms(
-    views: Query<
+    atmospheres: Query<
         (
             Entity,
-            &ExtractedView,
+            &GlobalTransform,
             &ExtractedAtmosphere,
             &GpuAtmosphereSettings,
         ),
-        (With<ExtractedAtmosphere>, With<Camera3d>),
+        With<ExtractedAtmosphere>,
     >,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut atmo_uniforms: ResMut<AtmosphereTransforms>,
     mut commands: Commands,
 ) {
-    let atmo_count = views.iter().len();
+    let atmo_count = atmospheres.iter().len();
     let Some(mut writer) =
         atmo_uniforms
             .uniforms
@@ -555,31 +799,12 @@ pub(super) fn prepare_atmosphere_transforms(
         return;
     };
 
-    for (entity, view, atmosphere, settings) in &views {
-        // Camera position in atmosphere space
-        let cam_pos = Vec3A::from(
-            view.world_from_view.translation() * settings.scene_units_to_m
-                + Vec3::new(0.0, atmosphere.bottom_radius, 0.0),
-        );
-
-        // Up is the local planet surface normal.
-        let atmo_y = cam_pos.try_normalize().unwrap_or(Vec3A::Y);
-
-        // World-horizontal reference for back, projected orthogonal to atmo_y.
-        let world_ref = Vec3A::NEG_Z;
-        let ref_horizontal = world_ref - atmo_y * atmo_y.dot(world_ref);
-        let atmo_z = ref_horizontal.normalize();
-        let atmo_x = atmo_y.cross(atmo_z).normalize();
-
-        let world_from_atmosphere = Mat4::from(Affine3A::from_cols(
-            atmo_x,
-            atmo_y,
-            atmo_z,
-            view.world_from_view.translation_vec3a(),
-        ));
-        // The shader only uses the upper-left 3x3 block, where transpose equals inverse for
-        // orthonormal matrices and is cheaper than computing the full inverse.
-        let atmosphere_from_world = world_from_atmosphere.transpose();
+    for (entity, global_transform, _atmosphere, settings) in &atmospheres {
+        // Use the atmosphere entity's world transform: maps from atmosphere space (origin at planet center, meters)
+        // to world space (scene units). Scale by scene_units_to_m so 1 atmosphere unit = 1 meter.
+        let world_from_atmosphere =
+            global_transform.to_matrix() * Mat4::from_scale(Vec3::splat(settings.scene_units_to_m));
+        let atmosphere_from_world = world_from_atmosphere.inverse();
 
         commands.entity(entity).insert(AtmosphereTransformsOffset {
             index: writer.write(&AtmosphereTransform {
@@ -590,49 +815,32 @@ pub(super) fn prepare_atmosphere_transforms(
     }
 }
 
+/// Bind groups for computing atmosphere LUTs, stored per atmosphere entity.
+/// Sky view and aerial view bind groups are created per-view in [`ViewAtmosphereLutBindGroups`].
 #[derive(Component)]
-pub(crate) struct AtmosphereBindGroups {
+pub(crate) struct AtmosphereLutBindGroups {
     pub transmittance_lut: BindGroup,
     pub multiscattering_lut: BindGroup,
-    pub sky_view_lut: BindGroup,
-    pub aerial_view_lut: BindGroup,
-    pub render_sky: BindGroup,
 }
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
 enum AtmosphereBindGroupError {
     #[error("Failed to prepare atmosphere bind groups. Atmosphere uniform buffer missing")]
     Atmosphere,
-    #[error(
-        "Failed to prepare atmosphere bind groups. AtmosphereTransforms uniform buffer missing"
-    )]
-    Transforms,
     #[error("Failed to prepare atmosphere bind groups. AtmosphereSettings uniform buffer missing")]
     Settings,
-    #[error("Failed to prepare atmosphere bind groups. View uniform buffer missing")]
-    ViewUniforms,
-    #[error("Failed to prepare atmosphere bind groups. Light uniform buffer missing")]
-    LightUniforms,
 }
 
+/// Prepares LUT bind groups for transmittance and multiscattering (per-atmosphere).
+/// Sky view and aerial view bind groups are created per-view in [`prepare_view_atmosphere_bind_groups`].
 pub(super) fn prepare_atmosphere_bind_groups(
-    views: Query<
-        (
-            Entity,
-            &ExtractedAtmosphere,
-            &AtmosphereTextures,
-            &ViewDepthTexture,
-            &Msaa,
-        ),
-        (With<Camera3d>, With<ExtractedAtmosphere>),
+    atmospheres: Query<
+        (Entity, &ExtractedAtmosphere, &AtmosphereTextures),
+        With<ExtractedAtmosphere>,
     >,
     render_device: Res<RenderDevice>,
     layouts: Res<AtmosphereBindGroupLayouts>,
-    render_sky_layouts: Res<RenderSkyBindGroupLayouts>,
     atmosphere_sampler: Res<AtmosphereSampler>,
-    view_uniforms: Res<ViewUniforms>,
-    lights_uniforms: Res<LightMeta>,
-    atmosphere_transforms: Res<AtmosphereTransforms>,
     atmosphere_uniforms: Res<ComponentUniforms<GpuAtmosphere>>,
     settings_uniforms: Res<ComponentUniforms<GpuAtmosphereSettings>>,
     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
@@ -640,7 +848,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
     pipeline_cache: Res<PipelineCache>,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    if views.iter().len() == 0 {
+    if atmospheres.is_empty() {
         return Ok(());
     }
 
@@ -648,26 +856,11 @@ pub(super) fn prepare_atmosphere_bind_groups(
         .binding()
         .ok_or(AtmosphereBindGroupError::Atmosphere)?;
 
-    let transforms_binding = atmosphere_transforms
-        .uniforms()
-        .binding()
-        .ok_or(AtmosphereBindGroupError::Transforms)?;
-
     let settings_binding = settings_uniforms
         .binding()
         .ok_or(AtmosphereBindGroupError::Settings)?;
 
-    let view_binding = view_uniforms
-        .uniforms
-        .binding()
-        .ok_or(AtmosphereBindGroupError::ViewUniforms)?;
-
-    let lights_binding = lights_uniforms
-        .view_gpu_lights
-        .binding()
-        .ok_or(AtmosphereBindGroupError::LightUniforms)?;
-
-    for (entity, atmosphere, textures, view_depth_texture, msaa) in &views {
+    for (entity, atmosphere, textures) in &atmospheres {
         let gpu_medium = gpu_media
             .get(atmosphere.medium)
             .ok_or(ScatteringMediumMissingError(atmosphere.medium))?;
@@ -707,86 +900,9 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )),
         );
 
-        let sky_view_lut = render_device.create_bind_group(
-            "sky_view_lut_bind_group",
-            &pipeline_cache.get_bind_group_layout(&layouts.sky_view_lut),
-            &BindGroupEntries::with_indices((
-                // uniforms
-                (0, atmosphere_binding.clone()),
-                (1, settings_binding.clone()),
-                (2, transforms_binding.clone()),
-                (3, view_binding.clone()),
-                (4, lights_binding.clone()),
-                // scattering medium luts and sampler
-                (5, &gpu_medium.density_lut_view),
-                (6, &gpu_medium.scattering_lut_view),
-                (7, medium_sampler.sampler()),
-                // atmosphere luts and sampler
-                (8, &textures.transmittance_lut.default_view),
-                (9, &textures.multiscattering_lut.default_view),
-                (12, &**atmosphere_sampler),
-                // sky view lut storage texture
-                (13, &textures.sky_view_lut.default_view),
-            )),
-        );
-
-        let aerial_view_lut = render_device.create_bind_group(
-            "sky_view_lut_bind_group",
-            &pipeline_cache.get_bind_group_layout(&layouts.aerial_view_lut),
-            &BindGroupEntries::with_indices((
-                // uniforms
-                (0, atmosphere_binding.clone()),
-                (1, settings_binding.clone()),
-                (3, view_binding.clone()),
-                (4, lights_binding.clone()),
-                // scattering medium luts and sampler
-                (5, &gpu_medium.density_lut_view),
-                (6, &gpu_medium.scattering_lut_view),
-                (7, medium_sampler.sampler()),
-                // atmosphere luts and sampler
-                (8, &textures.transmittance_lut.default_view),
-                (9, &textures.multiscattering_lut.default_view),
-                (12, &**atmosphere_sampler),
-                // aerial view lut storage texture
-                (13, &textures.aerial_view_lut.default_view),
-            )),
-        );
-
-        let render_sky = render_device.create_bind_group(
-            "render_sky_bind_group",
-            &pipeline_cache.get_bind_group_layout(if *msaa == Msaa::Off {
-                &render_sky_layouts.render_sky
-            } else {
-                &render_sky_layouts.render_sky_msaa
-            }),
-            &BindGroupEntries::with_indices((
-                // uniforms
-                (0, atmosphere_binding.clone()),
-                (1, settings_binding.clone()),
-                (2, transforms_binding.clone()),
-                (3, view_binding.clone()),
-                (4, lights_binding.clone()),
-                // scattering medium luts and sampler
-                (5, &gpu_medium.density_lut_view),
-                (6, &gpu_medium.scattering_lut_view),
-                (7, medium_sampler.sampler()),
-                // atmosphere luts and sampler
-                (8, &textures.transmittance_lut.default_view),
-                (9, &textures.multiscattering_lut.default_view),
-                (10, &textures.sky_view_lut.default_view),
-                (11, &textures.aerial_view_lut.default_view),
-                (12, &**atmosphere_sampler),
-                // view depth texture
-                (13, view_depth_texture.view()),
-            )),
-        );
-
-        commands.entity(entity).insert(AtmosphereBindGroups {
+        commands.entity(entity).insert(AtmosphereLutBindGroups {
             transmittance_lut,
             multiscattering_lut,
-            sky_view_lut,
-            aerial_view_lut,
-            render_sky,
         });
     }
 
@@ -821,10 +937,17 @@ pub struct AtmosphereBuffer {
 pub(crate) fn write_atmosphere_buffer(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    atmosphere_entity: Query<(&GpuAtmosphere, &GpuAtmosphereSettings), With<Camera3d>>,
+    views: Query<&ViewAtmospheres, With<Camera3d>>,
+    atmospheres: Query<(&GpuAtmosphere, &GpuAtmosphereSettings), With<ExtractedAtmosphere>>,
     mut atmosphere_buffer: ResMut<AtmosphereBuffer>,
 ) {
-    let Ok((atmosphere, settings)) = atmosphere_entity.single() else {
+    let Some(view_atmospheres) = views.iter().next() else {
+        return;
+    };
+    let Some(primary) = view_atmospheres.0.first() else {
+        return;
+    };
+    let Ok((atmosphere, settings)) = atmospheres.get(primary.atmosphere_entity) else {
         return;
     };
 
