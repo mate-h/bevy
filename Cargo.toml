@@ -4782,6 +4782,7 @@ wasm = false
 name = "volumetric_fog"
 path = "examples/3d/volumetric_fog.rs"
 doc-scrape-examples = true
+required-features = ["free_camera"]
 
 [package.metadata.example.volumetric_fog]
 name = "Volumetric fog"
