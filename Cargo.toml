@@ -892,6 +892,17 @@ category = "2D Rendering"
 wasm = true
 
 [[example]]
+name = "compositing_pattern_2d"
+path = "examples/2d/compositing_pattern_2d.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.compositing_pattern_2d]
+name = "2D Compositing Pattern"
+description = "Side-by-side compositing reference textures on a black background (PR #23049)"
+category = "2D Rendering"
+wasm = true
+
+[[example]]
 name = "cpu_draw"
 path = "examples/2d/cpu_draw.rs"
 doc-scrape-examples = true
