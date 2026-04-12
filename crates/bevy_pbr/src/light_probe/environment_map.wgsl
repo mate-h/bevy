@@ -106,7 +106,6 @@ fn compute_radiances(
     let N = input.N;
     let R = input.R;
     let perceptual_roughness = input.perceptual_roughness;
-    let roughness = input.roughness;
 
     var radiances: EnvironmentMapRadiances;
 
@@ -181,7 +180,7 @@ fn compute_radiances(
                 0.0).rgb * query_result.intensity * query_result.weight;
         }
 
-        var radiance_sample_dir = radiance_sample_direction(N, R, roughness);
+        var radiance_sample_dir = radiance_sample_direction(N, R, perceptual_roughness);
         radiance_sample_dir = compute_cubemap_sample_dir(
             world_position,
             radiance_sample_dir,
@@ -219,7 +218,6 @@ fn compute_radiances(
     let N = input.N;
     let R = input.R;
     let perceptual_roughness = input.perceptual_roughness;
-    let roughness = input.roughness;
 
     var radiances: EnvironmentMapRadiances;
 
@@ -259,7 +257,7 @@ fn compute_radiances(
             0.0).rgb * intensity;
     }
 
-    var radiance_sample_dir = radiance_sample_direction(N, R, roughness);
+    var radiance_sample_dir = radiance_sample_direction(N, R, perceptual_roughness);
     // Rotating the world space ray direction by the environment light map transform matrix, it is
     // equivalent to rotating the specular environment cubemap itself.
     radiance_sample_dir = (environment_map_uniform.transform * vec4(radiance_sample_dir, 1.0)).xyz;
@@ -400,8 +398,14 @@ fn environment_map_light(
 
 // "Moving Frostbite to Physically Based Rendering 3.0", listing 22
 // https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf#page=70
-fn radiance_sample_direction(N: vec3<f32>, R: vec3<f32>, roughness: f32) -> vec3<f32> {
-    let smoothness = saturate(1.0 - roughness);
-    let lerp_factor = smoothness * (sqrt(smoothness) + roughness);
+//
+// `perceptual_roughness` must match the parameterization used for specular mip LOD
+// (`radiance_level = perceptual_roughness * max_mip`) and for offline / runtime filtering
+// (e.g. `GeneratedEnvironmentMapLight`). Do not pass GGX α here — mixing α with
+// perceptual mips makes the N/R blend drift relative to blur and reads as sliding
+// parallax on local probe detail.
+fn radiance_sample_direction(N: vec3<f32>, R: vec3<f32>, perceptual_roughness: f32) -> vec3<f32> {
+    let smoothness = saturate(1.0 - perceptual_roughness);
+    let lerp_factor = smoothness * (sqrt(smoothness) + perceptual_roughness);
     return mix(N, R, lerp_factor);
 }

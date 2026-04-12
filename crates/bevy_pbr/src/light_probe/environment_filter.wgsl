@@ -1,185 +1,235 @@
 #import bevy_render::maths::PI
-#import bevy_pbr::{
-    lighting,
-    utils::{sample_cosine_hemisphere, dir_to_cube_uv, sample_cube_dir, hammersley_2d, rand_vec2f}
-}
+#import bevy_pbr::utils::{dir_to_cube_uv, sample_cube_dir, rand_vec2f}
 
 struct FilteringConstants {
     mip_level: f32,
     sample_count: u32,
-    roughness: f32,
+    perceptual_roughness: f32,
+    lod_resolution_bias: f32,
+    output_size: vec2u,
     noise_size_bits: vec2u,
 }
+
+/// Activision `coeffs_quad_32`: 7 × 5 × 3 × 24 vec4<f32>.
+const MS_POLY_VEC4S: u32 = 2520u;
+const NUM_MS_TAPS_DIV_4: u32 = 8u;
 
 @group(0) @binding(0) var input_texture: texture_2d_array<f32>;
 @group(0) @binding(1) var input_sampler: sampler;
 @group(0) @binding(2) var output_texture: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(3) var<uniform> constants: FilteringConstants;
 @group(0) @binding(4) var blue_noise_texture: texture_2d_array<f32>;
+@group(0) @binding(5) var<storage, read> ms_poly_table: array<vec4f, MS_POLY_VEC4S>;
 
-// Sample an environment map with a specific LOD
 fn sample_environment(dir: vec3f, level: f32) -> vec4f {
     let cube_uv = dir_to_cube_uv(dir);
     return textureSampleLevel(input_texture, input_sampler, cube_uv.uv, cube_uv.face, level);
 }
 
-// Blue noise randomization
-#ifdef HAS_BLUE_NOISE
-fn sample_noise(pixel_coords: vec2u) -> vec4f {
-    let noise_size = vec2u(1) << constants.noise_size_bits;
-    let noise_size_mask = noise_size - vec2u(1u);
-    let noise_coords = pixel_coords & noise_size_mask;
-    let uv = vec2f(noise_coords) / vec2f(noise_size);
-    return textureSampleLevel(blue_noise_texture, input_sampler, uv, 0u, 0.0);
-}
-#else
-// pseudo-random numbers using RNG
-fn sample_noise(pixel_coords: vec2u) -> vec4f {
-    var rng_state: u32 = (pixel_coords.x * 3966231743u) ^ (pixel_coords.y * 3928936651u);
-    let rnd = rand_vec2f(&rng_state);
-    return vec4f(rnd, 0.0, 0.0);
-}
-#endif
-
-// Calculate LOD for environment map lookup using filtered importance sampling
-fn calculate_environment_map_lod(pdf: f32, width: f32, samples: f32) -> f32 {
-    // Solid angle of current sample
-    let omega_s = 1.0 / (samples * pdf);
-    
-    // Solid angle of a texel in the environment map
-    let omega_p = 4.0 * PI / (6.0 * width * width);
-    
-    // Filtered importance sampling: compute the correct LOD
-    return 0.5 * log2(omega_s / omega_p);
+fn dir_axis(v: vec3f, ax: u32) -> f32 {
+    switch ax {
+        case 0u: { return v.x; }
+        case 1u: { return v.y; }
+        default: { return v.z; }
+    }
 }
 
-@compute
-@workgroup_size(8, 8, 1)
+// Unnormalized direction for this texel — same layout as `sample_cube_dir` (bevy_pbr::utils).
+// Activision reference used +uvc.y on ±X; Bevy uses −uvc.y, so we follow Bevy or mip0 (mirror)
+// and rougher mips disagree on +X/−X (vertical flip).
+fn cube_face_dir_unorm(uv: vec2f, face: u32) -> vec3f {
+    let uvc = 2.0 * uv - 1.0;
+    switch face {
+        case 0u: { return vec3f(1.0, -uvc.y, -uvc.x); }
+        case 1u: { return vec3f(-1.0, -uvc.y, uvc.x); }
+        case 2u: { return vec3f(uvc.x, 1.0, uvc.y); }
+        case 3u: { return vec3f(uvc.x, -1.0, -uvc.y); }
+        case 4u: { return vec3f(uvc.x, -uvc.y, 1.0); }
+        case 5u: { return vec3f(-uvc.x, -uvc.y, -1.0); }
+        default: { return vec3f(1.0, 0.0, 0.0); }
+    }
+}
+
+fn ms_poly(level: u32, band: u32, term: u32, ix: u32) -> vec4f {
+    let stride = 24u;
+    let b = level * 5u + band;
+    let t = b * 3u + term;
+    return ms_poly_table[t * stride + ix];
+}
+
+@compute @workgroup_size(8, 8, 1)
 fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
-    let size = textureDimensions(output_texture).xy;
-    let invSize = 1.0 / vec2f(size);
-    
+    // Guard: (0,0) extent → inf UVs → NaN directions → black; encase/uniform bugs or stale binds.
+    let size = max(constants.output_size, vec2u(1u));
+    let inv_size = 1.0 / vec2f(size);
+
     let coords = vec2u(global_id.xy);
     let face = global_id.z;
-    
+
     if (any(coords >= size)) {
         return;
     }
-    
-    // Convert texture coordinates to direction vector
-    let uv = (vec2f(coords) + 0.5) * invSize;
+
+    let uv = (vec2f(coords) + 0.5) * inv_size;
     let normal = sample_cube_dir(uv, face);
-    
-    // For radiance map, view direction = normal for perfect reflection
-    let view = normal;
-    
-    // Convert perceptual roughness to physical microfacet roughness
-    let perceptual_roughness = constants.roughness;
-    let roughness = lighting::perceptualRoughnessToRoughness(perceptual_roughness);
-    
-    // Get blue noise offset for stratification
-    let vector_noise = sample_noise(coords);
-    
-    var radiance = vec3f(0.0);
-    var total_weight = 0.0;
-    
-    // Skip sampling for mirror reflection (roughness = 0)
-    if (roughness < 0.01) {
-        radiance = sample_environment(normal, 0.0).rgb;
+    let perceptual_roughness = constants.perceptual_roughness;
+
+    // Match runtime IBL: `radiance_level = perceptual_roughness * (num_levels - 1)` uses
+    // perceptual roughness, not alpha. Don't use `perceptualRoughnessToRoughness` here or the
+    // Filament clamp (min 0.089) collapses several low mips into the same near-mirror path.
+    if (perceptual_roughness < 0.001) {
+        let radiance = sample_environment(normal, 0.0).rgb;
         textureStore(output_texture, coords, face, vec4f(radiance, 1.0));
         return;
     }
-    
-    // For higher roughness values, use importance sampling
-    let sample_count = constants.sample_count;
-    
-    for (var i = 0u; i < sample_count; i++) {
-        // Get sample coordinates from Hammersley sequence with blue noise offset
-        var xi = hammersley_2d(i, sample_count);
-        xi = fract(xi + vector_noise.rg); // Apply Cranley-Patterson rotation
-        
-        // Sample the GGX distribution with the spherical-cap VNDF method
-        let light_dir = lighting::sample_visible_ggx(xi, roughness, normal, view);
-        
-        // Calculate weight (N·L)
-        let NdotL = dot(normal, light_dir);
-        
-        if (NdotL > 0.0) {
-            // Reconstruct the microfacet half-vector from view and light and compute PDF terms
-            let half_vector = normalize(view + light_dir);
-            let NdotH = dot(normal, half_vector);
-            let NdotV = dot(normal, view);
-            
-            // Get the geometric shadowing term
-            let G = lighting::G_Smith(NdotV, NdotL, roughness);
-            
-            // PDF that matches the bounded-VNDF sampling
-            let pdf = lighting::ggx_vndf_pdf(view, NdotH, roughness);
-            
-            // Calculate LOD using filtered importance sampling
-            // This is crucial to avoid fireflies and improve quality
-            let width = f32(size.x);
-            let lod = calculate_environment_map_lod(pdf, width, f32(sample_count));
-            
-            // Get source mip level - ensure we don't go negative
-            let source_mip = max(0.0, lod);
-            
-            // Sample environment map with the light direction
-            var sample_color = sample_environment(light_dir, source_mip).rgb;
-            
-            // Accumulate weighted sample, including geometric term
-            radiance += sample_color * NdotL * G;
-            total_weight += NdotL * G;
+
+    // Seven polynomial rows (128²…1²); map perceptual roughness [0, 1] → [0, 6].
+    let table_level = u32(clamp(round(perceptual_roughness * 6.0), 0.0, 6.0));
+    let max_lod = f32(textureNumLevels(input_texture) - 1u);
+
+    let dir = cube_face_dir_unorm(uv, face);
+    let ad = abs(dir);
+
+    var color_rgb = vec3f(0.0);
+    var color_w = 0.0;
+
+    for (var axis = 0u; axis < 3u; axis++) {
+        let other_axis0 = 1u - (axis & 1u) - (axis >> 1u);
+        let other_axis1 = 2u - (axis >> 1u);
+        let a0 = dir_axis(ad, other_axis0);
+        let a1 = dir_axis(ad, other_axis1);
+        var frameweight = (max(a0, a1) - 0.75) / 0.25;
+        if (frameweight <= 0.0) {
+            continue;
+        }
+
+        var upv = vec3f(0.0);
+        switch axis {
+            case 0u: { upv = vec3f(1.0, 0.0, 0.0); }
+            case 1u: { upv = vec3f(0.0, 1.0, 0.0); }
+            default: { upv = vec3f(0.0, 0.0, 1.0); }
+        }
+
+        let frame_z = normalize(dir);
+        var frame_x = cross(upv, frame_z);
+        let x_len = length(frame_x);
+        if (x_len < 1e-20) {
+            continue;
+        }
+        frame_x = frame_x / x_len;
+        let frame_y = cross(frame_z, frame_x);
+
+        var nx = dir_axis(dir, other_axis0);
+        var ny = dir_axis(dir, other_axis1);
+        let nz = dir_axis(ad, axis);
+        let nmax_xy = max(abs(ny), abs(nx));
+        nx = nx / nmax_xy;
+        ny = ny / nmax_xy;
+
+        var theta: f32;
+        if (ny < nx) {
+            if (ny <= -0.999) {
+                theta = nx;
+            } else {
+                theta = ny;
+            }
+        } else {
+            if (ny >= 0.999) {
+                theta = -nx;
+            } else {
+                theta = -ny;
+            }
+        }
+
+        var phi: f32;
+        if (nz <= -0.999) {
+            phi = -nmax_xy;
+        } else if (nz >= 0.999) {
+            phi = nmax_xy;
+        } else {
+            phi = nz;
+        }
+
+        let theta2 = theta * theta;
+        let phi2 = phi * phi;
+
+        for (var i_super = 0u; i_super < NUM_MS_TAPS_DIV_4; i_super++) {
+            let coeff_ix = NUM_MS_TAPS_DIV_4 * axis + i_super;
+
+            var c0d: array<vec4f, 3u>;
+            var c1d: array<vec4f, 3u>;
+            var c2d: array<vec4f, 3u>;
+            var c_l: array<vec4f, 3u>;
+            var c_w: array<vec4f, 3u>;
+            for (var ic = 0u; ic < 3u; ic++) {
+                c0d[ic] = ms_poly(table_level, 0u, ic, coeff_ix);
+                c1d[ic] = ms_poly(table_level, 1u, ic, coeff_ix);
+                c2d[ic] = ms_poly(table_level, 2u, ic, coeff_ix);
+                c_l[ic] = ms_poly(table_level, 3u, ic, coeff_ix);
+                c_w[ic] = ms_poly(table_level, 4u, ic, coeff_ix);
+            }
+
+            for (var i_sub = 0u; i_sub < 4u; i_sub++) {
+                let d0 = c0d[0][i_sub] + c0d[1][i_sub] * theta2 + c0d[2][i_sub] * phi2;
+                let d1 = c1d[0][i_sub] + c1d[1][i_sub] * theta2 + c1d[2][i_sub] * phi2;
+                let d2 = c2d[0][i_sub] + c2d[1][i_sub] * theta2 + c2d[2][i_sub] * phi2;
+                var sample_dir = frame_x * d0 + frame_y * d1 + frame_z * d2;
+                var sample_level = c_l[0][i_sub] + c_l[1][i_sub] * theta2 + c_l[2][i_sub] * phi2;
+                var sample_weight = c_w[0][i_sub] + c_w[1][i_sub] * theta2 + c_w[2][i_sub] * phi2;
+                sample_weight *= frameweight;
+
+                let ax = max(abs(sample_dir.x), max(abs(sample_dir.y), abs(sample_dir.z)));
+                sample_dir = sample_dir / ax;
+                sample_level += 0.75 * log2(dot(sample_dir, sample_dir));
+                sample_level = clamp(sample_level + constants.lod_resolution_bias, 0.0, max_lod);
+
+                let radiance_s = sample_environment(sample_dir, sample_level).rgb;
+                color_rgb += radiance_s * sample_weight;
+                color_w += sample_weight;
+            }
         }
     }
-    
-    // Normalize by total weight
-    if (total_weight > 0.0) {
-        radiance = radiance / total_weight;
+
+    var radiance = vec3f(0.0);
+    if (color_w > 1e-20) {
+        radiance = color_rgb / color_w;
+    } else {
+        radiance = sample_environment(normal, max_lod).rgb;
     }
-    
-    // Write result to output texture
-    textureStore(output_texture, coords, face, vec4f(radiance, 1.0));
+
+    textureStore(output_texture, coords, face, vec4f(max(radiance, vec3f(0.0)), 1.0));
 }
 
-@compute
-@workgroup_size(8, 8, 1)
+#import bevy_pbr::utils::sample_cosine_hemisphere
+
+@compute @workgroup_size(8, 8, 1)
 fn generate_irradiance_map(@builtin(global_invocation_id) global_id: vec3u) {
-    let size = textureDimensions(output_texture).xy;
-    let invSize = 1.0 / vec2f(size);
-    
+    let size = max(constants.output_size, vec2u(1u));
+    let inv_size = 1.0 / vec2f(size);
+
     let coords = vec2u(global_id.xy);
     let face = global_id.z;
-    
+
     if (any(coords >= size)) {
         return;
     }
-    
-    // Convert texture coordinates to direction vector
-    let uv = (vec2f(coords) + 0.5) * invSize;
+
+    let uv = (vec2f(coords) + 0.5) * inv_size;
     let normal = sample_cube_dir(uv, face);
-    
+
     var irradiance = vec3f(0.0);
-    
-    // Use uniform sampling on a hemisphere
+
     for (var i = 0u; i < constants.sample_count; i++) {
-        // Build a deterministic RNG seed for this pixel / sample
-        // 4 randomly chosen 32-bit primes
         var rng: u32 = (coords.x * 2131358057u) ^ (coords.y * 3416869721u) ^ (face * 1199786941u) ^ (i * 566200673u);
 
-        // Sample a direction from the upper hemisphere around the normal
-        var sample_dir = sample_cosine_hemisphere(normal, &rng);
+        let sample_dir = sample_cosine_hemisphere(normal, &rng);
 
-        // Sample environment with level 0 (no mip)
-        var sample_color = sample_environment(sample_dir, 0.0).rgb;
-        
-        // Accumulate the contribution
+        let sample_color = sample_environment(sample_dir, 0.0).rgb;
+
         irradiance += sample_color;
     }
 
-    // Normalize by number of samples (cosine-weighted sampling already accounts for PDF)
     irradiance = irradiance / f32(constants.sample_count);
-    
-    // Write result to output texture
+
     textureStore(output_texture, coords, face, vec4f(irradiance, 1.0));
 }

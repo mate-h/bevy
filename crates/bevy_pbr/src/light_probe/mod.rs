@@ -34,6 +34,7 @@ use bevy_transform::{components::Transform, prelude::GlobalTransform};
 use bitflags::bitflags;
 use tracing::error;
 
+use alloc::vec::Vec;
 use core::{any::TypeId, hash::Hash, ops::Deref};
 
 use crate::{
@@ -44,6 +45,23 @@ use crate::{
 pub mod environment_map;
 pub mod generate;
 pub mod irradiance_volume;
+
+pub(crate) mod manson_sloan;
+
+/// Total size in bytes of the embedded `manson_sloan_poly_table.bin` blob.
+pub const MANSON_SLOAN_FILTER_TABLE_BYTE_LEN: usize = manson_sloan::FILTER_TABLE_BYTES.len();
+
+/// Polynomial table rows (one per reference cubemap mip128²…1²).
+pub const MANSON_SLOAN_FILTER_TABLE_MIPS: usize = manson_sloan::SPECULAR_TABLE_LEVELS;
+
+/// Returns a copy of the embedded Manson–Sloan polynomial filter table for [`GeneratedEnvironmentMapLight`](bevy_light::probe::GeneratedEnvironmentMapLight).
+///
+/// The renderer uploads [`manson_sloan::FILTER_TABLE_BYTES`] at startup; regenerate
+/// `assets/manson_sloan_poly_table.bin` with `assets/build_manson_sloan_poly_table.py` to swap coefficients.
+#[inline]
+pub fn manson_sloan_filter_table_bytes() -> Vec<u8> {
+    manson_sloan::FILTER_TABLE_BYTES.to_vec()
+}
 
 /// The maximum number of each type of light probe that each view will consider.
 ///

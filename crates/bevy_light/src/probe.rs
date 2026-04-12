@@ -271,6 +271,11 @@ pub struct GeneratedEnvironmentMapLight {
     /// Whether this light contributes diffuse lighting to meshes that already
     /// have baked lightmaps.
     pub affects_lightmapped_mesh_diffuse: bool,
+
+    /// When greater than zero, blends the newly filtered specular cubemap toward the previous
+    /// frame (`out = lerp(history, filtered, clamp(alpha, 0, 1))`) to reduce flicker on dynamic probes.
+    #[reflect(ignore)]
+    pub temporal_blend: f32,
 }
 
 impl Default for GeneratedEnvironmentMapLight {
@@ -280,6 +285,7 @@ impl Default for GeneratedEnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
+            temporal_blend: 0.0,
         }
     }
 }
