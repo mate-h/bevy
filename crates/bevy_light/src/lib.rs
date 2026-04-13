@@ -36,7 +36,7 @@ mod probe;
 pub use probe::{
     automatically_add_parallax_correction_components, AtmosphereEnvironmentMapLight,
     EnvironmentMapLight, GeneratedEnvironmentMapLight, IrradianceVolume, LightProbe,
-    ParallaxCorrection, Skybox,
+    ParallaxCorrection, Skybox, SpecularEnvironmentIntegration,
 };
 pub mod atmosphere;
 pub use atmosphere::Atmosphere;
@@ -73,7 +73,7 @@ pub mod prelude {
     pub use crate::{
         light_consts, AmbientLight, DirectionalLight, EnvironmentMapLight,
         GeneratedEnvironmentMapLight, GlobalAmbientLight, LightProbe, PointLight, RectLight,
-        SpotLight,
+        SpecularEnvironmentIntegration, SpotLight,
     };
 
     #[doc(hidden)]

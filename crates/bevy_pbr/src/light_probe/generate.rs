@@ -57,7 +57,7 @@ use bevy_render::{
 // [Lambertian convolution]: https://bruop.github.io/ibl/#:~:text=Lambertian%20Diffuse%20Component
 // [Manson–Sloan gather]: https://diglib.eg.org/handle/10.2312/egsr.20151131
 
-use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight};
+use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight, SpecularEnvironmentIntegration};
 use bevy_shader::ShaderDefVal;
 use tracing::info;
 
@@ -93,7 +93,8 @@ pub struct GeneratorPipelines {
     pub temporal_blend: CachedComputePipelineId,
 }
 
-/// Uniforms for quadratic B-spline mip generation (one dispatch per mip level).
+/// Uniforms for Manson–Sloan pass-1 cubemap downsample (4-tap Jacobian-weighted corners per
+/// `downsample_cubemap.txt`; one dispatch per mip level).
 #[derive(Clone, Copy, ShaderType)]
 #[repr(C)]
 pub struct QuadraticDownsampleUniforms {
@@ -1081,6 +1082,7 @@ pub fn generate_environment_map_light(
             intensity: filtered_env_map.intensity,
             rotation: filtered_env_map.rotation,
             affects_lightmapped_mesh_diffuse: filtered_env_map.affects_lightmapped_mesh_diffuse,
+            specular_environment_integration: SpecularEnvironmentIntegration::MansonSloan,
         });
     }
 }

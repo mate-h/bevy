@@ -57,6 +57,19 @@ fn ms_poly(level: u32, band: u32, term: u32, ix: u32) -> vec4f {
     return ms_poly_table[t * stride + ix];
 }
 
+// Linearly interpolate polynomial coeffs between adjacent table rows. The Activision table has
+// only **7** roughness rows (128²…1²); hard `round(perceptual * 6)` jumps the kernel centroid and
+// reads as horizontal/vertical drift on cube faces when roughness changes. See Manson & Sloan
+// EGSR 2015 §5–6 (spatially varying polynomials; one row per mip in the reference optimizer).
+fn ms_poly_lerp(table_t: f32, band: u32, term: u32, ix: u32) -> vec4f {
+    let lo = u32(clamp(floor(table_t), 0.0, 6.0));
+    let hi = u32(clamp(ceil(table_t), 0.0, 6.0));
+    let w = table_t - f32(lo);
+    let a = ms_poly(lo, band, term, ix);
+    let b = ms_poly(hi, band, term, ix);
+    return mix(a, b, w);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     // Guard: (0,0) extent → inf UVs → NaN directions → black; encase/uniform bugs or stale binds.
@@ -74,17 +87,17 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     let normal = sample_cube_dir(uv, face);
     let perceptual_roughness = constants.perceptual_roughness;
 
-    // Match runtime IBL: `radiance_level = perceptual_roughness * (num_levels - 1)` uses
-    // perceptual roughness, not alpha. Don't use `perceptualRoughnessToRoughness` here or the
-    // Filament clamp (min 0.089) collapses several low mips into the same near-mirror path.
+    // Match `SpecularEnvironmentIntegration::MansonSloan` shading: LOD uses perceptual roughness
+    // (not GGX alpha). Don't use `perceptualRoughnessToRoughness` here or the Filament clamp
+    // (min 0.089) collapses several low mips into the same near-mirror path.
     if (perceptual_roughness < 0.001) {
         let radiance = sample_environment(normal, 0.0).rgb;
         textureStore(output_texture, coords, face, vec4f(radiance, 1.0));
         return;
     }
 
-    // Seven polynomial rows (128²…1²); map perceptual roughness [0, 1] → [0, 6].
-    let table_level = u32(clamp(round(perceptual_roughness * 6.0), 0.0, 6.0));
+    // Seven table rows → continuous index in [0, 6] for coefficient interpolation.
+    let table_t = clamp(perceptual_roughness * 6.0, 0.0, 6.0);
     let max_lod = f32(textureNumLevels(input_texture) - 1u);
 
     let dir = cube_face_dir_unorm(uv, face);
@@ -162,11 +175,11 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
             var c_l: array<vec4f, 3u>;
             var c_w: array<vec4f, 3u>;
             for (var ic = 0u; ic < 3u; ic++) {
-                c0d[ic] = ms_poly(table_level, 0u, ic, coeff_ix);
-                c1d[ic] = ms_poly(table_level, 1u, ic, coeff_ix);
-                c2d[ic] = ms_poly(table_level, 2u, ic, coeff_ix);
-                c_l[ic] = ms_poly(table_level, 3u, ic, coeff_ix);
-                c_w[ic] = ms_poly(table_level, 4u, ic, coeff_ix);
+                c0d[ic] = ms_poly_lerp(table_t, 0u, ic, coeff_ix);
+                c1d[ic] = ms_poly_lerp(table_t, 1u, ic, coeff_ix);
+                c2d[ic] = ms_poly_lerp(table_t, 2u, ic, coeff_ix);
+                c_l[ic] = ms_poly_lerp(table_t, 3u, ic, coeff_ix);
+                c_w[ic] = ms_poly_lerp(table_t, 4u, ic, coeff_ix);
             }
 
             for (var i_sub = 0u; i_sub < 4u; i_sub++) {

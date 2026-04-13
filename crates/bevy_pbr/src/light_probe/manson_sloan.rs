@@ -18,6 +18,20 @@
 //! Sample LODs in the table assume **128²** reference faces; the filter pass adds
 //! [`crate::light_probe::generate::FilteringConstants::lod_resolution_bias`] =
 //! **`log2(face_size / 128)`** when sampling the mip chain (paper §6).
+//!
+//! Runtime shading pairs with `bevy_light::SpecularEnvironmentIntegration::MansonSloan` (Listing 22
+//! disabled; reflection vector `R`; same `F_ab` as GGX until an MS-specific DFG exists).
+//!
+//! ## Residual drift vs. importance-sampled / glTF IBL
+//!
+//! - **Table rows:** Seven optimized roughness levels; `environment_filter.wgsl` interpolates
+//!   adjacent rows (`ms_poly_lerp`) so gather coefficients vary continuously with roughness.
+//! - **`lod_resolution_bias`:** `log2(face_size / 128)` aligns paper §5 / eq. 4 mip–Jacobian with
+//!   non-128 sources; mis-tuning shifts how detail collapses across roughness.
+//! - **Three axial frames + θ,φ (Fig. 5–6):** Overlapping polar frames are inherently anisotropic
+//!   on cube faces; handoff regions can differ per face from spherical GGX preintegration.
+//! - **Pass-1 boundaries:** Quadratic downsample clamps the 4×4 B-spline footprint at face edges,
+//!   asymmetrically reweighting boundary texels vs. the paper’s interior-only bilinear dots (Fig. 2).
 
 /// Cubemap mip rows in the polynomial table (128 → 1 in seven steps).
 pub const SPECULAR_TABLE_LEVELS: usize = 7;

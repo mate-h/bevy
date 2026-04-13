@@ -171,6 +171,9 @@ pub struct LightProbesUniform {
     ///
     /// This will be 1 if the map does affect lightmapped meshes or 0 otherwise.
     view_environment_map_affects_lightmapped_mesh_diffuse: u32,
+
+    /// 1 if the view uses Manson–Sloan specular IBL, else 0 (GGX split-sum).
+    view_manson_sloan_environment_ibl: u32,
 }
 
 /// A GPU buffer that stores information about all light probes.
@@ -255,6 +258,8 @@ bitflags! {
         /// See the comments in [`bevy_light::NoParallaxCorrection`] for more
         /// information.
         const ENABLE_PARALLAX_CORRECTION = 2;
+        /// Specular IBL uses the Manson–Sloan integration path (`SpecularEnvironmentIntegration::MansonSloan`).
+        const MANSON_SLOAN_ENVIRONMENT_IBL = 4;
     }
 }
 
@@ -631,6 +636,12 @@ fn upload_light_probes(
                 }
                 None => 1,
             },
+            view_manson_sloan_environment_ibl: match maybe_view_light_probe_info {
+                Some(view_light_probe_info) => {
+                    view_light_probe_info.manson_sloan_environment_ibl as u32
+                }
+                None => 0,
+            },
         };
 
         // Add any environment maps that [`gather_light_probes`] found to the
@@ -671,6 +682,7 @@ impl Default for LightProbesUniform {
             smallest_specular_mip_level_for_view: 0,
             intensity_for_view: 1.0,
             view_environment_map_affects_lightmapped_mesh_diffuse: 1,
+            view_manson_sloan_environment_ibl: 0,
         }
     }
 }
