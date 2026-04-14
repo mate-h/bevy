@@ -50,7 +50,7 @@ use bevy_ecs::{
     system::lifetimeless::Read,
 };
 use bevy_image::Image;
-use bevy_light::{EnvironmentMapLight, ParallaxCorrection};
+use bevy_light::{EnvironmentMapLight, ParallaxCorrection, SpecularEnvironmentIntegration};
 use bevy_math::{Affine3A, Vec3};
 use bevy_render::{
     extract_instances::ExtractInstance,
@@ -136,6 +136,8 @@ pub struct EnvironmentMapViewLightProbeInfo {
     /// Whether this lightmap affects the diffuse lighting of lightmapped
     /// meshes.
     pub(crate) affects_lightmapped_mesh_diffuse: bool,
+    /// Matches [`EnvironmentMapLight::specular_environment_integration`] for the view cubemap.
+    pub(crate) manson_sloan_environment_ibl: bool,
 }
 
 impl ExtractInstance for EnvironmentMapIds {
@@ -279,6 +281,9 @@ impl LightProbeComponent for EnvironmentMapLight {
         }) {
             flags.insert(RenderLightProbeFlags::ENABLE_PARALLAX_CORRECTION);
         }
+        if self.specular_environment_integration == SpecularEnvironmentIntegration::MansonSloan {
+            flags.insert(RenderLightProbeFlags::MANSON_SLOAN_ENVIRONMENT_IBL);
+        }
         flags
     }
 
@@ -295,6 +300,7 @@ impl LightProbeComponent for EnvironmentMapLight {
             specular_map: specular_map_handle,
             intensity,
             affects_lightmapped_mesh_diffuse,
+            specular_environment_integration,
             ..
         }) = view_component
             && let (Some(_), Some(specular_map)) = (
@@ -314,6 +320,8 @@ impl LightProbeComponent for EnvironmentMapLight {
                         - 1,
                     intensity: *intensity,
                     affects_lightmapped_mesh_diffuse: *affects_lightmapped_mesh_diffuse,
+                    manson_sloan_environment_ibl: *specular_environment_integration
+                        == SpecularEnvironmentIntegration::MansonSloan,
                 });
         };
 
@@ -344,6 +352,7 @@ impl Default for EnvironmentMapViewLightProbeInfo {
             smallest_specular_mip_level: 0,
             intensity: 1.0,
             affects_lightmapped_mesh_diffuse: true,
+            manson_sloan_environment_ibl: false,
         }
     }
 }

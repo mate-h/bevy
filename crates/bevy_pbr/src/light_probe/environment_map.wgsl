@@ -5,7 +5,8 @@
 #import bevy_pbr::mesh_view_bindings::light_probes
 #import bevy_pbr::mesh_view_bindings::environment_map_uniform
 #import bevy_pbr::mesh_view_types::{
-    LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, LIGHT_PROBE_FLAG_PARALLAX_CORRECT
+    LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, LIGHT_PROBE_FLAG_PARALLAX_CORRECT,
+    LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL
 }
 #import bevy_pbr::lighting::{F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT}
 #import bevy_pbr::clustered_forward::ClusterableObjectIndexRanges
@@ -90,6 +91,28 @@ fn compute_cubemap_sample_dir(
     return sample_dir;
 }
 
+// Frostbite Listing 22 — only for GGX split-sum (`SpecularEnvironmentIntegration::GgxSplitSum`) cubemaps.
+// https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf#page=70
+fn radiance_sample_direction_ggx_split_sum(N: vec3<f32>, R: vec3<f32>, mip_roughness: f32) -> vec3<f32> {
+    let smoothness = saturate(1.0 - mip_roughness);
+    let lerp_factor = smoothness * (sqrt(smoothness) + mip_roughness);
+    return mix(N, R, lerp_factor);
+}
+
+// Dominant direction for specular environment sampling. GGX split-sum uses Listing 22 above;
+// Manson-Sloan uses `R` to align with the paper prefilter of integral L(l) D(h) dl (isotropic NDF).
+fn environment_specular_sample_direction(
+    N: vec3<f32>,
+    R: vec3<f32>,
+    mip_roughness: f32,
+    manson_sloan_ibl: bool,
+) -> vec3<f32> {
+    if (manson_sloan_ibl) {
+        return R;
+    }
+    return radiance_sample_direction_ggx_split_sum(N, R, mip_roughness);
+}
+
 // Define two versions of this function, one for the case in which there are
 // multiple light probes and one for the case in which only the view light probe
 // is present.
@@ -139,10 +162,12 @@ fn compute_radiances(
                 vec4(0.0, 0.0, 0.0, 1.0)
             );
             query_result.parallax_correction_bounds = vec3(0.0);
+            query_result.flags = 0u;
             if light_probes.view_environment_map_affects_lightmapped_mesh_diffuse != 0u {
-                query_result.flags = LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE;
-            } else {
-                query_result.flags = 0u;
+                query_result.flags |= LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE;
+            }
+            if light_probes.view_manson_sloan_environment_ibl != 0u {
+                query_result.flags |= LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL;
             }
             query_result.weight = 1.0 - total_weight;
         }
@@ -153,8 +178,12 @@ fn compute_radiances(
         }
 
         // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
-        let radiance_level = perceptual_roughness * f32(textureNumLevels(
+        let max_specular_mip = f32(textureNumLevels(
             bindings::specular_environment_maps[query_result.texture_index]) - 1u);
+        let manson_sloan_ibl =
+            (query_result.flags & LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL) != 0u;
+        let mip_roughness = select(roughness, perceptual_roughness, manson_sloan_ibl);
+        let radiance_level = mip_roughness * max_specular_mip;
 
         // If we're lightmapped, and we shouldn't accumulate diffuse light from the
         // environment map, note that.
@@ -181,7 +210,8 @@ fn compute_radiances(
                 0.0).rgb * query_result.intensity * query_result.weight;
         }
 
-        var radiance_sample_dir = radiance_sample_direction(N, R, roughness);
+        var radiance_sample_dir =
+            environment_specular_sample_direction(N, R, mip_roughness, manson_sloan_ibl);
         radiance_sample_dir = compute_cubemap_sample_dir(
             world_position,
             radiance_sample_dir,
@@ -233,7 +263,9 @@ fn compute_radiances(
     // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
     // Technically we could use textureNumLevels(specular_environment_map) - 1 here, but we use a uniform
     // because textureNumLevels() does not work on WebGL2
-    let radiance_level = perceptual_roughness * f32(light_probes.smallest_specular_mip_level_for_view);
+    let manson_sloan_ibl = light_probes.view_manson_sloan_environment_ibl != 0u;
+    let mip_roughness = select(roughness, perceptual_roughness, manson_sloan_ibl);
+    let radiance_level = mip_roughness * f32(light_probes.smallest_specular_mip_level_for_view);
 
     let intensity = light_probes.intensity_for_view;
 
@@ -259,7 +291,8 @@ fn compute_radiances(
             0.0).rgb * intensity;
     }
 
-    var radiance_sample_dir = radiance_sample_direction(N, R, roughness);
+    var radiance_sample_dir =
+        environment_specular_sample_direction(N, R, mip_roughness, manson_sloan_ibl);
     // Rotating the world space ray direction by the environment light map transform matrix, it is
     // equivalent to rotating the specular environment cubemap itself.
     radiance_sample_dir = (environment_map_uniform.transform * vec4(radiance_sample_dir, 1.0)).xyz;
@@ -384,6 +417,9 @@ fn environment_map_light(
         out.diffuse = vec3(0.0);
     }
 
+    // Split-sum: `radiances.radiance` is prefiltered LD. For GGX-split-sum cubemaps, `F_ab` matches
+    // Karis / Filament. For Manson-Sloan (paper eq. 3), LD is a different quadrature of the same
+    // term; an MS-specific DFG LUT would tighten the match — see `SpecularEnvironmentIntegration`.
     out.specular = FssEss * radiances.radiance;
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
@@ -395,13 +431,5 @@ fn environment_map_light(
     );
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
-    return out;
-}
-
-// "Moving Frostbite to Physically Based Rendering 3.0", listing 22
-// https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf#page=70
-fn radiance_sample_direction(N: vec3<f32>, R: vec3<f32>, roughness: f32) -> vec3<f32> {
-    let smoothness = saturate(1.0 - roughness);
-    let lerp_factor = smoothness * (sqrt(smoothness) + roughness);
-    return mix(N, R, lerp_factor);
+       return out;
 }

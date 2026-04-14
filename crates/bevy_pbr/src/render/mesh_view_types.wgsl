@@ -140,6 +140,8 @@ struct ClusterOffsetsAndCounts {
 const LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE: u32 = 1;
 // Whether this light probe has parallax correction enabled.
 const LIGHT_PROBE_FLAG_PARALLAX_CORRECT:                 u32 = 2;
+// Manson–Sloan specular IBL (paper eq. 3 prefilter); else GGX split-sum + Listing 22.
+const LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL:     u32 = 4;
 
 struct LightProbe {
     // This is stored as the transpose in order to save space in this structure.
@@ -176,6 +178,8 @@ struct LightProbes {
     // Whether the environment map attached to the view affects the diffuse
     // lighting for lightmapped meshes.
     view_environment_map_affects_lightmapped_mesh_diffuse: u32,
+    // 1 if view specular IBL uses Manson–Sloan integration.
+    view_manson_sloan_environment_ibl: u32,
 };
 
 // Settings for screen space reflections.
