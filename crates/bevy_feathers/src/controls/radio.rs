@@ -16,6 +16,7 @@ use bevy_ecs::{
 use bevy_input_focus::tab_navigation::TabIndex;
 use bevy_picking::{hover::Hovered, PickingSystems};
 use bevy_reflect::{prelude::ReflectDefault, Reflect};
+use bevy_scene::prelude::*;
 use bevy_text::{FontSize, FontWeight};
 use bevy_ui::{
     AlignItems, BorderRadius, Checked, Display, FlexDirection, InteractionDisabled, JustifyContent,
@@ -26,8 +27,8 @@ use bevy_ui_widgets::RadioButton;
 use crate::{
     constants::{fonts, size},
     cursor::EntityCursor,
+    focus::FocusIndicator,
     font_styles::InheritableFont,
-    handle_or_path::HandleOrPath,
     theme::{ThemeBackgroundColor, ThemeBorderColor, ThemeFontColor},
     tokens,
 };
@@ -42,19 +43,86 @@ struct RadioOutline;
 #[reflect(Component, Clone, Default)]
 struct RadioMark;
 
-/// Template function to spawn a radio.
-///
-/// # Arguments
-/// * `props` - construction properties for the radio.
-/// * `overrides` - a bundle of components that are merged in with the normal radio components.
-/// * `label` - the label of the radio.
+/// Parameters for the radio button template, passed to [`radio`] function.
+pub struct RadioProps {
+    /// Label for this radio button. This can contain multiple entities, which will be contained
+    /// in a flexbox.
+    pub caption: Box<dyn SceneList>,
+}
+
+impl Default for RadioProps {
+    fn default() -> Self {
+        Self {
+            caption: Box::new(bsn_list!()),
+        }
+    }
+}
+
+/// Scene function to spawn a radio.
 ///
 /// # Emitted events
 /// * [`bevy_ui_widgets::ValueChange<bool>`] with the value true when it becomes checked.
 /// * [`bevy_ui_widgets::ValueChange<Entity>`] with the selected entity's id when a new radio button is selected.
 ///
 ///  These events can be disabled by adding an [`bevy_ui::InteractionDisabled`] component to the entity
-pub fn radio<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
+pub fn radio(props: RadioProps) -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::Start,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(4.0),
+        }
+        RadioButton
+        Hovered
+        EntityCursor::System(bevy_window::SystemCursorIcon::Pointer)
+        TabIndex(0)
+        ThemeFontColor(tokens::RADIO_TEXT)
+        InheritableFont {
+            font: fonts::REGULAR,
+            font_size: FontSize::Px(14.0),
+            weight: FontWeight::NORMAL,
+        }
+        Children [(
+            Node {
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                width: size::RADIO_SIZE,
+                height: size::RADIO_SIZE,
+                border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::MAX,
+            }
+            RadioOutline
+            FocusIndicator
+            ThemeBorderColor(tokens::RADIO_BORDER)
+            Children [(
+                // Cheesy checkmark: rotated node with L-shaped border.
+                Node {
+                    width: Val::Px(8.),
+                    height: Val::Px(8.),
+                    border_radius: BorderRadius::MAX,
+                }
+                RadioMark
+                ThemeBackgroundColor(tokens::RADIO_MARK)
+            )]),
+            {props.caption}
+        ]
+    }
+}
+
+/// Template function to spawn a radio.
+///
+/// This version does not take any props. A caption can be set by appending a child entity.
+///
+/// # Emitted events
+/// * [`bevy_ui_widgets::ValueChange<bool>`] with the value true when it becomes checked.
+/// * [`bevy_ui_widgets::ValueChange<Entity>`] with the selected entity's id when a new radio button is selected.
+///
+///  These events can be disabled by adding an [`bevy_ui::InteractionDisabled`] component to the entity
+#[deprecated(since = "0.19.0", note = "Use the radio() BSN function")]
+pub fn radio_bundle<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
     overrides: B,
     label: C,
 ) -> impl Bundle {
@@ -73,9 +141,9 @@ pub fn radio<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
         TabIndex(0),
         ThemeFontColor(tokens::RADIO_TEXT),
         InheritableFont {
-            font: HandleOrPath::Path(fonts::REGULAR.to_owned()),
             font_size: FontSize::Px(14.0),
             weight: FontWeight::NORMAL,
+            ..Default::default()
         },
         overrides,
         Children::spawn((
@@ -91,6 +159,7 @@ pub fn radio<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
                     ..Default::default()
                 },
                 RadioOutline,
+                FocusIndicator,
                 ThemeBorderColor(tokens::RADIO_BORDER),
                 children![(
                     // Cheesy checkmark: rotated node with L-shaped border.

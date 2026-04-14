@@ -14,6 +14,7 @@ use bevy_ecs::{
 use bevy_input_focus::tab_navigation::TabIndex;
 use bevy_picking::{hover::Hovered, PickingSystems};
 use bevy_reflect::{prelude::ReflectDefault, Reflect};
+use bevy_scene::{prelude::*, template_value};
 use bevy_text::{FontSize, FontWeight};
 use bevy_ui::{AlignItems, InteractionDisabled, JustifyContent, Node, Pressed, UiRect, Val};
 use bevy_ui_widgets::Button;
@@ -21,8 +22,8 @@ use bevy_ui_widgets::Button;
 use crate::{
     constants::{fonts, size},
     cursor::EntityCursor,
+    focus::FocusIndicator,
     font_styles::InheritableFont,
-    handle_or_path::HandleOrPath,
     rounded_corners::RoundedCorners,
     theme::{ThemeBackgroundColor, ThemeFontColor},
     tokens,
@@ -42,8 +43,69 @@ pub enum ButtonVariant {
 }
 
 /// Parameters for the button template, passed to [`button`] function.
-#[derive(Default)]
 pub struct ButtonProps {
+    /// Label for this button. This can contain multiple entities, which will be contained
+    /// in a horizontal flexbox.
+    pub caption: Box<dyn SceneList>,
+    /// Color variant for the button.
+    pub variant: ButtonVariant,
+    /// Rounded corners options
+    pub corners: RoundedCorners,
+}
+
+impl Default for ButtonProps {
+    fn default() -> Self {
+        Self {
+            caption: Box::new(bsn_list!()),
+            variant: ButtonVariant::default(),
+            corners: Default::default(),
+        }
+    }
+}
+
+/// Scene function to spawn a button.
+///
+/// # Arguments
+/// * `props` - construction properties for the button.
+///
+/// # Emitted events
+/// * [`bevy_ui_widgets::Activate`] when any of the following happens:
+///     * the pointer is released while hovering over the button.
+///     * the ENTER or SPACE key is pressed while the button has keyboard focus.
+///
+///  These events can be disabled by adding an [`bevy_ui::InteractionDisabled`] component to the entity
+pub fn button(props: ButtonProps) -> impl Scene {
+    bsn! {
+        Node {
+            height: size::ROW_HEIGHT,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(Val::Px(8.0), Val::Px(0.)),
+            flex_grow: 1.0,
+            border_radius: {props.corners.to_border_radius(4.0)},
+        }
+        Button
+        template_value(props.variant)
+        Hovered
+        EntityCursor::System(bevy_window::SystemCursorIcon::Pointer)
+        TabIndex(0)
+        FocusIndicator
+        ThemeBackgroundColor(tokens::BUTTON_BG)
+        ThemeFontColor(tokens::BUTTON_TEXT)
+        InheritableFont {
+            font: fonts::REGULAR,
+            font_size: FontSize::Px(14.0),
+            weight: FontWeight::NORMAL,
+        }
+        Children [
+            {props.caption}
+        ]
+    }
+}
+
+/// Parameters for the [`button_bundle`] template.
+#[derive(Default)]
+pub struct ButtonBundleProps {
     /// Color variant for the button.
     pub variant: ButtonVariant,
     /// Rounded corners options
@@ -54,8 +116,6 @@ pub struct ButtonProps {
 ///
 /// # Arguments
 /// * `props` - construction properties for the button.
-/// * `overrides` - a bundle of components that are merged in with the normal button components.
-/// * `children` - a [`SpawnableList`] of child elements, such as a label or icon for the button.
 ///
 /// # Emitted events
 /// * [`bevy_ui_widgets::Activate`] when any of the following happens:
@@ -63,8 +123,9 @@ pub struct ButtonProps {
 ///     * the ENTER or SPACE key is pressed while the button has keyboard focus.
 ///
 ///  These events can be disabled by adding an [`bevy_ui::InteractionDisabled`] component to the entity
-pub fn button<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
-    props: ButtonProps,
+#[deprecated(since = "0.19.0", note = "Use the button() BSN function")]
+pub fn button_bundle<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
+    props: ButtonBundleProps,
     overrides: B,
     children: C,
 ) -> impl Bundle {
@@ -83,18 +144,18 @@ pub fn button<C: SpawnableList<ChildOf> + Send + Sync + 'static, B: Bundle>(
         Hovered::default(),
         EntityCursor::System(bevy_window::SystemCursorIcon::Pointer),
         TabIndex(0),
+        FocusIndicator,
         ThemeBackgroundColor(tokens::BUTTON_BG),
         ThemeFontColor(tokens::BUTTON_TEXT),
         InheritableFont {
-            font: HandleOrPath::Path(fonts::REGULAR.to_owned()),
             font_size: FontSize::Px(14.0),
             weight: FontWeight::NORMAL,
+            ..Default::default()
         },
         overrides,
         Children::spawn(children),
     )
 }
-
 fn update_button_styles(
     q_buttons: Query<
         (
