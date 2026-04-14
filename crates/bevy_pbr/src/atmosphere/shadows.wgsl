@@ -6,7 +6,7 @@
 
 #define_import_path bevy_pbr::atmosphere::shadows
 
-#import bevy_pbr::atmosphere::bindings::{atmosphere, lights, settings, view}
+#import bevy_pbr::atmosphere::bindings::{atmosphere, lights, view}
 
 // Shadow texture bindings
 #ifdef NO_ARRAY_TEXTURES_SUPPORT
@@ -93,9 +93,9 @@ fn sample_directional_cascade(
     return sample_shadow_map_hardware(light_local.xy, light_local.z, array_index);
 }
 
-/// Converts atmosphere-space position (planet-centered, meters) to world space for shadow lookup.
+/// Converts atmosphere-space position to world space for shadow lookup.
 fn atmosphere_to_world_position(atmosphere_pos: vec3<f32>) -> vec3<f32> {
-    return (atmosphere_pos - vec3(0.0, atmosphere.bottom_radius, 0.0)) / settings.scene_units_to_m;
+    return (atmosphere.atmosphere_to_world * vec4(atmosphere_pos, 1.0)).xyz;
 }
 
 /// Samples the directional light shadow at the given atmosphere-space position.

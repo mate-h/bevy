@@ -8,6 +8,8 @@ struct Atmosphere {
     outer_radius: f32, // units: m
     // Transform from world space to atmosphere space, inverse of the atmosphere entity's transform
     world_to_atmosphere: mat4x4<f32>,
+    // Inverse of `world_to_atmosphere`
+    atmosphere_to_world: mat4x4<f32>,
 }
 
 struct AtmosphereSettings {

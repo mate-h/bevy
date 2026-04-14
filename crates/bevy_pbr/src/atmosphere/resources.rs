@@ -510,11 +510,11 @@ struct ScatteringMediumMissingError(AssetId<ScatteringMedium>);
 /// The shader-uniform representation of an Atmosphere.
 #[derive(Clone, Component, ShaderType)]
 pub struct GpuAtmosphere {
-    //TODO: rename to Planet later?
     pub ground_albedo: Vec3,
     pub inner_radius: f32,
     pub outer_radius: f32,
     pub world_to_atmosphere: Mat4,
+    pub atmosphere_to_world: Mat4,
 }
 
 pub fn prepare_atmosphere_uniforms(
@@ -527,6 +527,7 @@ pub fn prepare_atmosphere_uniforms(
             inner_radius: atmosphere.inner_radius,
             outer_radius: atmosphere.outer_radius,
             world_to_atmosphere: atmosphere.world_to_atmosphere,
+            atmosphere_to_world: atmosphere.atmosphere_to_world,
         });
     }
     Ok(())
@@ -851,6 +852,7 @@ pub fn init_atmosphere_buffer(mut commands: Commands) {
             inner_radius: 0.0,
             outer_radius: 0.0,
             world_to_atmosphere: Mat4::IDENTITY,
+            atmosphere_to_world: Mat4::IDENTITY,
         }),
     });
 }

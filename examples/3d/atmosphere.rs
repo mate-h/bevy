@@ -119,15 +119,13 @@ fn atmosphere_controls(
     if keyboard_input.just_pressed(KeyCode::Digit5) {
         game_state.planet_scale_view = !game_state.planet_scale_view;
         if game_state.planet_scale_view {
-            for mut settings in &mut atmosphere_settings {
-                settings.scene_units_to_m = 10000.0;
+            for mut settings in &mut camera_settings {
                 settings.aerial_view_lut_size = UVec3::new(160, 88, 64);
                 settings.aerial_view_lut_max_distance = 6.2e4;
             }
             println!("Switched to planet scale view");
         } else {
-            for mut settings in &mut atmosphere_settings {
-                settings.scene_units_to_m = 1.0;
+            for mut settings in &mut camera_settings {
                 settings.aerial_view_lut_size = UVec3::new(32, 32, 32);
                 settings.aerial_view_lut_max_distance = 3.2e4;
             }

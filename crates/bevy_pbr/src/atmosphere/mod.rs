@@ -241,12 +241,14 @@ pub fn extract_atmosphere(
         let atmo = selected.1;
         let gt = selected.2;
 
+        let atmosphere_to_world = gt.to_matrix();
         let extracted = ExtractedAtmosphere {
             inner_radius: atmo.inner_radius,
             outer_radius: atmo.outer_radius,
             ground_albedo: atmo.ground_albedo,
             medium: atmo.medium.id(),
-            world_to_atmosphere: gt.to_matrix().inverse(),
+            world_to_atmosphere: atmosphere_to_world.inverse(),
+            atmosphere_to_world,
         };
         commands.entity(render_entity).insert(extracted);
         commands
@@ -264,6 +266,7 @@ pub struct ExtractedAtmosphere {
     pub ground_albedo: Vec3,
     pub medium: AssetId<ScatteringMedium>,
     pub world_to_atmosphere: Mat4,
+    pub atmosphere_to_world: Mat4,
 }
 
 /// This component controls the resolution of the atmosphere LUTs, and
