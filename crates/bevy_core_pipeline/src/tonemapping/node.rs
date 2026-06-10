@@ -5,7 +5,6 @@ use crate::tonemapping::{
 
 use bevy_ecs::prelude::*;
 use bevy_render::{
-    camera::ExtractedCamera,
     diagnostic::RecordDiagnostics,
     render_asset::RenderAssets,
     render_resource::{
@@ -43,7 +42,6 @@ struct CachedBindGroup {
 
 pub fn tonemapping(
     view: ViewQuery<(
-        &ExtractedCamera,
         &ViewUniformOffset,
         &ViewTarget,
         &ViewTonemappingPipeline,
@@ -63,7 +61,6 @@ pub fn tonemapping(
     mut ctx: RenderContext,
 ) {
     let (
-        camera,
         view_uniform_offset,
         target,
         view_tonemapping_pipeline,
@@ -72,11 +69,12 @@ pub fn tonemapping(
         gt7_params_offset,
     ) = view.into_inner();
 
+    // `Tonemapping::None` is a true opt-out: the pass does not run, the
+    // camera keeps its pre-existing main-texture format, and no color
+    // grading / exposure from `ColorGrading` is applied. Every other
+    // operator runs node-side for every camera (with or without `Hdr`);
+    // the legacy in-shader (`TONEMAP_IN_SHADER`) path no longer exists.
     if *tonemapping == Tonemapping::None {
-        return;
-    }
-
-    if !camera.hdr {
         return;
     }
 

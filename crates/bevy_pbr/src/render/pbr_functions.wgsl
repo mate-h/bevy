@@ -21,7 +21,7 @@
 }
 #import bevy_pbr::mesh_view_bindings::globals
 #import bevy_pbr::view_transformations::{position_world_to_ndc}
-#import bevy_render::maths::{E, powsafe}
+#import bevy_render::maths::E
 
 #ifdef STANDARD_MATERIAL_SPECULAR_TRANSMISSION
 #import bevy_pbr::transmission
@@ -41,10 +41,6 @@
 
 #ifdef ENVIRONMENT_MAP
 #import bevy_pbr::environment_map
-#endif
-
-#ifdef TONEMAP_IN_SHADER
-#import bevy_core_pipeline::tonemapping::{tone_mapping, screen_space_dither}
 #endif
 
 
@@ -1015,18 +1011,6 @@ fn main_pass_post_lighting_processing(
     }
 #endif  // DISTANCE_FOG
 
-#ifdef TONEMAP_IN_SHADER
-    output_color = tone_mapping(output_color, view_bindings::view.color_grading);
-#ifdef DEBAND_DITHER
-    var output_rgb = output_color.rgb;
-    output_rgb = powsafe(output_rgb, 1.0 / 2.2);
-    output_rgb += screen_space_dither(pbr_input.frag_coord.xy);
-    // This conversion back to linear space is required because our output texture format is
-    // SRGB; the GPU will assume our output is linear and will apply an SRGB conversion.
-    output_rgb = powsafe(output_rgb, 2.2);
-    output_color = vec4(output_rgb, output_color.a);
-#endif
-#endif
 #ifdef PREMULTIPLY_ALPHA
     output_color = premultiply_alpha(pbr_input.material.flags, output_color);
 #endif

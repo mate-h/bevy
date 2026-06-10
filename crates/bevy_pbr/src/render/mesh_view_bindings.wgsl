@@ -64,12 +64,6 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @group(0) @binding(17) var screen_space_ambient_occlusion_texture: texture_2d<f32>;
 #endif
 
-#ifdef TONEMAP_IN_SHADER
-// NB: If you change these, make sure to update `tonemapping_shared.wgsl` too.
-@group(0) @binding(18) var dt_lut_texture: texture_3d<f32>;
-@group(0) @binding(19) var dt_lut_sampler: sampler;
-#endif
-
 #ifdef MULTISAMPLED
 #ifdef DEPTH_PREPASS
 @group(0) @binding(20) var depth_prepass_texture: texture_depth_multisampled_2d;

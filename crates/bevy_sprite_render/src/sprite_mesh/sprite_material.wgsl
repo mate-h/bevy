@@ -5,9 +5,6 @@
     mesh2d_vertex_input::{Vertex, decompress_vertex}
 }
 
-#ifdef TONEMAP_IN_SHADER
-#import bevy_core_pipeline::tonemapping
-#endif
 #ifdef SRGB_OUTPUT
 #import bevy_render::color_operations::linear_to_srgb
 #endif
@@ -112,10 +109,6 @@ fn fragment(
 
     let sprite_color = textureSample(texture, texture_sampler, uv);
     var output_color = alpha_discard(sprite_color * material.color);
-
-#ifdef TONEMAP_IN_SHADER
-    output_color = tonemapping::tone_mapping(output_color, view.color_grading);
-#endif
 
 #ifdef SRGB_OUTPUT
     output_color = vec4(linear_to_srgb(output_color.rgb), output_color.a);

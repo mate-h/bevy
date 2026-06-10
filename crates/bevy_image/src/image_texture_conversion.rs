@@ -163,6 +163,12 @@ impl Image {
     /// - `TextureFormat::Rg8Unorm`
     /// - `TextureFormat::Rgba8UnormSrgb`
     /// - `TextureFormat::Bgra8UnormSrgb`
+    /// - `TextureFormat::Rgba16Float` (converted to [`DynamicImage::ImageRgba32F`])
+    /// - `TextureFormat::Rgba32Float`
+    ///
+    /// The floating-point formats keep their full (HDR) range; they are
+    /// supported so screenshots of HDR surfaces (e.g. the `Rgba16Float`
+    /// scRGB-linear swapchain) can be captured and saved.
     ///
     /// To convert [`Image`] to a different format see: [`Image::convert`].
     pub fn try_into_dynamic(self) -> Result<DynamicImage, IntoDynamicImageError> {
@@ -192,6 +198,28 @@ impl Image {
                     data
                 })
                 .map(DynamicImage::ImageRgba8)
+            }
+            // This format is used for the swapchain texture of HDR
+            // (scRGB-linear) windows. The conversion is added here to support
+            // screenshots; the f16 data is widened to f32, the closest
+            // `DynamicImage` pixel type.
+            TextureFormat::Rgba16Float => {
+                let pixels: Vec<f32> = data
+                    .as_chunks()
+                    .0
+                    .iter()
+                    .map(|&bytes| half::f16::from_le_bytes(bytes).to_f32())
+                    .collect();
+                ImageBuffer::from_raw(width, height, pixels).map(DynamicImage::ImageRgba32F)
+            }
+            TextureFormat::Rgba32Float => {
+                let pixels: Vec<f32> = data
+                    .as_chunks()
+                    .0
+                    .iter()
+                    .map(|&bytes| f32::from_le_bytes(bytes))
+                    .collect();
+                ImageBuffer::from_raw(width, height, pixels).map(DynamicImage::ImageRgba32F)
             }
             // Throw and error if conversion isn't supported
             texture_format => return Err(IntoDynamicImageError::UnsupportedFormat(texture_format)),
@@ -235,5 +263,53 @@ mod test {
 
         // NOTE: Fails if `is_srgb = false` or the dynamic image is of the type rgb8.
         assert_eq!(initial, image.try_into_dynamic().unwrap());
+    }
+
+    #[test]
+    fn rgba16float_to_dynamic_keeps_hdr_range() {
+        // 2x1 fp16 image with one above-range (HDR) and one negative
+        // component, as an scRGB-linear screenshot may contain.
+        let pixels: [f32; 8] = [2.5, 1.0, -0.25, 1.0, 0.5, 0.0, 1.0, 0.25];
+        let data: Vec<u8> = pixels
+            .iter()
+            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+            .collect();
+        let image = Image::new(
+            Extent3d {
+                width: 2,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba16Float,
+            RenderAssetUsages::MAIN_WORLD,
+        );
+        let DynamicImage::ImageRgba32F(converted) = image.try_into_dynamic().unwrap() else {
+            panic!("expected an Rgba32F dynamic image");
+        };
+        // f16 represents all of these exactly, so the round trip is lossless.
+        assert_eq!(converted.as_raw().as_slice(), &pixels);
+    }
+
+    #[test]
+    fn rgba32float_to_dynamic_is_lossless() {
+        let pixels: [f32; 4] = [3.75, 0.125, -1.5, 1.0];
+        let data: Vec<u8> = pixels.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let image = Image::new(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba32Float,
+            RenderAssetUsages::MAIN_WORLD,
+        );
+        let DynamicImage::ImageRgba32F(converted) = image.try_into_dynamic().unwrap() else {
+            panic!("expected an Rgba32F dynamic image");
+        };
+        assert_eq!(converted.as_raw().as_slice(), &pixels);
     }
 }

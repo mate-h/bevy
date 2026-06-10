@@ -221,6 +221,21 @@ pub enum DisplayTransfer {
     Hlg,
 }
 
+impl DisplayTransfer {
+    /// Returns `true` if this is a high-dynamic-range transfer function
+    /// ([`ScRgbLinear`](Self::ScRgbLinear), [`Pq`](Self::Pq), or
+    /// [`Hlg`](Self::Hlg)).
+    ///
+    /// This is the single-sourced predicate the display pipeline uses to
+    /// decide whether a target takes the HDR path (shader-side transfer
+    /// encoding, HDR operator modes) or the plain SDR path (hardware sRGB
+    /// encode). HLG is included for completeness even though it is not
+    /// currently reachable through wgpu surfaces.
+    pub const fn is_hdr(&self) -> bool {
+        matches!(self, Self::ScRgbLinear | Self::Pq | Self::Hlg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +259,13 @@ mod tests {
     fn enum_defaults_match_sdr() {
         assert_eq!(DisplayGamut::default(), DisplayGamut::Rec709);
         assert_eq!(DisplayTransfer::default(), DisplayTransfer::Srgb);
+    }
+
+    #[test]
+    fn hdr_transfer_predicate() {
+        assert!(!DisplayTransfer::Srgb.is_hdr());
+        assert!(DisplayTransfer::ScRgbLinear.is_hdr());
+        assert!(DisplayTransfer::Pq.is_hdr());
+        assert!(DisplayTransfer::Hlg.is_hdr());
     }
 }

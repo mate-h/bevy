@@ -2,7 +2,7 @@ use bevy_app::prelude::*;
 use bevy_asset::{
     embedded_asset, load_embedded_asset, AssetServer, Assets, Handle, RenderAssetUsages,
 };
-use bevy_camera::Camera;
+use bevy_camera::{Camera, CompositingSpace, TonemappingEnabled};
 use bevy_ecs::prelude::*;
 use bevy_image::{CompressedImageFormats, Image, ImageSampler, ImageType};
 #[cfg(not(feature = "tonemapping_luts"))]
@@ -97,6 +97,8 @@ impl Plugin for TonemappingPlugin {
             ExtractComponentPlugin::<DebandDither>::default(),
             ExtractComponentPlugin::<GranTurismo7Params>::default(),
         ));
+
+        app.add_systems(PostUpdate, sync_tonemapping_enabled);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -206,6 +208,38 @@ impl Tonemapping {
     }
 }
 
+/// Keeps the auto-managed [`TonemappingEnabled`] marker (in `bevy_camera`,
+/// where [`Tonemapping`] itself is not visible) in sync with each camera's
+/// [`Tonemapping`] component: present iff the operator is not
+/// [`Tonemapping::None`].
+///
+/// The marker is what lets the renderer's camera extraction (in
+/// `bevy_render`, which cannot depend on this crate) select an `Rgba16Float`
+/// intermediate main texture for tone-mapped cameras. Runs in
+/// [`PostUpdate`]; changes made to [`Tonemapping`] after that point are
+/// picked up the next frame.
+pub fn sync_tonemapping_enabled(
+    mut commands: Commands,
+    changed: Query<(Entity, &Tonemapping, Has<TonemappingEnabled>), Changed<Tonemapping>>,
+    mut removed: RemovedComponents<Tonemapping>,
+) {
+    for (entity, tonemapping, has_marker) in &changed {
+        if tonemapping.is_enabled() {
+            if !has_marker {
+                commands.entity(entity).insert(TonemappingEnabled);
+            }
+        } else if has_marker {
+            commands.entity(entity).remove::<TonemappingEnabled>();
+        }
+    }
+    for entity in removed.read() {
+        // The entity may have been despawned entirely.
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.remove::<TonemappingEnabled>();
+        }
+    }
+}
+
 bitflags! {
     /// Various flags describing what tonemapping needs to do.
     ///
@@ -241,6 +275,20 @@ bitflags! {
         /// [`GranTurismo7Params`] component. Implies
         /// [`Self::DISPLAY_TARGET_UNIFORM`].
         const GT7_PARAMS_UNIFORM        = 0x10;
+        /// The view composites in gamma-encoded sRGB space
+        /// ([`CompositingSpace::Srgb`](bevy_camera::CompositingSpace::Srgb)):
+        /// main pass shaders write sRGB-encoded values, so this pass decodes
+        /// the input to scene-linear before tone mapping and re-encodes the
+        /// result, preserving the buffer convention the upscaling blit
+        /// expects (`SRGB_TO_LINEAR`). Pushes the `SRGB_COMPOSITING` shader
+        /// def.
+        const SRGB_COMPOSITING          = 0x20;
+        /// The view composites in Oklab space
+        /// ([`CompositingSpace::Oklab`](bevy_camera::CompositingSpace::Oklab)).
+        /// Like [`Self::SRGB_COMPOSITING`], but decoding/encoding with the
+        /// Oklab transforms (the blit's `OKLAB_TO_LINEAR` counterpart).
+        /// Pushes the `OKLAB_COMPOSITING` shader def.
+        const OKLAB_COMPOSITING         = 0x40;
     }
 }
 
@@ -286,6 +334,24 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
             .contains(TonemappingPipelineKeyFlags::SECTIONAL_COLOR_GRADING)
         {
             shader_defs.push("SECTIONAL_COLOR_GRADING".into());
+        }
+
+        // Views compositing in an encoded space (sRGB / Oklab) need the pass
+        // to decode before tone mapping and re-encode afterwards, so the main
+        // texture keeps holding encoded values for the rest of the frame
+        // (UI pass, upscaling blit). Conditional, so plain scene-linear views
+        // keep byte-identical pipelines.
+        if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::SRGB_COMPOSITING)
+        {
+            shader_defs.push("SRGB_COMPOSITING".into());
+        }
+        if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::OKLAB_COMPOSITING)
+        {
+            shader_defs.push("OKLAB_COMPOSITING".into());
         }
 
         // The display-target / GT7-params uniforms are strictly additive:
@@ -493,19 +559,18 @@ pub fn prepare_view_tonemapping_pipelines(
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<TonemappingPipeline>>,
     upscaling_pipeline: Res<TonemappingPipeline>,
-    view_targets: Query<
-        (
-            Entity,
-            &ExtractedView,
-            Option<&Tonemapping>,
-            Option<&DebandDither>,
-            Option<&ViewDisplayTarget>,
-            Option<&GranTurismo7Params>,
-        ),
-        With<ViewTarget>,
-    >,
+    view_targets: Query<(
+        Entity,
+        &ExtractedView,
+        &ViewTarget,
+        Option<&Tonemapping>,
+        Option<&DebandDither>,
+        Option<&ViewDisplayTarget>,
+        Option<&GranTurismo7Params>,
+    )>,
 ) {
-    for (entity, view, tonemapping, dither, view_display_target, gt7_params) in view_targets.iter()
+    for (entity, view, view_target, tonemapping, dither, view_display_target, gt7_params) in
+        view_targets.iter()
     {
         let tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
 
@@ -524,6 +589,19 @@ pub fn prepare_view_tonemapping_pipelines(
             view.color_grading
                 .all_sections()
                 .any(|section| *section != default()),
+        );
+
+        // Views compositing in an encoded space need the pass to decode /
+        // re-encode around the operator (see the flag docs). Scene-linear
+        // views (`CompositingSpace::Linear` or no component) set neither
+        // flag, keeping their key identical to before these flags existed.
+        flags.set(
+            TonemappingPipelineKeyFlags::SRGB_COMPOSITING,
+            view_target.compositing_space == Some(CompositingSpace::Srgb),
+        );
+        flags.set(
+            TonemappingPipelineKeyFlags::OKLAB_COMPOSITING,
+            view_target.compositing_space == Some(CompositingSpace::Oklab),
         );
 
         // The GT7 params uniform is active exactly when the operator is GT7
@@ -654,5 +732,51 @@ pub fn lut_placeholder() -> Image {
         asset_usage: RenderAssetUsages::RENDER_WORLD,
         copy_on_resize: false,
         source_primaries: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::{App, Update};
+
+    #[test]
+    fn tonemapping_enabled_marker_syncs_with_tonemapping() {
+        let mut app = App::new();
+        app.add_systems(Update, sync_tonemapping_enabled);
+
+        // Spawning with an active operator inserts the marker.
+        let entity = app.world_mut().spawn(Tonemapping::TonyMcMapface).id();
+        app.update();
+        assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // Changing to `None` removes it.
+        *app.world_mut()
+            .entity_mut(entity)
+            .get_mut::<Tonemapping>()
+            .unwrap() = Tonemapping::None;
+        app.update();
+        assert!(!app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // Changing back to an operator re-inserts it.
+        *app.world_mut()
+            .entity_mut(entity)
+            .get_mut::<Tonemapping>()
+            .unwrap() = Tonemapping::GranTurismo7;
+        app.update();
+        assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // Removing `Tonemapping` entirely removes the marker too.
+        app.world_mut().entity_mut(entity).remove::<Tonemapping>();
+        app.update();
+        assert!(!app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // `Tonemapping::None` from the start never inserts the marker.
+        let none_entity = app.world_mut().spawn(Tonemapping::None).id();
+        app.update();
+        assert!(!app
+            .world()
+            .entity(none_entity)
+            .contains::<TonemappingEnabled>());
     }
 }

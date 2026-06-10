@@ -24,7 +24,8 @@ use bevy_camera::{
     visibility::{self, RenderLayers, VisibleEntities},
     Camera, Camera2d, Camera3d, CameraMainTextureUsages, CameraOutputMode, CameraUpdateSystems,
     ClearColor, ClearColorConfig, CompositingSpace, Exposure, Hdr, ManualTextureViewHandle,
-    MsaaWriteback, NormalizedRenderTarget, Projection, RenderTarget, RenderTargetInfo, Viewport,
+    MsaaWriteback, NormalizedRenderTarget, Projection, RenderTarget, RenderTargetInfo,
+    TonemappingEnabled, Viewport,
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -465,8 +466,10 @@ pub struct ExtractedCamera {
     pub sorted_camera_index_for_target: usize,
     pub exposure: f32,
     pub hdr: bool,
-    /// When [`CompositingSpace::Srgb`], the main texture uses linear storage (`Rgba8Unorm`)
-    /// and shaders output sRGB-encoded values for gamma-encoded blending.
+    /// When [`CompositingSpace::Srgb`], shaders output sRGB-encoded values for
+    /// gamma-encoded blending, and the main texture uses linear storage
+    /// (`Rgba8Unorm`, or `Rgba16Float` when the camera has an active
+    /// tone-mapping operator).
     pub compositing_space: Option<CompositingSpace>,
 }
 
@@ -485,6 +488,7 @@ pub fn extract_cameras(
             &Frustum,
             (
                 Has<Hdr>,
+                Has<TonemappingEnabled>,
                 Option<&CompositingSpace>,
                 Option<&ColorGrading>,
                 Option<&Exposure>,
@@ -532,6 +536,7 @@ pub fn extract_cameras(
         frustum,
         (
             hdr,
+            tonemapping_enabled,
             compositing_space,
             color_grading,
             exposure,
@@ -611,7 +616,27 @@ pub fn extract_cameras(
                         .map(|format| normalize_bgra8(target, format))
                 })
                 .unwrap_or(TextureFormat::Rgba8UnormSrgb);
-            let target_format = if hdr {
+            // Main-texture format policy:
+            // - `Hdr` cameras keep their high-precision intermediate.
+            // - Cameras with an active tone-mapping operator (the auto-managed
+            //   `TonemappingEnabled` marker, i.e. `Tonemapping != None`) also
+            //   get the `Rgba16Float` intermediate: tone mapping runs as a
+            //   node-side post-process pass for every such camera, and the
+            //   pass needs an unclipped scene-linear-capable buffer (an 8-bit
+            //   intermediate would clamp scene-referred values above 1.0
+            //   *before* the operator sees them). This holds even with an
+            //   explicit `CompositingSpace::Srgb`/`Oklab`: the compositing
+            //   encode is a value convention (shaders still write encoded
+            //   values, blending still happens in the encoded space), not a
+            //   storage-format requirement, and fp16 keeps encoded values
+            //   above 1.0 intact for the tonemapping pass to decode.
+            // - Otherwise an explicit `CompositingSpace::Srgb` keeps its
+            //   linear-storage `Rgba8Unorm` main texture (shaders write
+            //   sRGB-encoded values into it for gamma-encoded blending),
+            //   exactly as before.
+            // - Everything else (e.g. `Tonemapping::None` 2D cameras) follows
+            //   the output texture's view format, exactly as before.
+            let target_format = if hdr || tonemapping_enabled {
                 TextureFormat::Rgba16Float
             } else if compositing_space.is_some_and(|s| *s == CompositingSpace::Srgb) {
                 TextureFormat::Rgba8Unorm

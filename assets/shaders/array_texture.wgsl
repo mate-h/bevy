@@ -6,7 +6,6 @@
     pbr_functions as fns,
     pbr_bindings,
 }
-#import bevy_core_pipeline::tonemapping::tone_mapping
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var my_array_texture: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var my_array_texture_sampler: sampler;
@@ -57,5 +56,7 @@ fn fragment(
 
     pbr_input.V = fns::calculate_view(mesh.world_position, pbr_input.is_orthographic);
 
-    return tone_mapping(fns::apply_pbr_lighting(pbr_input), view.color_grading);
+    // Output scene-linear color; the camera's tonemapping operator is
+    // applied by the post-process tonemapping pass.
+    return fns::apply_pbr_lighting(pbr_input);
 }

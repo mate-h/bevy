@@ -3,9 +3,6 @@
     mesh2d_view_bindings::view,
 }
 
-#ifdef TONEMAP_IN_SHADER
-#import bevy_core_pipeline::tonemapping
-#endif
 #ifdef SRGB_OUTPUT
 #import bevy_render::color_operations::linear_to_srgb
 #endif
@@ -49,9 +46,6 @@ fn fragment(
 
     output_color = alpha_discard(material, output_color);
 
-#ifdef TONEMAP_IN_SHADER
-    output_color = tonemapping::tone_mapping(output_color, view.color_grading);
-#endif
 #ifdef SRGB_OUTPUT
     output_color = vec4(linear_to_srgb(output_color.rgb), output_color.a);
 #endif

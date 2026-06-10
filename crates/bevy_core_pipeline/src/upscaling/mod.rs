@@ -3,8 +3,10 @@ use bevy_app::prelude::*;
 use bevy_camera::CameraOutputMode;
 use bevy_ecs::prelude::*;
 use bevy_render::{
-    camera::ExtractedCamera, render_resource::*, view::ViewTarget, Render, RenderApp,
-    RenderStartup, RenderSystems,
+    camera::ExtractedCamera,
+    render_resource::*,
+    view::{ViewDisplayTarget, ViewTarget},
+    Render, RenderApp, RenderStartup, RenderSystems,
 };
 
 mod node;
@@ -55,9 +57,10 @@ fn prepare_view_upscaling_pipelines(
         &ViewTarget,
         Option<&ExtractedCamera>,
         Option<&ViewUpscalingPipeline>,
+        Option<&ViewDisplayTarget>,
     )>,
 ) {
-    for (entity, view_target, camera, maybe_pipeline) in view_targets.iter() {
+    for (entity, view_target, camera, maybe_pipeline, display_target) in view_targets.iter() {
         let blend_state = if let Some(extracted_camera) = camera {
             match extracted_camera.output_mode {
                 CameraOutputMode::Skip => None,
@@ -86,11 +89,31 @@ fn prepare_view_upscaling_pipelines(
             continue;
         };
 
+        // When the display-encoding pass ran for this view (its resolved
+        // display target requests an HDR transfer), the main texture holds an
+        // already-encoded signal (scRGB-linear or PQ): the blit must pass it
+        // through unchanged, and any compositing-space decode was already
+        // performed by the encoder. The same predicate
+        // (`ViewDisplayTarget::is_hdr_transfer`) gates the encoding pass in
+        // `prepare_view_display_encoding_pipelines`, so the two can never
+        // disagree. Because the predicate reads the *resolved* transfer,
+        // it is only true when surface selection actually negotiated a
+        // non-sRGB-view surface (e.g. `Rgba16Float` for scRGB-linear), where
+        // `target_format` is the float surface format and no hardware sRGB
+        // encode happens on store: the encoded signal reaches the display
+        // unchanged. Downgraded requests resolve to plain SDR and keep the
+        // normal decode-and-hardware-encode path.
+        let source_space = if display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer) {
+            None
+        } else {
+            view_target.compositing_space
+        };
+
         let key = BlitPipelineKey {
             target_format,
             blend_state,
             samples: 1,
-            source_space: view_target.compositing_space,
+            source_space,
         };
 
         if maybe_pipeline.is_none_or(|ViewUpscalingPipeline(_, cached_key)| *cached_key != key) {

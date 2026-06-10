@@ -10,6 +10,7 @@ pub mod blit;
 pub mod core_2d;
 pub mod core_3d;
 pub mod deferred;
+pub mod display_encoding;
 pub mod fullscreen_material;
 pub mod mip_generation;
 pub mod oit;
@@ -31,7 +32,8 @@ use crate::schedule::{
 };
 use crate::{
     blit::BlitPlugin, core_2d::Core2dPlugin, core_3d::Core3dPlugin,
-    deferred::copy_lighting_id::CopyDeferredLightingIdPlugin, mip_generation::MipGenerationPlugin,
+    deferred::copy_lighting_id::CopyDeferredLightingIdPlugin,
+    display_encoding::DisplayEncodingPlugin, mip_generation::MipGenerationPlugin,
     prepass::BackgroundMotionVectorsPlugin, tonemapping::TonemappingPlugin,
     upscaling::UpscalingPlugin,
 };
@@ -52,6 +54,7 @@ impl Plugin for CorePipelinePlugin {
             .add_plugins((
                 BlitPlugin,
                 TonemappingPlugin,
+                DisplayEncodingPlugin,
                 UpscalingPlugin,
                 OrderIndependentTransparencyPlugin,
                 MipGenerationPlugin,

@@ -38,6 +38,7 @@ use bevy_ui::{
 use bevy_app::prelude::*;
 use bevy_asset::{AssetEvent, AssetId, Assets};
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
+use bevy_core_pipeline::display_encoding::display_encoding;
 use bevy_core_pipeline::schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy_core_pipeline::upscaling::upscaling;
 use bevy_ecs::prelude::*;
@@ -264,11 +265,21 @@ impl Plugin for UiRenderPlugin {
             )
             .add_systems(
                 Core2d,
-                ui_pass.after(Core2dSystems::PostProcess).before(upscaling),
+                // UI composites in display-linear, paper-white-relative space:
+                // after tone mapping (PostProcess), before the display-encoding
+                // pass encodes the buffer for the display.
+                ui_pass
+                    .after(Core2dSystems::PostProcess)
+                    .before(display_encoding)
+                    .before(upscaling),
             )
             .add_systems(
                 Core3d,
-                ui_pass.after(Core3dSystems::PostProcess).before(upscaling),
+                // See the Core2d registration above for the ordering rationale.
+                ui_pass
+                    .after(Core3dSystems::PostProcess)
+                    .before(display_encoding)
+                    .before(upscaling),
             );
 
         app.add_plugins(UiTextureSlicerPlugin);

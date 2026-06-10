@@ -13,6 +13,7 @@ use bevy::{
         view::{ColorGrading, ColorGradingGlobal, ColorGradingSection},
     },
     shader::ShaderRef,
+    window::PrimaryWindow,
 };
 use std::f32::consts::PI;
 
@@ -52,6 +53,7 @@ fn main() {
                 resize_image,
                 toggle_scene,
                 toggle_tonemapping_method,
+                toggle_hdr_output,
                 update_color_grading_settings,
                 update_ui,
             ),
@@ -324,6 +326,34 @@ fn toggle_tonemapping_method(
     .clone();
 }
 
+/// Toggles scRGB-linear HDR output on the primary window (and switches the
+/// operator to GranTurismo7, currently the only HDR-aware one, when turning
+/// HDR on).
+///
+/// NOTE: seeing actual HDR output requires an HDR-capable display and a
+/// backend where wgpu exposes an `Rgba16Float` surface: macOS/iOS (Metal),
+/// Windows (Vulkan), or Wayland (Vulkan). Elsewhere Bevy logs a warning and
+/// stays in SDR.
+fn toggle_hdr_output(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
+    mut tonemapping: Single<&mut Tonemapping>,
+) {
+    if keys.just_pressed(KeyCode::KeyO) {
+        if display_target.transfer == DisplayTransfer::ScRgbLinear {
+            **display_target = DisplayTarget::SDR_SRGB;
+        } else {
+            **display_target = DisplayTarget {
+                paper_white_nits: 200.0,
+                peak_luminance_nits: 1000.0,
+                transfer: DisplayTransfer::ScRgbLinear,
+                ..DisplayTarget::SDR_SRGB
+            };
+            **tonemapping = Tonemapping::GranTurismo7;
+        }
+    }
+}
+
 #[derive(Resource)]
 struct SelectedParameter {
     value: i32,
@@ -421,7 +451,8 @@ fn update_ui(
     let mut text = String::with_capacity(text_query.len());
 
     let scn = current_scene.0;
-    text.push_str("(H) Hide UI\n\n");
+    text.push_str("(H) Hide UI\n");
+    text.push_str("(O) Toggle scRGB HDR output (requires an HDR-capable display)\n\n");
     text.push_str("Test Scene: \n");
     text.push_str(&format!(
         "(Q) {} Basic Scene\n",

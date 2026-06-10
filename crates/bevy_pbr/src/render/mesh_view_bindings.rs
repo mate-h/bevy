@@ -9,9 +9,6 @@ use bevy_core_pipeline::{
         OrderIndependentTransparencySettingsOffset,
     },
     prepass::ViewPrepassTextures,
-    tonemapping::{
-        get_lut_bind_group_layout_entries, get_lut_bindings, Tonemapping, TonemappingLuts,
-    },
 };
 use bevy_ecs::{
     component::Component,
@@ -24,7 +21,6 @@ use bevy_light::{EnvironmentMapLight, IrradianceVolume};
 use bevy_math::Vec4;
 use bevy_platform::sync::Arc;
 use bevy_render::{
-    camera::ExtractedCamera,
     globals::{GlobalsBuffer, GlobalsUniform},
     render_asset::RenderAssets,
     render_resource::{binding_types::*, *},
@@ -68,9 +64,6 @@ use bevy_render::render_resource::binding_types::texture_cube;
 #[cfg(debug_assertions)]
 use {crate::MESH_PIPELINE_VIEW_LAYOUT_SAFE_MAX_TEXTURES, bevy_utils::once, tracing::warn};
 
-pub const TONEMAPPING_LUT_TEXTURE_BINDING_INDEX: u32 = 18;
-pub const TONEMAPPING_LUT_SAMPLER_BINDING_INDEX: u32 = 19;
-
 #[derive(Clone)]
 pub struct MeshPipelineViewLayout {
     pub main_layout: BindGroupLayoutDescriptor,
@@ -91,7 +84,6 @@ bitflags::bitflags! {
         const OIT_ENABLED                      = 1 << 5;
         const ATMOSPHERE                       = 1 << 6;
         const STBN                             = 1 << 7;
-        const TONEMAP_IN_SHADER                = 1 << 8;
         const ENVIRONMENT_MAP                  = 1 << 9;
         const SCREEN_SPACE_AMBIENT_OCCLUSION   = 1 << 10;
         const IRRADIANCE_VOLUME                = 1 << 11;
@@ -158,9 +150,6 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
             result |= MeshPipelineViewLayoutKey::AREA_LIGHT_LUTS;
         }
 
-        if value.contains(MeshPipelineKey::TONEMAP_IN_SHADER) {
-            result |= MeshPipelineViewLayoutKey::TONEMAP_IN_SHADER;
-        }
         if value.contains(MeshPipelineKey::ENVIRONMENT_MAP) {
             result |= MeshPipelineViewLayoutKey::ENVIRONMENT_MAP;
         }
@@ -377,21 +366,6 @@ fn layout_entries(
             (
                 17,
                 texture_2d(TextureSampleType::Float { filterable: false }),
-            ),
-        ));
-    }
-
-    if layout_key.contains(MeshPipelineViewLayoutKey::TONEMAP_IN_SHADER) {
-        // Tonemapping
-        let tonemapping_lut_entries = get_lut_bind_group_layout_entries();
-        entries = entries.extend_with_indices((
-            (
-                TONEMAPPING_LUT_TEXTURE_BINDING_INDEX,
-                tonemapping_lut_entries[0],
-            ),
-            (
-                TONEMAPPING_LUT_SAMPLER_BINDING_INDEX,
-                tonemapping_lut_entries[1],
             ),
         ));
     }
@@ -640,7 +614,6 @@ pub fn prepare_mesh_view_bind_groups(
     ),
     views: Query<(
         Entity,
-        Option<&ExtractedCamera>,
         &ViewShadowBindings,
         &ViewClusterBindings,
         &Msaa,
@@ -649,7 +622,6 @@ pub fn prepare_mesh_view_bind_groups(
         Option<&ViewTransmissionTexture>,
         Option<&AtmosphereTextures>,
         Option<&AtmosphereBuffer>,
-        &Tonemapping,
         (
             Option<&RenderViewLightProbes<EnvironmentMapLight>>,
             Option<&RenderViewLightProbes<IrradianceVolume>>,
@@ -671,7 +643,6 @@ pub fn prepare_mesh_view_bind_groups(
         Res<FallbackImageZero>,
     ),
     globals_buffer: Res<GlobalsBuffer>,
-    tonemapping_luts: Res<TonemappingLuts>,
     light_probes_buffer: Res<LightProbesBuffer>,
     visibility_ranges: Res<RenderVisibilityRanges>,
     (ssr_buffer, contact_shadows_buffer, oit_buffers): (
@@ -713,7 +684,6 @@ pub fn prepare_mesh_view_bind_groups(
     ) {
         for (
             entity,
-            camera,
             shadow_bindings,
             cluster_bindings,
             msaa,
@@ -722,7 +692,6 @@ pub fn prepare_mesh_view_bind_groups(
             transmission_texture,
             atmosphere_textures,
             atmosphere_buffer,
-            tonemapping,
             (render_view_environment_maps, render_view_irradiance_volumes),
             has_atmosphere,
             (
@@ -752,7 +721,6 @@ pub fn prepare_mesh_view_bind_groups(
                     .collect();
             }
 
-            let tonemap_in_shader = camera.is_none_or(|camera| !camera.hdr);
             let mut layout_key = MeshPipelineViewLayoutKey::from(*msaa)
                 | MeshPipelineViewLayoutKey::from(prepass_textures);
             let mut offsets = ArrayVec::from_iter([
@@ -838,16 +806,6 @@ pub fn prepare_mesh_view_bind_groups(
                     .expect("STBN texture is added unconditionally with at least a placeholder")
                     .texture_view;
                 entries = entries.extend_with_indices(((34, stbn_view),));
-            }
-
-            if tonemap_in_shader {
-                layout_key |= MeshPipelineViewLayoutKey::TONEMAP_IN_SHADER;
-                let lut_bindings =
-                    get_lut_bindings(&images, &tonemapping_luts, tonemapping, &fallback_image);
-                entries = entries.extend_with_indices((
-                    (TONEMAPPING_LUT_TEXTURE_BINDING_INDEX, lut_bindings.0),
-                    (TONEMAPPING_LUT_SAMPLER_BINDING_INDEX, lut_bindings.1),
-                ));
             }
 
             if let Some(ssao_resources) = ssao_resources {

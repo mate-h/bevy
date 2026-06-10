@@ -131,16 +131,59 @@ struct RenderScreenshotsPrepared(EntityHashMap<ScreenshotPreparedState>);
 struct RenderScreenshotsSender(Sender<(Entity, Image)>);
 
 /// Saves the captured screenshot to disk at the provided path.
+///
+/// Screenshots of HDR surfaces (e.g. the `Rgba16Float` scRGB-linear swapchain
+/// negotiated for `DisplayTransfer::ScRgbLinear`) decode to floating-point
+/// images. They are written losslessly when the path's container supports
+/// floating point (`OpenEXR` `.exr`, Radiance `.hdr` — note these require the
+/// corresponding `image` crate codec to be enabled, e.g. Bevy's `exr`
+/// feature); for 8-bit containers such as PNG the display-linear signal is
+/// clamped to `[0, 1]` (clipping everything above the 80-nit scRGB reference
+/// white), sRGB-encoded, and quantized, with a warning.
 pub fn save_to_disk(path: impl AsRef<Path>) -> impl FnMut(On<ScreenshotCaptured>) {
     let path = path.as_ref().to_owned();
     move |screenshot_captured| {
+        use image::{DynamicImage, ImageFormat};
+
         let img = screenshot_captured.image.clone();
         match img.try_into_dynamic() {
-            Ok(dyn_img) => match image::ImageFormat::from_path(&path) {
+            Ok(dyn_img) => match ImageFormat::from_path(&path) {
                 Ok(format) => {
-                    // discard the alpha channel which stores brightness values when HDR is enabled to make sure
-                    // the screenshot looks right
-                    let img = dyn_img.to_rgb8();
+                    let img = match (&dyn_img, format) {
+                        // Float sources keep their full range in
+                        // float-capable containers.
+                        // TODO: a calibrated HDR golden-image path (metadata,
+                        // PQ containers, paper-white-aware SDR preview) is
+                        // tracked by the HDR spec's v-hdr-golden work.
+                        (
+                            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_),
+                            ImageFormat::OpenExr,
+                        ) => DynamicImage::ImageRgba32F(dyn_img.into_rgba32f()),
+                        (
+                            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_),
+                            ImageFormat::Hdr,
+                        ) => DynamicImage::ImageRgb32F(dyn_img.into_rgb32f()),
+                        // Float source into an 8-bit container: the buffer
+                        // holds display-linear signal (for scRGB surfaces,
+                        // 1.0 = the 80-nit scRGB reference white), so clamp,
+                        // apply the sRGB OETF, and quantize.
+                        (DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_), _) => {
+                            warn!(
+                                "Saving an HDR (floating point) screenshot to an 8-bit image \
+                                format: values above 1.0 are clipped and the signal is \
+                                sRGB-encoded. Use an .exr path to keep the full range."
+                            );
+                            let mut rgb = dyn_img.into_rgb32f();
+                            for value in rgb.iter_mut() {
+                                *value =
+                                    crate::transfer_functions::srgb_oetf(value.clamp(0.0, 1.0));
+                            }
+                            DynamicImage::ImageRgb8(DynamicImage::ImageRgb32F(rgb).to_rgb8())
+                        }
+                        // discard the alpha channel which stores brightness values when HDR is enabled to make sure
+                        // the screenshot looks right
+                        _ => DynamicImage::ImageRgb8(dyn_img.to_rgb8()),
+                    };
                     #[cfg(not(target_arch = "wasm32"))]
                     match img.save_with_format(&path, format) {
                         Ok(_) => info!("Screenshot saved to {}", path.display()),
@@ -284,9 +327,13 @@ fn prepare_screenshots(
                     warn!("Unknown window for screenshot, skipping: {}", window);
                     continue;
                 };
-                let view_format = surface_data
-                    .texture_view_format
-                    .unwrap_or(surface_data.configuration.format);
+                // Single-sourced with `SurfaceData`: the sRGB view of the
+                // surface format when one exists, the raw (e.g. fp16 scRGB)
+                // surface format otherwise. Must match what
+                // `set_swapchain_texture` produces, since
+                // `submit_screenshot_commands` blits this texture back to
+                // `swap_chain_texture_view`.
+                let view_format = surface_data.view_format();
                 let size = Extent3d {
                     width: surface_data.configuration.width,
                     height: surface_data.configuration.height,

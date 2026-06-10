@@ -9,11 +9,11 @@ use crate::{
 use bevy_app::{App, Plugin};
 use bevy_ecs::entity::EntityHashSet;
 use bevy_ecs::{entity::EntityHashMap, prelude::*};
-use bevy_log::{debug, info, warn};
+use bevy_log::{debug, info, warn, warn_once};
 use bevy_utils::default;
 use bevy_window::{
-    CompositeAlphaMode, DisplayTarget, PresentMode, PrimaryWindow, RawHandleWrapper, Window,
-    WindowClosing,
+    CompositeAlphaMode, DisplayTarget, DisplayTransfer, PresentMode, PrimaryWindow,
+    RawHandleWrapper, Window, WindowClosing,
 };
 use core::{
     num::NonZero,
@@ -71,7 +71,10 @@ pub struct ExtractedWindow {
     pub swap_chain_texture: Option<SurfaceTexture>,
     pub swap_chain_texture_format: Option<TextureFormat>,
     /// This is an srgb view of [`ExtractedWindow::swap_chain_texture_format`]
-    /// so that in shaders we are always in linear space.
+    /// so that in shaders we are always in linear space. For formats without
+    /// an sRGB pair (e.g. the `Rgba16Float` scRGB surface), it is the surface
+    /// format itself: there is no hardware encode, and shaders write
+    /// (already-encoded) signal values directly.
     pub swap_chain_texture_view_format: Option<TextureFormat>,
     pub size_changed: bool,
     pub present_mode_changed: bool,
@@ -82,10 +85,35 @@ pub struct ExtractedWindow {
     ///
     /// This is the per-surface calibration shared by every camera rendering
     /// to this window; use [`resolve_display_target`] to look it up uniformly
-    /// across render-target kinds. It is plumbed here so that surface
-    /// configuration and view preparation can consume it; it does not affect
-    /// surface format selection yet.
+    /// across render-target kinds. [`create_surfaces`] uses its
+    /// [`transfer`](DisplayTarget::transfer) to select the surface format
+    /// (e.g. `Rgba16Float` for [`DisplayTransfer::ScRgbLinear`]); the outcome
+    /// is reported back in [`resolved_transfer`](Self::resolved_transfer).
     pub display_target: DisplayTarget,
+    /// Whether [`DisplayTarget::transfer`] changed since the last frame.
+    ///
+    /// A transfer change requires the surface to be reconfigured with fresh
+    /// format selection (and the window's [`ViewTarget`](crate::view::ViewTarget)s
+    /// invalidated, since the output attachment's format changes). Analogous
+    /// to [`size_changed`](Self::size_changed) /
+    /// [`present_mode_changed`](Self::present_mode_changed). Changes to the
+    /// other `DisplayTarget` fields (paper white, peak, gamut) do not affect
+    /// the surface format and never set this flag.
+    pub display_target_transfer_changed: bool,
+    /// The [`DisplayTransfer`] the configured surface can actually carry,
+    /// written by [`create_surfaces`] after format selection.
+    ///
+    /// `Some(transfer)` equals the requested [`DisplayTarget::transfer`] when
+    /// the surface negotiation succeeded (e.g. `Rgba16Float` was available
+    /// for [`DisplayTransfer::ScRgbLinear`]), and
+    /// [`DisplayTransfer::Srgb`] when the requested transfer had to be
+    /// downgraded. `None` until the surface has been configured.
+    ///
+    /// `prepare_view_display_targets` reads this to build each view's
+    /// resolved [`ViewDisplayTarget`](crate::view::ViewDisplayTarget), so the
+    /// encoding pass and HDR operator modes always key on what the surface
+    /// can show, never on an unfulfilled request.
+    pub resolved_transfer: Option<DisplayTransfer>,
     /// Whether this window needs an initial buffer commit.
     ///
     /// On Wayland, windows must present at least once before they are shown.
@@ -185,12 +213,20 @@ fn extract_windows(
             present_mode_changed: false,
             alpha_mode: window.composite_alpha_mode,
             display_target,
+            display_target_transfer_changed: false,
+            resolved_transfer: None,
             needs_initial_present: true,
         });
 
-        // Keep the extracted `DisplayTarget` in sync every frame. Change
-        // detection (for e.g. surface reconfiguration) is deliberately not
-        // implemented yet; nothing consumes changes at this stage.
+        // Keep the extracted `DisplayTarget` in sync every frame, diffing the
+        // transfer first: a transfer change requires surface reconfiguration
+        // with fresh format selection (`need_surface_configuration` /
+        // `create_surfaces`) and `ViewTarget` invalidation
+        // (`cleanup_view_targets_for_resize`). The other fields (paper white,
+        // peak, gamut) flow through uniforms and pipeline specialization and
+        // need no surface work.
+        extracted_window.display_target_transfer_changed =
+            extracted_window.display_target.transfer != display_target.transfer;
         extracted_window.display_target = display_target;
 
         if extracted_window.swap_chain_texture.is_none() {
@@ -241,6 +277,22 @@ struct SurfaceData {
     surface: WgpuWrapper<wgpu::Surface<'static>>,
     configuration: SurfaceConfiguration,
     texture_view_format: Option<TextureFormat>,
+    /// The [`DisplayTransfer`] the configured [`Self::configuration.format`]
+    /// can carry; [`DisplayTransfer::Srgb`] when the requested transfer was
+    /// downgraded (see [`select_surface_format`]). Mirrored into
+    /// [`ExtractedWindow::resolved_transfer`] by [`create_surfaces`].
+    resolved_transfer: DisplayTransfer,
+}
+
+impl SurfaceData {
+    /// The format the renderer's final blit writes through: the sRGB view of
+    /// the surface format when one exists, otherwise the surface format
+    /// itself (float/HDR formats have no sRGB view; shaders write signal
+    /// values directly).
+    fn view_format(&self) -> TextureFormat {
+        self.texture_view_format
+            .unwrap_or(self.configuration.format)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -307,7 +359,11 @@ pub fn prepare_windows(
         };
 
         // We didn't present the previous frame, so we can keep using our existing swapchain texture.
-        if window.has_swapchain_texture() && !window.size_changed && !window.present_mode_changed {
+        if window.has_swapchain_texture()
+            && !window.size_changed
+            && !window.present_mode_changed
+            && !window.display_target_transfer_changed
+        {
             continue;
         }
 
@@ -382,11 +438,86 @@ pub fn need_surface_configuration(
         if !window_surfaces.configured_windows.contains(&window.entity)
             || window.size_changed
             || window.present_mode_changed
+            || window.display_target_transfer_changed
         {
             return true;
         }
     }
     false
+}
+
+/// Selects the surface format for a window from the formats the surface
+/// supports, honoring the requested [`DisplayTransfer`] when possible.
+///
+/// Returns the chosen format together with the *resolved* transfer — the
+/// transfer the chosen format can actually carry. Policy:
+///
+/// - [`DisplayTransfer::Srgb`] (the default): prefer the 8-bit sRGB formats
+///   (`Rgba8UnormSrgb` / `Bgra8UnormSrgb`, whichever the surface lists
+///   first), falling back to the surface's first supported format. This is
+///   byte-identical to Bevy's historical behavior.
+/// - [`DisplayTransfer::ScRgbLinear`]: prefer `Rgba16Float`, which wgpu's
+///   Metal and Vulkan backends automatically present as extended-range
+///   scRGB-linear (macOS/iOS EDR via `wantsExtendedDynamicRangeContent`,
+///   Vulkan via `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` on Windows and
+///   Wayland). When the surface does not offer `Rgba16Float` (DX12, X11,
+///   GLES, WebGPU), the request is downgraded to SDR sRGB behavior with a
+///   warning (D6: warn + degrade).
+/// - [`DisplayTransfer::Pq`] / [`DisplayTransfer::Hlg`]: currently always
+///   downgraded to SDR sRGB behavior with a warning. PQ's natural surface
+///   format is `Rgb10a2Unorm`, and some surfaces do expose it — but wgpu has
+///   no color-space API yet, so the OS would interpret the swapchain as
+///   sRGB-encoded rather than PQ (see <https://github.com/gfx-rs/wgpu/issues/2920>).
+///   Selecting `Rgb10a2Unorm` and PQ-encoding into it would display garbage;
+///   the rest of the display pipeline (encoder, uniforms, operator HDR
+///   modes) is transfer-agnostic and ready, so PQ lights up here once wgpu
+///   can communicate the color space.
+///
+/// A downgrade resolves to [`DisplayTransfer::Srgb`]; the caller propagates
+/// this so downgraded views take the plain SDR path bit-for-bit.
+fn select_surface_format(
+    supported_formats: &[TextureFormat],
+    requested_transfer: DisplayTransfer,
+) -> (TextureFormat, DisplayTransfer) {
+    match requested_transfer {
+        DisplayTransfer::Srgb => {}
+        DisplayTransfer::ScRgbLinear => {
+            if supported_formats.contains(&TextureFormat::Rgba16Float) {
+                return (TextureFormat::Rgba16Float, DisplayTransfer::ScRgbLinear);
+            }
+            warn_once!(
+                "DisplayTransfer::ScRgbLinear was requested, but this surface does not \
+                support Rgba16Float (supported: {supported_formats:?}). Downgrading to \
+                SDR sRGB output. scRGB-linear output currently requires macOS/iOS \
+                (Metal), Windows (Vulkan), or Wayland (Vulkan)."
+            );
+        }
+        DisplayTransfer::Pq | DisplayTransfer::Hlg => {
+            warn_once!(
+                "DisplayTransfer::{requested_transfer:?} was requested, but wgpu cannot \
+                communicate an HDR color space to the OS yet \
+                (https://github.com/gfx-rs/wgpu/issues/2920). Downgrading to SDR sRGB \
+                output."
+            );
+        }
+    }
+
+    // SDR path: prefer sRGB formats for surfaces, but fall back to the first
+    // available format if no sRGB formats are available. This must stay
+    // byte-identical to Bevy's historical selection.
+    let mut format = *supported_formats
+        .first()
+        .expect("No supported formats for surface");
+    for available_format in supported_formats {
+        // Rgba8UnormSrgb and Bgra8UnormSrgb and the only sRGB formats wgpu exposes that we can use for surfaces.
+        if *available_format == TextureFormat::Rgba8UnormSrgb
+            || *available_format == TextureFormat::Bgra8UnormSrgb
+        {
+            format = *available_format;
+            break;
+        }
+    }
+    (format, DisplayTransfer::Srgb)
 }
 
 // 2 is wgpu's default/what we've been using so far.
@@ -407,81 +538,76 @@ pub fn create_surfaces(
     render_device: Res<RenderDevice>,
 ) {
     for window in windows.windows.values_mut() {
-        let data = window_surfaces
-            .surfaces
-            .entry(window.entity)
-            .or_insert_with(|| {
-                let surface_target = SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: Some(window.handle.get_display_handle()),
-                    raw_window_handle: window.handle.get_window_handle(),
-                };
-                // SAFETY: The window handles in ExtractedWindows will always be valid objects to create surfaces on
-                let surface = unsafe {
-                    // NOTE: On some OSes this MUST be called from the main thread.
-                    // As of wgpu 0.15, only fallible if the given window is a HTML canvas and obtaining a WebGPU or WebGL2 context fails.
-                    render_instance
-                        .create_surface_unsafe(surface_target)
-                        .expect("Failed to create wgpu surface")
-                };
-                let caps = surface.get_capabilities(&render_adapter);
-                let present_mode = present_mode(window, &caps);
-                let formats = caps.formats;
-                // For future HDR output support, we'll need to request a format that supports HDR,
-                // but as of wgpu 0.15 that is not yet supported.
-                // Prefer sRGB formats for surfaces, but fall back to first available format if no sRGB formats are available.
-                let mut format = *formats.first().expect("No supported formats for surface");
-                for available_format in formats {
-                    // Rgba8UnormSrgb and Bgra8UnormSrgb and the only sRGB formats wgpu exposes that we can use for surfaces.
-                    if available_format == TextureFormat::Rgba8UnormSrgb
-                        || available_format == TextureFormat::Bgra8UnormSrgb
-                    {
-                        format = available_format;
-                        break;
-                    }
-                }
+        if !window_surfaces.surfaces.contains_key(&window.entity) {
+            let surface_target = SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(window.handle.get_display_handle()),
+                raw_window_handle: window.handle.get_window_handle(),
+            };
+            // SAFETY: The window handles in ExtractedWindows will always be valid objects to create surfaces on
+            let surface = unsafe {
+                // NOTE: On some OSes this MUST be called from the main thread.
+                // As of wgpu 0.15, only fallible if the given window is a HTML canvas and obtaining a WebGPU or WebGL2 context fails.
+                render_instance
+                    .create_surface_unsafe(surface_target)
+                    .expect("Failed to create wgpu surface")
+            };
+            let caps = surface.get_capabilities(&render_adapter);
+            let present_mode = present_mode(window, &caps);
+            let (format, resolved_transfer) =
+                select_surface_format(&caps.formats, window.display_target.transfer);
 
-                let texture_view_format = if !format.is_srgb() {
-                    Some(format.add_srgb_suffix())
-                } else {
-                    None
-                };
-                let configuration = SurfaceConfiguration {
-                    format,
-                    width: window.physical_width,
-                    height: window.physical_height,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    present_mode,
-                    desired_maximum_frame_latency: window
-                        .desired_maximum_frame_latency
-                        .map(NonZero::<u32>::get)
-                        .unwrap_or(DEFAULT_DESIRED_MAXIMUM_FRAME_LATENCY),
-                    alpha_mode: match window.alpha_mode {
-                        CompositeAlphaMode::Auto => wgpu::CompositeAlphaMode::Auto,
-                        CompositeAlphaMode::Opaque => wgpu::CompositeAlphaMode::Opaque,
-                        CompositeAlphaMode::PreMultiplied => {
-                            wgpu::CompositeAlphaMode::PreMultiplied
-                        }
-                        CompositeAlphaMode::PostMultiplied => {
-                            wgpu::CompositeAlphaMode::PostMultiplied
-                        }
-                        CompositeAlphaMode::Inherit => wgpu::CompositeAlphaMode::Inherit,
-                    },
-                    view_formats: match texture_view_format {
-                        Some(format) => vec![format],
-                        None => vec![],
-                    },
-                };
+            // Non-sRGB 8-bit surface formats are rendered through an sRGB
+            // view so shaders always work in linear space. Formats without an
+            // sRGB pair (e.g. the Rgba16Float scRGB surface, where
+            // `add_srgb_suffix` is the identity) get no separate view format:
+            // the renderer's final blit writes (already-encoded) signal
+            // values to the surface format directly.
+            let view_format = format.add_srgb_suffix();
+            let texture_view_format = (view_format != format).then_some(view_format);
+            let configuration = SurfaceConfiguration {
+                format,
+                width: window.physical_width,
+                height: window.physical_height,
+                usage: TextureUsages::RENDER_ATTACHMENT,
+                present_mode,
+                desired_maximum_frame_latency: window
+                    .desired_maximum_frame_latency
+                    .map(NonZero::<u32>::get)
+                    .unwrap_or(DEFAULT_DESIRED_MAXIMUM_FRAME_LATENCY),
+                alpha_mode: match window.alpha_mode {
+                    CompositeAlphaMode::Auto => wgpu::CompositeAlphaMode::Auto,
+                    CompositeAlphaMode::Opaque => wgpu::CompositeAlphaMode::Opaque,
+                    CompositeAlphaMode::PreMultiplied => wgpu::CompositeAlphaMode::PreMultiplied,
+                    CompositeAlphaMode::PostMultiplied => wgpu::CompositeAlphaMode::PostMultiplied,
+                    CompositeAlphaMode::Inherit => wgpu::CompositeAlphaMode::Inherit,
+                },
+                view_formats: match texture_view_format {
+                    Some(format) => vec![format],
+                    None => vec![],
+                },
+            };
 
-                render_device.configure_surface(&surface, &configuration);
+            render_device.configure_surface(&surface, &configuration);
 
+            window_surfaces.surfaces.insert(
+                window.entity,
                 SurfaceData {
                     surface: WgpuWrapper::new(surface),
                     configuration,
                     texture_view_format,
-                }
-            });
+                    resolved_transfer,
+                },
+            );
+        }
+        let data = window_surfaces
+            .surfaces
+            .get_mut(&window.entity)
+            .expect("surface was just created");
 
-        if window.size_changed || window.present_mode_changed {
+        if window.size_changed
+            || window.present_mode_changed
+            || window.display_target_transfer_changed
+        {
             // normally this is dropped on present but we double check here to be safe as failure to
             // drop it will cause validation errors in wgpu
             drop(window.swap_chain_texture.take());
@@ -495,8 +621,29 @@ pub fn create_surfaces(
             data.configuration.height = window.physical_height;
             let caps = data.surface.get_capabilities(&render_adapter);
             data.configuration.present_mode = present_mode(window, &caps);
+            if window.display_target_transfer_changed {
+                // Re-run format selection with the new requested transfer.
+                // `cleanup_view_targets_for_resize` has already invalidated
+                // the window's `ViewTarget`s this frame, so pipelines
+                // specialized on the old output format are not reused.
+                let (format, resolved_transfer) =
+                    select_surface_format(&caps.formats, window.display_target.transfer);
+                let view_format = format.add_srgb_suffix();
+                data.configuration.format = format;
+                data.texture_view_format = (view_format != format).then_some(view_format);
+                data.configuration.view_formats = match data.texture_view_format {
+                    Some(format) => vec![format],
+                    None => vec![],
+                };
+                data.resolved_transfer = resolved_transfer;
+            }
             render_device.configure_surface(&data.surface, &data.configuration);
         }
+
+        // Report the transfer the configured surface can actually carry back
+        // to the extracted window, where `prepare_view_display_targets` picks
+        // it up to build each view's resolved `ViewDisplayTarget`.
+        window.resolved_transfer = Some(data.resolved_transfer);
 
         window_surfaces.configured_windows.insert(window.entity);
     }
@@ -546,4 +693,87 @@ fn present_mode(
         info!("PresentMode {present_mode:?} requested but not available. Falling back to {new_present_mode:?}");
     }
     new_present_mode
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The format list a typical Metal surface reports (order matters: the
+    /// SDR path picks the first 8-bit sRGB format encountered).
+    const METAL_LIKE: &[TextureFormat] = &[
+        TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::Bgra8Unorm,
+        TextureFormat::Rgba16Float,
+        TextureFormat::Rgb10a2Unorm,
+    ];
+
+    /// A surface without any HDR-capable formats (e.g. X11/GLES).
+    const SDR_ONLY: &[TextureFormat] = &[TextureFormat::Bgra8UnormSrgb, TextureFormat::Bgra8Unorm];
+
+    /// A surface without 8-bit sRGB formats, exercising the first-format
+    /// fallback.
+    const NO_SRGB: &[TextureFormat] = &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba16Float];
+
+    #[test]
+    fn srgb_default_selection_is_unchanged() {
+        // The plain SDR default must keep Bevy's historical selection.
+        assert_eq!(
+            select_surface_format(METAL_LIKE, DisplayTransfer::Srgb),
+            (TextureFormat::Bgra8UnormSrgb, DisplayTransfer::Srgb)
+        );
+        assert_eq!(
+            select_surface_format(SDR_ONLY, DisplayTransfer::Srgb),
+            (TextureFormat::Bgra8UnormSrgb, DisplayTransfer::Srgb)
+        );
+        // No sRGB format offered: fall back to the first supported format.
+        assert_eq!(
+            select_surface_format(NO_SRGB, DisplayTransfer::Srgb),
+            (TextureFormat::Bgra8Unorm, DisplayTransfer::Srgb)
+        );
+        // Rgba8UnormSrgb is picked when it is listed before Bgra8UnormSrgb.
+        assert_eq!(
+            select_surface_format(
+                &[TextureFormat::Rgba8UnormSrgb, TextureFormat::Bgra8UnormSrgb],
+                DisplayTransfer::Srgb
+            ),
+            (TextureFormat::Rgba8UnormSrgb, DisplayTransfer::Srgb)
+        );
+    }
+
+    #[test]
+    fn scrgb_picks_rgba16float_when_available() {
+        assert_eq!(
+            select_surface_format(METAL_LIKE, DisplayTransfer::ScRgbLinear),
+            (TextureFormat::Rgba16Float, DisplayTransfer::ScRgbLinear)
+        );
+        assert_eq!(
+            select_surface_format(NO_SRGB, DisplayTransfer::ScRgbLinear),
+            (TextureFormat::Rgba16Float, DisplayTransfer::ScRgbLinear)
+        );
+    }
+
+    #[test]
+    fn scrgb_downgrades_to_sdr_when_unavailable() {
+        // Resolved transfer must report the downgrade so views take the
+        // plain SDR path.
+        assert_eq!(
+            select_surface_format(SDR_ONLY, DisplayTransfer::ScRgbLinear),
+            (TextureFormat::Bgra8UnormSrgb, DisplayTransfer::Srgb)
+        );
+    }
+
+    #[test]
+    fn pq_and_hlg_always_downgrade_until_wgpu_2920() {
+        // Even though Rgb10a2Unorm is offered, wgpu cannot tell the OS the
+        // signal is PQ-encoded, so requesting PQ must resolve to SDR sRGB.
+        assert_eq!(
+            select_surface_format(METAL_LIKE, DisplayTransfer::Pq),
+            (TextureFormat::Bgra8UnormSrgb, DisplayTransfer::Srgb)
+        );
+        assert_eq!(
+            select_surface_format(METAL_LIKE, DisplayTransfer::Hlg),
+            (TextureFormat::Bgra8UnormSrgb, DisplayTransfer::Srgb)
+        );
+    }
 }

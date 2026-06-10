@@ -202,11 +202,14 @@ impl Plugin for ViewPlugin {
                         .after(crate::render_asset::prepare_assets::<GpuImage>)
                         .ambiguous_with(crate::camera::sort_cameras), // doesn't use `sorted_camera_index_for_target`
                     prepare_view_uniforms.in_set(RenderSystems::PrepareResources),
-                    // Resolved before `prepare_windows` only to keep resource
-                    // access on `ExtractedWindows` unambiguous; the
-                    // `display_target` field it reads is set during extraction.
+                    // After `create_surfaces` so the surface's resolved
+                    // transfer (`ExtractedWindow::resolved_transfer`) is
+                    // fresh for this frame's requested `DisplayTarget`;
+                    // before `prepare_windows` to keep resource access on
+                    // `ExtractedWindows` unambiguous.
                     prepare_view_display_targets
                         .in_set(RenderSystems::PrepareViews)
+                        .after(create_surfaces)
                         .before(prepare_windows),
                     prepare_display_target_uniforms.in_set(RenderSystems::PrepareResources),
                     collect_visible_cpu_culled_entities.in_set(RenderSystems::PrepareAssets),
@@ -1193,7 +1196,13 @@ pub fn cleanup_view_targets_for_resize(
     for (entity, camera) in &cameras {
         if let Some(NormalizedRenderTarget::Window(window_ref)) = &camera.target
             && let Some(window) = windows.get(&window_ref.entity())
-            && (window.size_changed || window.present_mode_changed)
+            && (window.size_changed
+                || window.present_mode_changed
+                // A `DisplayTarget::transfer` change makes `create_surfaces`
+                // re-select the surface format, so the stale `ViewTarget`'s
+                // `out_texture` (and pipelines specialized on its
+                // `out_texture_view_format`) must be invalidated too.
+                || window.display_target_transfer_changed)
         {
             commands.entity(entity).remove::<ViewTarget>();
         }

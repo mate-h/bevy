@@ -88,6 +88,32 @@ impl From<Camera3dDepthLoadOp> for LoadOp<f32> {
 #[reflect(Component, Default, PartialEq, Hash, Debug)]
 pub struct Hdr;
 
+/// Marker mirroring "this camera has an active tone-mapping operator"
+/// (`Tonemapping` other than `Tonemapping::None`) into a crate the renderer's
+/// camera extraction can see.
+///
+/// **Managed automatically** — do not insert or remove this manually. The
+/// `Tonemapping` component lives in `bevy_core_pipeline`, which `bevy_camera`
+/// and `bevy_render` cannot depend on, so `bevy_core_pipeline`'s
+/// `TonemappingPlugin` keeps this marker in sync with it every frame (in
+/// [`PostUpdate`](https://docs.rs/bevy/latest/bevy/app/struct.PostUpdate.html)).
+///
+/// Cameras with this marker render to an `Rgba16Float` intermediate main
+/// texture (like [`Hdr`], which still forces it independently), so that the
+/// node-side tone-mapping and display-encoding post-process passes operate
+/// over a high-precision buffer instead of quantizing through an 8-bit
+/// intermediate. This includes cameras with an explicit
+/// [`CompositingSpace::Srgb`]/[`CompositingSpace::Oklab`]: shaders still
+/// write encoded values (blending stays in the encoded space), but the
+/// storage is fp16 so scene-referred values above 1.0 survive until the
+/// tone-mapping pass decodes them.
+///
+/// To force the high-precision intermediate on a camera *without* an active
+/// tone-mapping operator, add [`Hdr`] instead.
+#[derive(Component, Default, Copy, Clone, Reflect, PartialEq, Eq, Hash, Debug)]
+#[reflect(Component, Default, PartialEq, Hash, Debug)]
+pub struct TonemappingEnabled;
+
 /// Color space for alpha compositing. Affects how overlapping semi-transparent layers blend.
 #[derive(Component, Copy, Clone, Reflect, PartialEq, Eq, Hash, Debug, Default)]
 #[reflect(Component, PartialEq, Hash, Debug, Default)]

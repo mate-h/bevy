@@ -4,9 +4,8 @@ use super::{
 };
 use crate::*;
 use bevy_camera::{Camera3d, Projection};
-use bevy_core_pipeline::{
-    prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
-    tonemapping::{DebandDither, Tonemapping},
+use bevy_core_pipeline::prepass::{
+    DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass,
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_light::{EnvironmentMapLight, IrradianceVolume, ShadowFilteringMethod};
@@ -20,7 +19,7 @@ use bevy_mesh::{
     MeshVertexBufferLayouts,
 };
 use bevy_platform::collections::{HashMap, HashSet};
-use bevy_render::{camera::ExtractedCamera, erased_render_asset::ErasedRenderAssets};
+use bevy_render::erased_render_asset::ErasedRenderAssets;
 use bevy_render::{camera::TemporalJitter, render_resource::*, view::ExtractedView};
 use bevy_utils::default;
 use core::any::TypeId;
@@ -46,10 +45,7 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
     mut views: Query<
         (
             &mut MeshletViewMaterialsMainOpaquePass,
-            &ExtractedCamera,
             &ExtractedView,
-            Option<&Tonemapping>,
-            Option<&DebandDither>,
             Option<&ShadowFilteringMethod>,
             (Has<ScreenSpaceAmbientOcclusion>, Has<DistanceFog>),
             (
@@ -70,10 +66,7 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
 
     for (
         mut materials,
-        camera,
         view,
-        tonemapping,
-        dither,
         shadow_filter_method,
         (ssao, distance_fog),
         (normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass),
@@ -128,16 +121,6 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
             }
             ShadowFilteringMethod::Temporal => {
                 view_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL;
-            }
-        }
-
-        if !camera.hdr {
-            if let Some(tonemapping) = tonemapping {
-                view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
-                view_key |= tonemapping_pipeline_key(*tonemapping);
-            }
-            if let Some(DebandDither::Enabled) = dither {
-                view_key |= MeshPipelineKey::DEBAND_DITHER;
             }
         }
 

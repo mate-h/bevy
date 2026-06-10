@@ -63,6 +63,7 @@ pub mod storage;
 pub mod sync_component;
 pub mod sync_world;
 pub mod texture;
+pub mod transfer_functions;
 pub mod uniform;
 pub mod view;
 
@@ -353,6 +354,7 @@ impl Plugin for RenderPlugin {
         load_shader_library!(app, "utils.wgsl");
         load_shader_library!(app, "maths.wgsl");
         load_shader_library!(app, "color_operations.wgsl");
+        load_shader_library!(app, "transfer_functions.wgsl");
         load_shader_library!(app, "bindless.wgsl");
 
         if insert_future_resources(&self.render_creation, app.world_mut()) {

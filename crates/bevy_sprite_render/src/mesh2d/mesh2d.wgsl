@@ -5,9 +5,6 @@
     mesh2d_vertex_input::{Vertex, decompress_vertex}
 }
 
-#ifdef TONEMAP_IN_SHADER
-#import bevy_core_pipeline::tonemapping
-#endif
 #ifdef SRGB_OUTPUT
 #import bevy_render::color_operations::linear_to_srgb
 #endif
@@ -55,9 +52,6 @@ fn fragment(
 ) -> @location(0) vec4<f32> {
 #ifdef VERTEX_COLORS
     var color = in.color;
-#ifdef TONEMAP_IN_SHADER
-    color = tonemapping::tone_mapping(color, view.color_grading);
-#endif
 #ifdef SRGB_OUTPUT
     color = vec4(linear_to_srgb(color.rgb), color.a);
 #endif

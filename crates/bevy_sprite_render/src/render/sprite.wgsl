@@ -1,6 +1,3 @@
-#ifdef TONEMAP_IN_SHADER
-#import bevy_core_pipeline::tonemapping
-#endif
 #ifdef SRGB_OUTPUT
 #import bevy_render::color_operations::linear_to_srgb
 #endif
@@ -60,10 +57,6 @@ fn vertex(in: VertexInput) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = in.color * textureSample(sprite_texture, sprite_sampler, in.uv);
-
-#ifdef TONEMAP_IN_SHADER
-    color = tonemapping::tone_mapping(color, view.color_grading);
-#endif
 
 #ifdef SRGB_OUTPUT
     color = vec4(linear_to_srgb(color.rgb), color.a);

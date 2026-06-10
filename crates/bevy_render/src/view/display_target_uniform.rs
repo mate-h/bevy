@@ -8,8 +8,14 @@
 //! 1. [`prepare_view_display_targets`] runs in
 //!    [`RenderSystems::PrepareViews`](crate::RenderSystems::PrepareViews) and
 //!    inserts a [`ViewDisplayTarget`] on every extracted camera view, using
-//!    [`resolve_display_target`].
-//!    Views whose target cannot be resolved fall back to
+//!    [`resolve_display_target`] for the *requested* target and the window
+//!    surface's negotiated transfer
+//!    ([`ExtractedWindow::resolved_transfer`](super::window::ExtractedWindow::resolved_transfer))
+//!    for the *resolved* one: when the surface could not fulfil the requested
+//!    transfer (e.g. scRGB-linear on a backend without `Rgba16Float`
+//!    surfaces), the resolved target degrades to
+//!    [`DisplayTarget::SDR_SRGB`], so downgraded views take the plain SDR
+//!    path bit-for-bit. Views whose target cannot be resolved fall back to
 //!    [`DisplayTarget::SDR_SRGB`]. All cameras rendering to the same surface
 //!    resolve to the same value by construction.
 //! 2. [`prepare_display_target_uniforms`] runs in
@@ -30,6 +36,7 @@
 //! The matching WGSL struct lives in `display_target.wgsl` and is importable as
 //! `bevy_render::display_target`.
 
+use bevy_camera::NormalizedRenderTarget;
 use bevy_ecs::prelude::*;
 use bevy_window::{DisplayGamut, DisplayTarget, DisplayTransfer};
 
@@ -46,8 +53,9 @@ use crate::{
     renderer::{RenderDevice, RenderQueue},
 };
 
-/// Render-world component holding the resolved [`DisplayTarget`] of the
-/// surface (window, image, or manual texture view) a view renders to.
+/// Render-world component holding the [`DisplayTarget`] of the surface
+/// (window, image, or manual texture view) a view renders to, in both its
+/// *requested* and *resolved* forms.
 ///
 /// Inserted by [`prepare_view_display_targets`] on every extracted view that
 /// has an [`ExtractedCamera`]; falls back to [`DisplayTarget::SDR_SRGB`] when
@@ -56,35 +64,63 @@ use crate::{
 /// treat a missing component as [`DisplayTarget::SDR_SRGB`].
 ///
 /// Prepare-time systems (tonemapping pipeline specialization, operator uniform
-/// preparation, and the future gamut/transfer encoder passes) read this
-/// instead of re-resolving the render target themselves.
+/// preparation, the display-encoding pass, and the upscaling blit) read the
+/// [`resolved`](Self::resolved) target instead of re-resolving the render
+/// target themselves, so they always agree on whether a view takes the HDR
+/// path — and they key on what the surface can actually show, never on an
+/// unfulfilled request.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct ViewDisplayTarget(pub DisplayTarget);
+pub struct ViewDisplayTarget {
+    /// The display target as authored by the user (the `DisplayTarget`
+    /// window component or `ManualDisplayTargets` entry).
+    ///
+    /// Useful for diagnostics and for re-resolution logic; rendering systems
+    /// should use [`resolved`](Self::resolved).
+    pub requested: DisplayTarget,
+    /// The display target after surface negotiation.
+    ///
+    /// Equal to [`requested`](Self::requested) when the surface fulfils the
+    /// requested transfer (or the target is not a window surface, where the
+    /// user owns the texture format). When the requested transfer had to be
+    /// downgraded (see `select_surface_format` in `view::window`), this is
+    /// [`DisplayTarget::SDR_SRGB`], so the downgraded view takes the plain
+    /// SDR path bit-for-bit.
+    pub resolved: DisplayTarget,
+}
 
 impl ViewDisplayTarget {
-    /// Returns `true` if this view's display target is exactly the default
-    /// [`DisplayTarget::SDR_SRGB`].
-    ///
-    /// This is the negative of the `DISPLAY_TARGET_UNIFORM` shader-def
-    /// predicate: plain-SDR views push no new shader defs and keep their
-    /// pipelines byte-identical to Bevy's pre-`DisplayTarget` output.
-    pub fn is_plain_sdr_srgb(&self) -> bool {
-        self.0 == DisplayTarget::SDR_SRGB
+    /// Creates a `ViewDisplayTarget` whose resolved target equals the
+    /// requested one (no surface-side downgrade).
+    pub fn fulfilled(target: DisplayTarget) -> Self {
+        Self {
+            requested: target,
+            resolved: target,
+        }
     }
 
-    /// Returns `true` if the requested transfer function is a high dynamic
-    /// range transfer ([`DisplayTransfer::ScRgbLinear`],
-    /// [`DisplayTransfer::Pq`], or [`DisplayTransfer::Hlg`]).
+    /// Returns `true` if this view's **resolved** display target is exactly
+    /// the default [`DisplayTarget::SDR_SRGB`].
     ///
-    /// HDR-capable operators (e.g. `Tonemapping::GranTurismo7`) use this to
-    /// pick their HDR mode at prepare time. Note that HLG is included for
-    /// completeness even though it is not currently reachable through wgpu
-    /// surfaces.
+    /// This is the negative of the `DISPLAY_TARGET_UNIFORM` shader-def
+    /// predicate: plain-SDR views (including views whose HDR request was
+    /// downgraded at surface negotiation) push no new shader defs and keep
+    /// their pipelines byte-identical to Bevy's pre-`DisplayTarget` output.
+    pub fn is_plain_sdr_srgb(&self) -> bool {
+        self.resolved == DisplayTarget::SDR_SRGB
+    }
+
+    /// Returns `true` if the **resolved** transfer function is a high dynamic
+    /// range transfer ([`DisplayTransfer::ScRgbLinear`],
+    /// [`DisplayTransfer::Pq`], or [`DisplayTransfer::Hlg`]; see
+    /// [`DisplayTransfer::is_hdr`]).
+    ///
+    /// This gates the display-encoding pass and the upscaling blit's
+    /// pass-through mode, and HDR-capable operators (e.g.
+    /// `Tonemapping::GranTurismo7`) use it to pick their HDR mode at prepare
+    /// time. Because it reads the resolved transfer, a view whose HDR request
+    /// was downgraded behaves exactly like a plain SDR view.
     pub fn is_hdr_transfer(&self) -> bool {
-        matches!(
-            self.0.transfer,
-            DisplayTransfer::ScRgbLinear | DisplayTransfer::Pq | DisplayTransfer::Hlg
-        )
+        self.resolved.transfer.is_hdr()
     }
 }
 
@@ -162,7 +198,7 @@ pub struct DisplayTargetUniform {
     pub min_luminance_nits: f32,
     /// The display gamut as a `DISPLAY_GAMUT_*` index (see the type docs).
     pub gamut: u32,
-    /// The requested transfer function as a `DISPLAY_TRANSFER_*` index (see
+    /// The (resolved) transfer function as a `DISPLAY_TRANSFER_*` index (see
     /// the type docs).
     pub transfer: u32,
 }
@@ -217,8 +253,21 @@ pub struct ViewDisplayTargetUniformOffset {
 /// has an [`ExtractedCamera`].
 ///
 /// Runs in [`RenderSystems::PrepareViews`](crate::RenderSystems::PrepareViews)
-/// so later prepare systems (pipeline specialization, uniform preparation) can
-/// rely on the component being present.
+/// — after `create_surfaces`, so the window surface's negotiated transfer is
+/// fresh — so later prepare systems (pipeline specialization, uniform
+/// preparation) can rely on the component being present.
+///
+/// Resolution policy:
+/// - **Window targets** go through surface negotiation: when the surface
+///   reports it cannot carry the requested transfer
+///   ([`ExtractedWindow::resolved_transfer`](super::window::ExtractedWindow::resolved_transfer)
+///   is [`DisplayTransfer::Srgb`] while an HDR transfer was requested), the
+///   resolved target degrades to [`DisplayTarget::SDR_SRGB`] (D6: warn +
+///   degrade; the warning is emitted at format-selection time in
+///   `create_surfaces`). Otherwise resolved == requested.
+/// - **Image / manual-texture-view targets** resolve to the requested value
+///   unchanged: there is no surface negotiation, the user owns the texture
+///   and its format.
 pub fn prepare_view_display_targets(
     mut commands: Commands,
     extracted_windows: Res<ExtractedWindows>,
@@ -226,14 +275,34 @@ pub fn prepare_view_display_targets(
     views: Query<(Entity, &ExtractedCamera), With<ExtractedView>>,
 ) {
     for (entity, camera) in &views {
-        let display_target = resolve_display_target(
+        let requested = resolve_display_target(
             camera.target.as_ref(),
             &extracted_windows,
             &manual_display_targets,
         );
-        commands
-            .entity(entity)
-            .insert(ViewDisplayTarget(display_target));
+
+        let surface_transfer = match camera.target.as_ref() {
+            Some(NormalizedRenderTarget::Window(window_ref)) => extracted_windows
+                .get(&window_ref.entity())
+                .and_then(|window| window.resolved_transfer),
+            _ => None,
+        };
+        let resolved = match surface_transfer {
+            // The surface negotiation downgraded the requested transfer:
+            // degrade the whole target to the plain SDR default so the view
+            // takes the SDR path bit-for-bit.
+            Some(DisplayTransfer::Srgb) if requested.transfer != DisplayTransfer::Srgb => {
+                DisplayTarget::SDR_SRGB
+            }
+            // Surface fulfils the request, the target is not a window, or
+            // the surface is not configured yet (transient): no downgrade.
+            _ => requested,
+        };
+
+        commands.entity(entity).insert(ViewDisplayTarget {
+            requested,
+            resolved,
+        });
     }
 }
 
@@ -261,7 +330,7 @@ pub fn prepare_display_target_uniforms(
         return;
     };
     for (entity, view_display_target) in &views {
-        let offset = writer.write(&DisplayTargetUniform::from(view_display_target.0));
+        let offset = writer.write(&DisplayTargetUniform::from(view_display_target.resolved));
         commands
             .entity(entity)
             .insert(ViewDisplayTargetUniformOffset { offset });
@@ -314,12 +383,12 @@ mod tests {
 
     #[test]
     fn view_display_target_predicates() {
-        let sdr = ViewDisplayTarget(DisplayTarget::SDR_SRGB);
+        let sdr = ViewDisplayTarget::fulfilled(DisplayTarget::SDR_SRGB);
         assert!(sdr.is_plain_sdr_srgb());
         assert!(!sdr.is_hdr_transfer());
 
         // Any field deviation makes the target non-plain.
-        let brighter = ViewDisplayTarget(DisplayTarget {
+        let brighter = ViewDisplayTarget::fulfilled(DisplayTarget {
             paper_white_nits: 203.0,
             ..DisplayTarget::SDR_SRGB
         });
@@ -331,12 +400,34 @@ mod tests {
             DisplayTransfer::Pq,
             DisplayTransfer::Hlg,
         ] {
-            let hdr = ViewDisplayTarget(DisplayTarget {
+            let hdr = ViewDisplayTarget::fulfilled(DisplayTarget {
                 transfer,
                 ..DisplayTarget::SDR_SRGB
             });
             assert!(!hdr.is_plain_sdr_srgb());
             assert!(hdr.is_hdr_transfer());
         }
+    }
+
+    #[test]
+    fn downgraded_target_takes_the_plain_sdr_path() {
+        // A view whose HDR request was downgraded at surface negotiation
+        // (resolved = SDR_SRGB) must be indistinguishable from a plain SDR
+        // view to every predicate, regardless of what was requested.
+        let downgraded = ViewDisplayTarget {
+            requested: DisplayTarget {
+                paper_white_nits: 200.0,
+                peak_luminance_nits: 1000.0,
+                transfer: DisplayTransfer::ScRgbLinear,
+                ..DisplayTarget::SDR_SRGB
+            },
+            resolved: DisplayTarget::SDR_SRGB,
+        };
+        assert!(downgraded.is_plain_sdr_srgb());
+        assert!(!downgraded.is_hdr_transfer());
+        assert_eq!(
+            DisplayTargetUniform::from(downgraded.resolved),
+            DisplayTargetUniform::from(DisplayTarget::SDR_SRGB)
+        );
     }
 }

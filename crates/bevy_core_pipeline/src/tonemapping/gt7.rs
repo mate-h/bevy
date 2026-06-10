@@ -698,8 +698,11 @@ impl Gt7ParamsUniform {
     pub fn new(display_target: &DisplayTarget, params: &GranTurismo7Params) -> Self {
         let params = params.sanitized();
         // Single-source the HDR predicate with the rest of the display
-        // pipeline (`ViewDisplayTarget::is_hdr_transfer`).
-        if !ViewDisplayTarget(*display_target).is_hdr_transfer() {
+        // pipeline (`DisplayTransfer::is_hdr`, which also backs
+        // `ViewDisplayTarget::is_hdr_transfer`). Callers pass the *resolved*
+        // display target, so a downgraded HDR request configures plain SDR
+        // mode here too.
+        if !display_target.transfer.is_hdr() {
             return Self::from(&Gt7ToneMapping::new_sdr_with_params(&params));
         }
 
@@ -823,7 +826,7 @@ pub fn prepare_gt7_params_uniforms(
             continue;
         }
         let display_target = view_display_target
-            .map(|view_display_target| view_display_target.0)
+            .map(|view_display_target| view_display_target.resolved)
             .unwrap_or_default();
         let offset = writer.write(&Gt7ParamsUniform::new(&display_target, params));
         commands
