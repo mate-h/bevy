@@ -4,17 +4,29 @@ authors: ["@pavlov"]
 pull_requests: []
 ---
 
-Bevy can now present real high-dynamic-range output. Setting a window's
-`DisplayTarget` to request the scRGB-linear transfer is all it takes:
+Bevy can now present real high-dynamic-range output. Set the window's
+`DisplayTarget` to request the scRGB-linear transfer, and give the camera an
+HDR-aware tone-mapping operator plus its params component:
 
 ```rust
-fn enable_hdr_output(mut window: Single<&mut DisplayTarget, With<PrimaryWindow>>) {
+fn enable_hdr_output(
+    mut commands: Commands,
+    mut window: Single<&mut DisplayTarget, With<PrimaryWindow>>,
+    camera: Single<Entity, With<Camera>>,
+) {
     *window = DisplayTarget {
         paper_white_nits: 200.0,
         peak_luminance_nits: 1000.0,
         transfer: DisplayTransfer::ScRgbLinear,
         ..DisplayTarget::SDR_SRGB
     };
+    commands.entity(*camera).insert((
+        Tonemapping::GranTurismo7,
+        // Required for GT7's HDR mode: the prepared params uniform is what
+        // plumbs the display target's peak luminance into the operator.
+        // Without it, GT7 stays in SDR mode and warns.
+        GranTurismo7Params::default(),
+    ));
 }
 ```
 
@@ -23,10 +35,10 @@ swapchain, which wgpu's Metal and Vulkan backends present as extended-range
 scRGB-linear (1.0 = 80 nits, values above 1.0 reach into the display's HDR
 headroom). The display-encoding pass writes the encoded signal (scaled by
 `paper_white_nits / 80`) and the final blit hands it to the surface unchanged —
-float surfaces have no hardware sRGB encode. Pair it with an HDR-aware
-tone-mapping operator (`Tonemapping::GranTurismo7`) and highlights above paper
-white finally make it to the panel. Press `O` in the `tonemapping` example to
-try it on an HDR-capable display.
+float surfaces have no hardware sRGB encode. With the GT7 operator running in
+its HDR mode (`Tonemapping::GranTurismo7` + `GranTurismo7Params`), highlights
+above paper white finally make it to the panel. Press `O` in the `tonemapping`
+example to try it on an HDR-capable display.
 
 Supported today: macOS/iOS (Metal, EDR), Windows (Vulkan), and Wayland
 (Vulkan, Mesa 25.1+ color management). On other backends (DX12, X11, GLES,

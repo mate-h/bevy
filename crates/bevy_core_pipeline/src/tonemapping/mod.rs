@@ -7,6 +7,7 @@ use bevy_ecs::prelude::*;
 use bevy_image::{CompressedImageFormats, Image, ImageSampler, ImageType};
 #[cfg(not(feature = "tonemapping_luts"))]
 use bevy_log::error;
+use bevy_log::warn_once;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin},
@@ -222,6 +223,7 @@ pub fn sync_tonemapping_enabled(
     mut commands: Commands,
     changed: Query<(Entity, &Tonemapping, Has<TonemappingEnabled>), Changed<Tonemapping>>,
     mut removed: RemovedComponents<Tonemapping>,
+    still_has: Query<(), With<Tonemapping>>,
 ) {
     for (entity, tonemapping, has_marker) in &changed {
         if tonemapping.is_enabled() {
@@ -233,6 +235,17 @@ pub fn sync_tonemapping_enabled(
         }
     }
     for entity in removed.read() {
+        // A buffered removal event may have been superseded by a re-insert
+        // (remove + insert within the same observation window). Read the live
+        // component state instead of assuming `Tonemapping` is gone: the
+        // re-inserted component is `Added` (hence `Changed`), so the loop
+        // above already synced the marker for it, and queueing an
+        // unconditional `remove` here would override that decision — commands
+        // apply in queue order — permanently desyncing the marker (the
+        // consumed change tick means no later run would re-insert it).
+        if still_has.contains(entity) {
+            continue;
+        }
         // The entity may have been despawned entirely.
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.remove::<TonemappingEnabled>();
@@ -608,6 +621,22 @@ pub fn prepare_view_tonemapping_pipelines(
         // and the camera opted in with a `GranTurismo7Params` component
         // (`prepare_gt7_params_uniforms` uses the same predicate).
         let gt7_uniform_active = tonemapping == Tonemapping::GranTurismo7 && gt7_params.is_some();
+
+        // D6 diagnostic: GT7's HDR mode is selected inside the prepared
+        // params uniform, so without the component the shader keeps its baked
+        // SDR defaults — on an HDR surface the image silently stays clamped
+        // to paper white. Warn instead of degrading silently.
+        if tonemapping == Tonemapping::GranTurismo7
+            && gt7_params.is_none()
+            && view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer)
+        {
+            warn_once!(
+                "A camera using `Tonemapping::GranTurismo7` is rendering to an HDR display \
+                target but has no `GranTurismo7Params` component; the operator will run in \
+                SDR mode and highlights will not exceed paper white. Insert \
+                `GranTurismo7Params::default()` on the camera to enable GT7's HDR mode."
+            );
+        }
         // The display-target uniform is bound for views whose resolved
         // display target is not the plain SDR default, and whenever an
         // operator needs it (currently: the GT7 params uniform path, which
@@ -778,5 +807,48 @@ mod tests {
             .world()
             .entity(none_entity)
             .contains::<TonemappingEnabled>());
+    }
+
+    #[test]
+    fn tonemapping_enabled_marker_survives_same_frame_remove_and_reinsert() {
+        let mut app = App::new();
+        app.add_systems(Update, sync_tonemapping_enabled);
+
+        let entity = app.world_mut().spawn(Tonemapping::TonyMcMapface).id();
+        app.update();
+        assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // Remove + re-insert an enabled operator within one update: the
+        // buffered removal event must not strip the marker the re-inserted
+        // component still warrants.
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<Tonemapping>()
+            .insert(Tonemapping::AgX);
+        app.update();
+        assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // The marker must also stay in sync on later, unrelated updates
+        // (the change tick is consumed; nothing may "heal" it afterwards).
+        app.update();
+        assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // Remove + re-insert `Tonemapping::None` within one update still
+        // removes the marker (the live component decides, not the event).
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<Tonemapping>()
+            .insert(Tonemapping::None);
+        app.update();
+        assert!(!app.world().entity(entity).contains::<TonemappingEnabled>());
+
+        // Remove + re-insert an enabled operator when the marker is absent
+        // re-inserts it (the queued insert must win over the removal event).
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<Tonemapping>()
+            .insert(Tonemapping::GranTurismo7);
+        app.update();
+        assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
     }
 }

@@ -676,10 +676,13 @@ impl Gt7ParamsUniform {
     ///   (non-finite fields reset, ranges clamped, one warning).
     /// - If the display target requests an HDR transfer (scRGB-linear, PQ, or
     ///   HLG), the operator is configured in **HDR mode**:
-    ///   - non-finite or non-positive `paper_white_nits` is reset to 100,
-    ///     non-finite `peak_luminance_nits` to 100 (each with a warning);
-    ///   - `paper_white_nits` is clamped to at most
-    ///     [`GT7_MAX_HDR_PEAK_NITS`];
+    ///   - `paper_white_nits` is sanitized through
+    ///     [`DisplayTarget::sanitized_paper_white_nits`] (non-finite or
+    ///     non-positive → 100 nits, clamped to the 10000-nit PQ ceiling, each
+    ///     with a warning) — the same method the display pipeline's uniform
+    ///     writer uses, so the operator and the display encoder always fold
+    ///     the identical paper-white value; non-finite
+    ///     `peak_luminance_nits` is reset to 100 (with a warning);
     ///   - the peak is clamped to
     ///     [`[GT7_MIN_HDR_PEAK_NITS, GT7_MAX_HDR_PEAK_NITS]`](GT7_MIN_HDR_PEAK_NITS),
     ///     with a warning;
@@ -706,20 +709,23 @@ impl Gt7ParamsUniform {
             return Self::from(&Gt7ToneMapping::new_sdr_with_params(&params));
         }
 
-        let mut paper_white = display_target.paper_white_nits;
-        if !paper_white.is_finite() || paper_white <= 0.0 {
+        // Single-sourced with the display pipeline's uniform writer
+        // (`prepare_display_target_uniforms` in bevy_render): the operator's
+        // seam renormalization (× 100 / paper_white) and the display
+        // encoder's transfer encoding (× paper_white / 80 for scRGB,
+        // × paper_white for PQ) must fold the IDENTICAL paper-white value or
+        // the D5 cancellation breaks for degenerate/out-of-range inputs.
+        let paper_white = display_target.sanitized_paper_white_nits();
+        if !display_target.paper_white_nits.is_finite() || display_target.paper_white_nits <= 0.0 {
             warn_once!(
                 "DisplayTarget::paper_white_nits is non-finite or non-positive; \
                  GranTurismo7 is using 100 nits instead"
             );
-            paper_white = DisplayTarget::SDR_SRGB.paper_white_nits;
-        }
-        if paper_white > GT7_MAX_HDR_PEAK_NITS {
+        } else if paper_white < display_target.paper_white_nits {
             warn_once!(
                 "DisplayTarget::paper_white_nits exceeds the PQ ceiling of 10000 nits; \
                  GranTurismo7 is clamping it to 10000 nits"
             );
-            paper_white = GT7_MAX_HDR_PEAK_NITS;
         }
 
         let mut peak = display_target.peak_luminance_nits;
@@ -1246,6 +1252,39 @@ mod tests {
         let uniform =
             Gt7ParamsUniform::new(&hdr_target(1000.0, 100.0, DisplayTransfer::Hlg), &params);
         assert_eq!(uniform.peak, 10.0);
+    }
+
+    /// The seam renormalization must fold the *exact* value
+    /// [`DisplayTarget::sanitized_paper_white_nits`] returns — the same
+    /// method the display pipeline's uniform writer applies before the
+    /// encoder multiplies by paper white — so the D5 cancellation
+    /// (`× 100 / paper_white` here, `× paper_white / 80` or
+    /// `× paper_white` at the encoder) holds bit-for-bit for every input.
+    #[test]
+    fn paper_white_fold_is_single_sourced_with_the_display_pipeline() {
+        let params = GranTurismo7Params::default();
+        for paper_white in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -50.0,
+            0.0,
+            50.0,
+            80.0,
+            100.0,
+            203.0,
+            1000.0,
+            10000.0,
+            20000.0,
+        ] {
+            let target = hdr_target(1000.0, paper_white, DisplayTransfer::ScRgbLinear);
+            let uniform = Gt7ParamsUniform::new(&target, &params);
+            assert_eq!(
+                uniform.sdr_correction_factor.to_bits(),
+                (REFERENCE_LUMINANCE / target.sanitized_paper_white_nits()).to_bits(),
+                "diverged for paper_white_nits = {paper_white}"
+            );
+        }
     }
 
     /// User params flow through `sanitized()` before reaching the uniform.

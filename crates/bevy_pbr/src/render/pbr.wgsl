@@ -88,7 +88,8 @@ fn fragment(
         out.color = pbr_input.material.base_color;
     }
 
-    // apply in-shader post processing (fog, alpha-premultiply, and also tonemapping, debanding if the camera is non-hdr)
+    // apply in-shader post processing (fog, alpha-premultiply); tone mapping and
+    // debanding run later, in the post-process tonemapping pass, for every camera.
     // note this does not include fullscreen postprocessing effects like bloom.
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 #endif

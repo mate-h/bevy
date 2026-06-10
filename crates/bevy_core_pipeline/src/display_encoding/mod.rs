@@ -36,7 +36,7 @@ use bevy_app::{App, Plugin};
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
 use bevy_camera::CompositingSpace;
 use bevy_ecs::prelude::*;
-use bevy_log::warn_once;
+use bevy_log::{info_once, warn_once};
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
@@ -128,8 +128,11 @@ pub fn init_display_encoding_pipeline(
 ///
 /// `gamut` and `transfer` are the **resolved** values after the prepare-time
 /// coercions in [`prepare_view_display_encoding_pipelines`] (HLG → PQ,
-/// PQ forces Rec.2020, Display P3 currently falls back to Rec.709), so the
-/// pipeline hashes on what is actually encoded, not on what was requested.
+/// PQ forces Rec.2020, scRGB forces Rec.709 — scRGB signals are by definition
+/// expressed in extended Rec.709/sRGB coordinates — and Display P3 currently
+/// falls back to Rec.709), so the pipeline hashes on what is actually
+/// encoded, not on what was requested. The only reachable gamut × transfer
+/// combinations are therefore `Rec709 × ScRgbLinear` and `Rec2020 × Pq`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct DisplayEncodingPipelineKey {
     /// Format of the main texture the pass writes to (the
@@ -166,6 +169,9 @@ impl SpecializedRenderPipeline for DisplayEncodingPipeline {
         match key.gamut {
             // Identity: the working space is currently linear Rec.709.
             DisplayGamut::Rec709 => {}
+            // Only reachable with the PQ transfer: scRGB coerces its
+            // encoding gamut to Rec.709 at prepare time (scRGB signals are
+            // definitionally Rec.709-coordinate).
             DisplayGamut::Rec2020 => shader_defs.push("DISPLAY_GAMUT_REC2020".into()),
             // Coerced away at prepare time; unreachable here.
             DisplayGamut::DisplayP3 => unreachable!(
@@ -223,6 +229,15 @@ pub struct ViewDisplayEncodingPipeline {
 ///   with the HLG OETF would double-tone-map). `warn_once!`.
 /// * [`DisplayGamut::DisplayP3`] → [`DisplayGamut::Rec709`]: no P3 gamut
 ///   matrix ships yet (P3 surfaces are unreachable through wgpu). `warn_once!`.
+/// * scRGB-linear with a non-Rec.709 gamut → [`DisplayGamut::Rec709`]: scRGB
+///   (IEC 61966-2-2) is definitionally encoded against Rec.709/sRGB
+///   primaries — every backend declares the `Rgba16Float` surface as
+///   extended-sRGB-linear and the OS compositor maps to the panel's physical
+///   gamut itself, with wide gamut expressed through out-of-range component
+///   values. Encoding Rec.2020 coordinates into it would desaturate the whole
+///   frame. Only the *encoding* is coerced; `DisplayTarget::gamut` itself
+///   stays user-authored (it still correctly describes the panel). `info_once!`
+///   (benign: the authored value is a natural description of an HDR panel).
 /// * PQ with a non-Rec.2020 gamut → [`DisplayGamut::Rec2020`]: PQ is
 ///   canonically Rec.2020. `warn_once!`.
 pub fn prepare_view_display_encoding_pipelines(
@@ -277,6 +292,23 @@ pub fn prepare_view_display_encoding_pipelines(
             warn_once!(
                 "`DisplayGamut::DisplayP3` output is not supported yet (no wgpu backend \
                 exposes P3 surfaces); leaving colors in Rec.709 primaries."
+            );
+            gamut = DisplayGamut::Rec709;
+        }
+        if transfer == DisplayTransfer::ScRgbLinear && gamut != DisplayGamut::Rec709 {
+            // scRGB-linear (IEC 61966-2-2) is *definitionally* encoded against
+            // Rec.709/sRGB primaries: every backend that negotiates the
+            // Rgba16Float surface declares it as extended-sRGB-linear, and the
+            // OS compositor performs the mapping to the panel's physical gamut
+            // itself. Wide gamut rides scRGB's out-of-range (including
+            // negative) component values, never a change of primaries —
+            // re-coordinatizing into Rec.2020 here would be interpreted as
+            // Rec.709 by the compositor and desaturate every pixel.
+            info_once!(
+                "scRGB-linear signals are always expressed in (extended) Rec.709/sRGB \
+                coordinates (the OS compositor performs the mapping to the panel's gamut); \
+                ignoring `DisplayTarget::gamut` ({gamut:?}) for encoding. The field still \
+                correctly describes the panel for luminance/metadata purposes."
             );
             gamut = DisplayGamut::Rec709;
         }

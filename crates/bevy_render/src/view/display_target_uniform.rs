@@ -38,6 +38,7 @@
 
 use bevy_camera::NormalizedRenderTarget;
 use bevy_ecs::prelude::*;
+use bevy_log::warn_once;
 use bevy_window::{DisplayGamut, DisplayTarget, DisplayTransfer};
 
 use super::{
@@ -181,10 +182,18 @@ pub const fn display_transfer_index(transfer: DisplayTransfer) -> u32 {
 /// the gamut-transform pass of the display pipeline derives them per pipeline
 /// (they arrive with the encoder workstream).
 ///
-/// Values are copied verbatim from the resolved [`DisplayTarget`]; no
-/// validation or clamping is applied here. Consumers that have hard numeric
-/// requirements (e.g. the GT7 operator's HDR peak range) sanitize at their own
-/// prepare step.
+/// The [`From<DisplayTarget>`] conversion copies values verbatim, but the
+/// uniform writer ([`prepare_display_target_uniforms`]) sanitizes
+/// [`paper_white_nits`](Self::paper_white_nits) through
+/// [`DisplayTarget::sanitized_paper_white_nits`] before writing — every GPU
+/// consumer that multiplies by paper white (the display encoder's transfer
+/// encoding in particular) must fold the *same* value the tone-mapping
+/// operators fold into their seam renormalization, or the two factors stop
+/// cancelling (a `NaN`/zero/negative paper white would otherwise `NaN` or
+/// black out the encoded frame, and a value above the 10000-nit PQ ceiling
+/// would silently disagree with GT7's clamped renormalization). The remaining
+/// fields are unvalidated; consumers with hard numeric requirements (e.g. the
+/// GT7 operator's HDR peak range) sanitize at their own prepare step.
 #[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
 pub struct DisplayTargetUniform {
     /// [`DisplayTarget::paper_white_nits`]: the luminance, in nits, that
@@ -310,6 +319,16 @@ pub fn prepare_view_display_targets(
 /// [`DisplayTargetUniforms`] and inserts the matching
 /// [`ViewDisplayTargetUniformOffset`].
 ///
+/// [`DisplayTargetUniform::paper_white_nits`] is sanitized through
+/// [`DisplayTarget::sanitized_paper_white_nits`] (non-finite / non-positive →
+/// 100 nits, clamped to the 10000-nit PQ ceiling; valid values pass through
+/// bit-for-bit) with a `warn_once!` when the authored value had to be
+/// replaced. This keeps the GPU-side paper white single-sourced with the
+/// value the tone-mapping operators (e.g. GT7's `sdr_correction_factor`)
+/// fold at their own prepare step, so the seam contract — operator output
+/// × `100 / paper_white`, encoder × `paper_white / 80` (scRGB) or
+/// `× paper_white` (PQ) — holds for every authored input.
+///
 /// Runs in
 /// [`RenderSystems::PrepareResources`](crate::RenderSystems::PrepareResources),
 /// mirroring [`prepare_view_uniforms`](super::prepare_view_uniforms).
@@ -330,7 +349,20 @@ pub fn prepare_display_target_uniforms(
         return;
     };
     for (entity, view_display_target) in &views {
-        let offset = writer.write(&DisplayTargetUniform::from(view_display_target.resolved));
+        let mut uniform = DisplayTargetUniform::from(view_display_target.resolved);
+        let sanitized = view_display_target.resolved.sanitized_paper_white_nits();
+        // Bit comparison: valid values pass through bit-for-bit, and a NaN
+        // input (NaN != NaN) is still detected as replaced.
+        if sanitized.to_bits() != uniform.paper_white_nits.to_bits() {
+            warn_once!(
+                "DisplayTarget::paper_white_nits ({}) is non-finite, non-positive, or above \
+                 the 10000-nit PQ ceiling; the display pipeline is using {} nits instead",
+                uniform.paper_white_nits,
+                sanitized
+            );
+            uniform.paper_white_nits = sanitized;
+        }
+        let offset = writer.write(&uniform);
         commands
             .entity(entity)
             .insert(ViewDisplayTargetUniformOffset { offset });

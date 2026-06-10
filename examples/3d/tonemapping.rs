@@ -3,7 +3,7 @@
 use bevy::{
     asset::UnapprovedPathMode,
     camera::Hdr,
-    core_pipeline::tonemapping::Tonemapping,
+    core_pipeline::tonemapping::{GranTurismo7Params, Tonemapping},
     light::CascadeShadowConfigBuilder,
     platform::collections::HashMap,
     prelude::*,
@@ -330,18 +330,30 @@ fn toggle_tonemapping_method(
 /// operator to GranTurismo7, currently the only HDR-aware one, when turning
 /// HDR on).
 ///
+/// GT7 only engages its HDR mode (peak-luminance-aware output above paper
+/// white) when the camera also has a [`GranTurismo7Params`] component — the
+/// prepared params uniform is where the operator reads the display target's
+/// peak luminance. Without it the operator silently stays in SDR mode, so the
+/// component is inserted alongside the HDR display target (and removed again
+/// when toggling back to SDR, restoring the operator's baked SDR defaults).
+///
 /// NOTE: seeing actual HDR output requires an HDR-capable display and a
 /// backend where wgpu exposes an `Rgba16Float` surface: macOS/iOS (Metal),
 /// Windows (Vulkan), or Wayland (Vulkan). Elsewhere Bevy logs a warning and
 /// stays in SDR.
 fn toggle_hdr_output(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
-    mut tonemapping: Single<&mut Tonemapping>,
+    camera: Single<(Entity, &mut Tonemapping)>,
 ) {
     if keys.just_pressed(KeyCode::KeyO) {
+        let (camera_entity, mut tonemapping) = camera.into_inner();
         if display_target.transfer == DisplayTransfer::ScRgbLinear {
             **display_target = DisplayTarget::SDR_SRGB;
+            commands
+                .entity(camera_entity)
+                .remove::<GranTurismo7Params>();
         } else {
             **display_target = DisplayTarget {
                 paper_white_nits: 200.0,
@@ -349,7 +361,12 @@ fn toggle_hdr_output(
                 transfer: DisplayTransfer::ScRgbLinear,
                 ..DisplayTarget::SDR_SRGB
             };
-            **tonemapping = Tonemapping::GranTurismo7;
+            *tonemapping = Tonemapping::GranTurismo7;
+            // Required for GT7's HDR mode: this is what plumbs the display
+            // target's peak luminance into the operator.
+            commands
+                .entity(camera_entity)
+                .insert(GranTurismo7Params::default());
         }
     }
 }

@@ -991,7 +991,7 @@ fn premultiply_alpha(standard_material_flags: u32, color: vec4<f32>) -> vec4<f32
 #endif
 
 // fog, alpha premultiply
-// for non-hdr cameras, tonemapping and debanding
+// (tone mapping and debanding run later, in the post-process tonemapping pass)
 fn main_pass_post_lighting_processing(
     pbr_input: pbr_types::PbrInput,
     input_color: vec4<f32>,

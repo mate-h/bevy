@@ -8,7 +8,11 @@
 //      blit — which passes encoded output through untouched instead when this
 //      pass ran),
 //   2. gamut transform from the working primaries (linear Rec.709 today) to
-//      the display primaries (`DISPLAY_GAMUT_REC2020`, identity for Rec.709),
+//      the display *signal* primaries (`DISPLAY_GAMUT_REC2020`, identity for
+//      Rec.709) — only reachable together with `DISPLAY_TRANSFER_PQ`: scRGB
+//      signals are definitionally expressed in (extended) Rec.709 coordinates
+//      whatever the panel's physical gamut, so prepare coerces the scRGB
+//      encoding gamut to Rec.709 (the compositor maps to the panel itself),
 //   3. out-of-gamut handling (currently a per-channel clip stub),
 //   4. transfer encoding (`DISPLAY_TRANSFER_SCRGB` / `DISPLAY_TRANSFER_PQ`).
 //
@@ -30,7 +34,10 @@
 @group(0) @binding(1) var in_sampler: sampler;
 // Per-view display-target calibration (paper white / peak / gamut / transfer
 // indices). Gamut and transfer are compile-time shader defs here; only the
-// luminance fields are read at runtime.
+// luminance fields are read at runtime. `paper_white_nits` is sanitized by
+// the uniform writer (`prepare_display_target_uniforms`: finite, positive,
+// <= 10000) with the same rules the tone-map operators fold at prepare time,
+// so the seam scale factors cancel exactly.
 @group(0) @binding(2) var<uniform> display_target: DisplayTargetUniform;
 
 #ifdef DISPLAY_GAMUT_REC2020

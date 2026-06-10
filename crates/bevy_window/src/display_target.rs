@@ -130,6 +130,39 @@ impl DisplayTarget {
         gamut: DisplayGamut::Rec709,
         transfer: DisplayTransfer::Srgb,
     };
+
+    /// The luminance ceiling [`sanitized_paper_white_nits`] clamps to: the PQ
+    /// (SMPTE ST 2084) coding ceiling of 10000 nits, the brightest luminance
+    /// any supported transfer function can represent.
+    ///
+    /// [`sanitized_paper_white_nits`]: Self::sanitized_paper_white_nits
+    pub const MAX_PAPER_WHITE_NITS: f32 = 10000.0;
+
+    /// Returns [`paper_white_nits`](Self::paper_white_nits) sanitized for use
+    /// in luminance math:
+    ///
+    /// - non-finite or non-positive values fall back to
+    ///   [`DisplayTarget::SDR_SRGB`]'s 100 nits (a paper white of zero or
+    ///   `NaN` would black out or `NaN` the whole frame), and
+    /// - values above [`MAX_PAPER_WHITE_NITS`](Self::MAX_PAPER_WHITE_NITS)
+    ///   are clamped to it.
+    ///
+    /// Valid values (the common case) are returned bit-for-bit unchanged.
+    ///
+    /// This is the **single source of truth** for paper-white sanitization:
+    /// every renderer stage that folds `paper_white_nits` into its math (the
+    /// tone-mapping operators' seam renormalization *and* the display
+    /// encoder's transfer encoding) must use this method, so the two scale
+    /// factors cancel exactly as the seam contract requires regardless of
+    /// what the user authored. Warning about the fallback is left to the
+    /// callers (this method is pure).
+    pub fn sanitized_paper_white_nits(&self) -> f32 {
+        if !self.paper_white_nits.is_finite() || self.paper_white_nits <= 0.0 {
+            Self::SDR_SRGB.paper_white_nits
+        } else {
+            self.paper_white_nits.min(Self::MAX_PAPER_WHITE_NITS)
+        }
+    }
 }
 
 impl Default for DisplayTarget {
@@ -207,6 +240,14 @@ pub enum DisplayTransfer {
     /// below `0.0`) are valid. Used with `Rgba16Float` surfaces. The encoder
     /// scales by `paper_white_nits / 80` so that scene paper white lands on
     /// the display's configured paper white.
+    ///
+    /// scRGB signals are always expressed in (extended) **Rec.709/sRGB
+    /// coordinates**, whatever the physical gamut of the panel: the OS
+    /// compositor performs the mapping to the panel's primaries, and wide
+    /// gamut is carried by out-of-range (including negative) component
+    /// values. [`DisplayTarget::gamut`] therefore does not change how scRGB
+    /// is encoded (the renderer ignores it for this transfer, with a log
+    /// notice); it still usefully describes the panel itself.
     ScRgbLinear,
     /// The Perceptual Quantizer (SMPTE ST 2084, ITU-R BT.2100), the absolute
     /// transfer function used by HDR10. Encodes absolute luminance normalized
@@ -259,6 +300,43 @@ mod tests {
     fn enum_defaults_match_sdr() {
         assert_eq!(DisplayGamut::default(), DisplayGamut::Rec709);
         assert_eq!(DisplayTransfer::default(), DisplayTransfer::Srgb);
+    }
+
+    #[test]
+    fn sanitized_paper_white_passes_valid_values_through_bit_for_bit() {
+        for nits in [0.001, 80.0, 100.0, 203.0, 1000.0, 10000.0] {
+            let target = DisplayTarget {
+                paper_white_nits: nits,
+                ..DisplayTarget::SDR_SRGB
+            };
+            assert_eq!(
+                target.sanitized_paper_white_nits().to_bits(),
+                nits.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_paper_white_replaces_degenerate_values() {
+        for nits in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0, -50.0] {
+            let target = DisplayTarget {
+                paper_white_nits: nits,
+                ..DisplayTarget::SDR_SRGB
+            };
+            assert_eq!(target.sanitized_paper_white_nits(), 100.0);
+        }
+    }
+
+    #[test]
+    fn sanitized_paper_white_clamps_to_pq_ceiling() {
+        let target = DisplayTarget {
+            paper_white_nits: 20000.0,
+            ..DisplayTarget::SDR_SRGB
+        };
+        assert_eq!(
+            target.sanitized_paper_white_nits(),
+            DisplayTarget::MAX_PAPER_WHITE_NITS
+        );
     }
 
     #[test]
