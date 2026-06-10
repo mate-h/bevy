@@ -195,14 +195,19 @@ impl Luminance for Hsla {
 
     fn darker(&self, amount: f32) -> Self {
         Self {
-            lightness: (self.lightness - amount).clamp(0., 1.),
+            lightness: (self.lightness - amount).max(0.),
             ..*self
         }
     }
 
     fn lighter(&self, amount: f32) -> Self {
+        let lightness = self.lightness + amount;
         Self {
-            lightness: (self.lightness + amount).min(1.),
+            lightness: if self.lightness <= 1.0 {
+                lightness.min(1.)
+            } else {
+                lightness
+            },
             ..*self
         }
     }

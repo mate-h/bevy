@@ -10,6 +10,15 @@ use bevy_reflect::prelude::*;
 
 /// Color in Okhsl color space with alpha
 /// Further information on this color model can be found on <https://bottosson.github.io/posts/colorpicker>.
+///
+/// # Gamut limitation
+///
+/// Okhsl is defined *relative to the sRGB (Rec. 709) gamut*: its saturation and
+/// lightness components describe positions within the sRGB gamut hull, and the
+/// conversion math hardcodes that hull. It cannot represent wide-gamut colors
+/// (e.g. [`LinearRec2020`](crate::LinearRec2020) colors outside sRGB) or HDR
+/// intensities; converting such colors through this space produces in-gamut
+/// approximations.
 #[doc = include_str!("../docs/conversion.md")]
 /// <div>
 #[doc = include_str!("../docs/diagrams/model_graph.svg")]
@@ -199,14 +208,19 @@ impl Luminance for Okhsla {
 
     fn darker(&self, amount: f32) -> Self {
         Self {
-            lightness: (self.lightness - amount).clamp(0., 1.),
+            lightness: (self.lightness - amount).max(0.),
             ..*self
         }
     }
 
     fn lighter(&self, amount: f32) -> Self {
+        let lightness = self.lightness + amount;
         Self {
-            lightness: (self.lightness + amount).min(1.),
+            lightness: if self.lightness <= 1.0 {
+                lightness.min(1.)
+            } else {
+                lightness
+            },
             ..*self
         }
     }

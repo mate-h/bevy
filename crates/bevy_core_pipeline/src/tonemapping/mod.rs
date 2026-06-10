@@ -24,9 +24,14 @@ use bevy_render::{
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal};
 use bitflags::bitflags;
 
+mod gt7;
 mod node;
 
 use bevy_utils::default;
+pub use gt7::{
+    GranTurismo7Params, Gt7ToneMapping, Gt7ToneMappingCurve, GRAN_TURISMO_SDR_PAPER_WHITE,
+    REC_2020_TO_REC_709, REC_709_TO_REC_2020, REFERENCE_LUMINANCE,
+};
 pub use node::tonemapping;
 
 use crate::FullscreenShader;
@@ -45,6 +50,7 @@ impl Plugin for TonemappingPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "tonemapping_shared.wgsl");
         load_shader_library!(app, "lut_bindings.wgsl");
+        load_shader_library!(app, "gt7.wgsl");
 
         embedded_asset!(app, "tonemapping.wgsl");
 
@@ -166,6 +172,17 @@ pub enum Tonemapping {
     /// Designed for e-commerce to faithfully reproduce the colors of brand's logos when used with low brightness grayscale lighting.
     /// See [the KhronosGroup spec](https://github.com/KhronosGroup/ToneMapping/tree/main/PBR_Neutral) for more information.
     KhronosPbrNeutral,
+    /// By Polyphony Digital, the operator used in Gran Turismo 7.
+    /// Published with the SIGGRAPH 2025 course "Physically Based Tone Mapping in Gran Turismo 7"
+    /// (MIT License, Copyright (c) 2025 Polyphony Digital Inc.).
+    /// Blends a per-channel filmic curve ("camera-like" highlight skew) with a hue-preserving
+    /// `ICtCp` branch (60% hue-preserving / 40% per-channel by default), with a luminance-driven
+    /// chroma fade near peak white. Natively peak-luminance aware, designed to drive both SDR and
+    /// HDR displays; only the SDR path is wired up today.
+    /// Algorithmic: does NOT require the `tonemapping_luts` cargo feature.
+    /// Tunable per camera via [`GranTurismo7Params`] (defaults are baked until the HDR
+    /// display-target uniform plumbing lands).
+    GranTurismo7,
 }
 
 impl Tonemapping {
@@ -272,6 +289,9 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
                 shader_defs.push("TONEMAP_METHOD_BLENDER_FILMIC".into());
             }
             Tonemapping::KhronosPbrNeutral => shader_defs.push("TONEMAP_METHOD_PBR_NEUTRAL".into()),
+            Tonemapping::GranTurismo7 => {
+                shader_defs.push("TONEMAP_METHOD_GRAN_TURISMO_7".into());
+            }
         }
         RenderPipelineDescriptor {
             label: Some("tonemapping pipeline".into()),
@@ -400,7 +420,8 @@ pub fn get_lut_bindings<'a>(
         | Tonemapping::AcesFitted
         | Tonemapping::AgX
         | Tonemapping::KhronosPbrNeutral
-        | Tonemapping::SomewhatBoringDisplayTransform => &tonemapping_luts.agx,
+        | Tonemapping::SomewhatBoringDisplayTransform
+        | Tonemapping::GranTurismo7 => &tonemapping_luts.agx,
         Tonemapping::TonyMcMapface => &tonemapping_luts.tony_mc_mapface,
         Tonemapping::BlenderFilmic => &tonemapping_luts.blender_filmic,
     };

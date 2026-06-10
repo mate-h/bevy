@@ -1,9 +1,10 @@
 use crate::{
-    color_difference::EuclideanDistance, okhsla::Okhsla, okhsva::Okhsva, Alpha, Hsla, Hsva, Hue,
-    Hwba, Laba, Lcha, LinearRgba, Luminance, Mix, Oklaba, Oklcha, Saturation, Srgba, StandardColor,
+    color_difference::EuclideanDistance, okhsla::Okhsla, okhsva::Okhsva,
+    primaries::rgb_to_rgb_matrix, Alpha, Hsla, Hsva, Hue, Hwba, Laba, Lcha, LinearRec2020,
+    LinearRgba, Luminance, Mix, Oklaba, Oklcha, RgbPrimaries, Saturation, Srgba, StandardColor,
     Xyza,
 };
-use bevy_math::{MismatchedUnitsError, TryStableInterpolate};
+use bevy_math::{MismatchedUnitsError, TryStableInterpolate, Vec3};
 #[cfg(feature = "bevy_reflect")]
 use bevy_reflect::prelude::*;
 use derive_more::derive::From;
@@ -79,6 +80,8 @@ pub enum Color {
     Okhsla(Okhsla),
     /// A color in the Okhsv color space with alpha.
     Okhsva(Okhsva),
+    /// A color in the linear Rec. 2020 (wide-gamut) color space with alpha.
+    LinearRec2020(LinearRec2020),
 }
 
 impl StandardColor for Color {}
@@ -570,6 +573,119 @@ impl Color {
         })
     }
 
+    /// Creates a new [`Color`] object storing a [`LinearRec2020`] color.
+    ///
+    /// The components are linear (no transfer function) intensities relative to the
+    /// wide-gamut [Rec. 2020](RgbPrimaries::BT2020) primaries. Values above 1.0
+    /// represent HDR intensities.
+    ///
+    /// # Arguments
+    ///
+    /// * `red` - Red channel. [0.0, 1.0] for SDR colors
+    /// * `green` - Green channel. [0.0, 1.0] for SDR colors
+    /// * `blue` - Blue channel. [0.0, 1.0] for SDR colors
+    /// * `alpha` - Alpha channel. [0.0, 1.0]
+    pub const fn rec2020a(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
+        Self::LinearRec2020(LinearRec2020 {
+            red,
+            green,
+            blue,
+            alpha,
+        })
+    }
+
+    /// Creates a new [`Color`] object storing a [`LinearRec2020`] color with an alpha of 1.0.
+    ///
+    /// The components are linear (no transfer function) intensities relative to the
+    /// wide-gamut [Rec. 2020](RgbPrimaries::BT2020) primaries. Values above 1.0
+    /// represent HDR intensities.
+    ///
+    /// # Arguments
+    ///
+    /// * `red` - Red channel. [0.0, 1.0] for SDR colors
+    /// * `green` - Green channel. [0.0, 1.0] for SDR colors
+    /// * `blue` - Blue channel. [0.0, 1.0] for SDR colors
+    pub const fn rec2020(red: f32, green: f32, blue: f32) -> Self {
+        Self::LinearRec2020(LinearRec2020 {
+            red,
+            green,
+            blue,
+            alpha: 1.0,
+        })
+    }
+
+    /// Creates a new [`Color`] object from a
+    /// [Display P3](RgbPrimaries::DISPLAY_P3) color (P3 primaries with the sRGB
+    /// transfer function, as used by CSS `color(display-p3 ...)` and wide-gamut
+    /// color pickers).
+    ///
+    /// The components are gamma-encoded, exactly as displayed by such pickers. The
+    /// color is decoded and converted into the wider [`LinearRec2020`] color space.
+    /// Display P3 fits almost entirely inside Rec. 2020, so in-range inputs produce
+    /// non-negative components (except for colors at the very edge of P3's red
+    /// corner, which lies marginally outside Rec. 2020 and may produce a tiny
+    /// negative blue component).
+    ///
+    /// # Arguments
+    ///
+    /// * `red` - Red channel. [0.0, 1.0]
+    /// * `green` - Green channel. [0.0, 1.0]
+    /// * `blue` - Blue channel. [0.0, 1.0]
+    /// * `alpha` - Alpha channel. [0.0, 1.0]
+    pub fn display_p3a(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
+        let matrix = rgb_to_rgb_matrix(RgbPrimaries::DISPLAY_P3, RgbPrimaries::BT2020);
+        let linear = matrix
+            * Vec3::new(
+                Srgba::gamma_function(red),
+                Srgba::gamma_function(green),
+                Srgba::gamma_function(blue),
+            );
+        Self::LinearRec2020(LinearRec2020 {
+            red: linear.x,
+            green: linear.y,
+            blue: linear.z,
+            alpha,
+        })
+    }
+
+    /// Creates a new [`Color`] object from a
+    /// [Display P3](RgbPrimaries::DISPLAY_P3) color (P3 primaries with the sRGB
+    /// transfer function) with an alpha of 1.0.
+    ///
+    /// See [`Color::display_p3a`] for details.
+    ///
+    /// # Arguments
+    ///
+    /// * `red` - Red channel. [0.0, 1.0]
+    /// * `green` - Green channel. [0.0, 1.0]
+    /// * `blue` - Blue channel. [0.0, 1.0]
+    pub fn display_p3(red: f32, green: f32, blue: f32) -> Self {
+        Self::display_p3a(red, green, blue, 1.0)
+    }
+
+    /// Creates a new [`Color`] object storing a [`Xyza`] color from
+    /// [CIE xyY](https://en.wikipedia.org/wiki/CIE_1931_color_space#CIE_xy_chromaticity_diagram_and_the_CIE_xyY_color_space)
+    /// coordinates: a [`Chromaticity`](crate::Chromaticity)-style `(x, y)` position
+    /// plus a luminance `Y`, with an alpha of 1.0.
+    ///
+    /// This is a gamut-independent way to author colors: any visible chromaticity
+    /// can be expressed without negative RGB components, including wide-gamut colors
+    /// outside the sRGB and Rec. 2020 gamuts.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - CIE 1931 x chromaticity coordinate. Typically [0.0, 0.8]; `y` must be non-zero
+    /// * `y` - CIE 1931 y chromaticity coordinate. Typically (0.0, 0.9]
+    /// * `luminance` - Luminance (Y). 1.0 is the reference white luminance; values above 1.0 represent HDR intensities
+    pub const fn xy_y(x: f32, y: f32, luminance: f32) -> Self {
+        Self::Xyza(Xyza {
+            x: x / y * luminance,
+            y: luminance,
+            z: (1.0 - x - y) / y * luminance,
+            alpha: 1.0,
+        })
+    }
+
     /// A fully white [`Color::LinearRgba`] color with an alpha of 1.0.
     pub const WHITE: Self = Self::linear_rgb(1.0, 1.0, 1.0);
 
@@ -604,6 +720,7 @@ impl Alpha for Color {
             Color::Xyza(x) => *x = x.with_alpha(alpha),
             Color::Okhsla(x) => *x = x.with_alpha(alpha),
             Color::Okhsva(x) => *x = x.with_alpha(alpha),
+            Color::LinearRec2020(x) => *x = x.with_alpha(alpha),
         }
 
         new
@@ -623,6 +740,7 @@ impl Alpha for Color {
             Color::Xyza(x) => x.alpha(),
             Color::Okhsla(x) => x.alpha(),
             Color::Okhsva(x) => x.alpha(),
+            Color::LinearRec2020(x) => x.alpha(),
         }
     }
 
@@ -640,6 +758,7 @@ impl Alpha for Color {
             Color::Xyza(x) => x.set_alpha(alpha),
             Color::Okhsla(x) => x.set_alpha(alpha),
             Color::Okhsva(x) => x.set_alpha(alpha),
+            Color::LinearRec2020(x) => x.set_alpha(alpha),
         }
     }
 }
@@ -659,6 +778,7 @@ impl From<Color> for Srgba {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -678,6 +798,7 @@ impl From<Color> for LinearRgba {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -697,6 +818,7 @@ impl From<Color> for Hsla {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -716,6 +838,7 @@ impl From<Color> for Hsva {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -735,6 +858,7 @@ impl From<Color> for Hwba {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -754,6 +878,7 @@ impl From<Color> for Laba {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -773,6 +898,7 @@ impl From<Color> for Lcha {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -792,6 +918,7 @@ impl From<Color> for Oklaba {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -811,6 +938,7 @@ impl From<Color> for Oklcha {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -830,6 +958,7 @@ impl From<Color> for Xyza {
             Color::Xyza(xyza) => xyza,
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -849,6 +978,7 @@ impl From<Color> for Okhsla {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl,
             Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020.into(),
         }
     }
 }
@@ -868,6 +998,27 @@ impl From<Color> for Okhsva {
             Color::Xyza(xyza) => xyza.into(),
             Color::Okhsla(okhsl) => okhsl.into(),
             Color::Okhsva(okhsv) => okhsv,
+            Color::LinearRec2020(rec2020) => rec2020.into(),
+        }
+    }
+}
+
+impl From<Color> for LinearRec2020 {
+    fn from(value: Color) -> Self {
+        match value {
+            Color::Srgba(srgba) => srgba.into(),
+            Color::LinearRgba(linear) => linear.into(),
+            Color::Hsla(hsla) => hsla.into(),
+            Color::Hsva(hsva) => hsva.into(),
+            Color::Hwba(hwba) => hwba.into(),
+            Color::Laba(laba) => laba.into(),
+            Color::Lcha(lcha) => lcha.into(),
+            Color::Oklaba(oklab) => oklab.into(),
+            Color::Oklcha(oklch) => oklch.into(),
+            Color::Xyza(xyza) => xyza.into(),
+            Color::Okhsla(okhsl) => okhsl.into(),
+            Color::Okhsva(okhsv) => okhsv.into(),
+            Color::LinearRec2020(rec2020) => rec2020,
         }
     }
 }
@@ -890,6 +1041,7 @@ impl Luminance for Color {
             Color::Xyza(x) => x.luminance(),
             Color::Okhsla(x) => x.luminance(),
             Color::Okhsva(x) => ChosenColorSpace::from(*x).luminance(),
+            Color::LinearRec2020(x) => x.luminance(),
         }
     }
 
@@ -909,6 +1061,7 @@ impl Luminance for Color {
             Color::Xyza(x) => *x = x.with_luminance(value),
             Color::Okhsla(x) => *x = x.with_luminance(value),
             Color::Okhsva(x) => *x = ChosenColorSpace::from(*x).with_luminance(value).into(),
+            Color::LinearRec2020(x) => *x = x.with_luminance(value),
         }
 
         new
@@ -930,6 +1083,7 @@ impl Luminance for Color {
             Color::Xyza(x) => *x = x.darker(amount),
             Color::Okhsla(x) => *x = x.darker(amount),
             Color::Okhsva(x) => *x = ChosenColorSpace::from(*x).darker(amount).into(),
+            Color::LinearRec2020(x) => *x = x.darker(amount),
         }
 
         new
@@ -951,6 +1105,7 @@ impl Luminance for Color {
             Color::Xyza(x) => *x = x.lighter(amount),
             Color::Okhsla(x) => *x = x.lighter(amount),
             Color::Okhsva(x) => *x = ChosenColorSpace::from(*x).lighter(amount).into(),
+            Color::LinearRec2020(x) => *x = x.lighter(amount),
         }
 
         new
@@ -974,6 +1129,7 @@ impl Hue for Color {
             Color::Xyza(x) => *x = ChosenColorSpace::from(*x).with_hue(hue).into(),
             Color::Okhsla(x) => *x = x.with_hue(hue),
             Color::Okhsva(x) => *x = x.with_hue(hue),
+            Color::LinearRec2020(x) => *x = ChosenColorSpace::from(*x).with_hue(hue).into(),
         }
 
         new
@@ -993,6 +1149,7 @@ impl Hue for Color {
             Color::Xyza(x) => ChosenColorSpace::from(*x).hue(),
             Color::Okhsla(x) => x.hue(),
             Color::Okhsva(x) => x.hue(),
+            Color::LinearRec2020(x) => ChosenColorSpace::from(*x).hue(),
         }
     }
 
@@ -1018,6 +1175,7 @@ impl Saturation for Color {
             Color::Xyza(x) => *x = Hsla::from(*x).with_saturation(saturation).into(),
             Color::Okhsla(x) => *x = x.with_saturation(saturation),
             Color::Okhsva(x) => *x = x.with_saturation(saturation),
+            Color::LinearRec2020(x) => *x = Hsla::from(*x).with_saturation(saturation).into(),
         }
 
         new
@@ -1037,6 +1195,7 @@ impl Saturation for Color {
             Color::Xyza(x) => Hsla::from(*x).saturation(),
             Color::Okhsla(x) => x.saturation(),
             Color::Okhsva(x) => x.saturation(),
+            Color::LinearRec2020(x) => Hsla::from(*x).saturation(),
         }
     }
 
@@ -1062,6 +1221,7 @@ impl Mix for Color {
             Color::Xyza(x) => *x = x.mix(&(*other).into(), factor),
             Color::Okhsla(x) => *x = x.mix(&(*other).into(), factor),
             Color::Okhsva(x) => *x = x.mix(&(*other).into(), factor),
+            Color::LinearRec2020(x) => *x = x.mix(&(*other).into(), factor),
         }
 
         new
@@ -1083,6 +1243,7 @@ impl EuclideanDistance for Color {
             Color::Xyza(x) => ChosenColorSpace::from(*x).distance_squared(&(*other).into()),
             Color::Okhsla(x) => ChosenColorSpace::from(*x).distance_squared(&(*other).into()),
             Color::Okhsva(x) => ChosenColorSpace::from(*x).distance_squared(&(*other).into()),
+            Color::LinearRec2020(x) => x.distance_squared(&(*other).into()),
         }
     }
 }
@@ -1102,7 +1263,80 @@ impl TryStableInterpolate for Color {
             (Color::Oklaba(a), Color::Oklaba(b)) => Ok(Color::Oklaba(a.mix(b, t))),
             (Color::Oklcha(a), Color::Oklcha(b)) => Ok(Color::Oklcha(a.mix(b, t))),
             (Color::Xyza(a), Color::Xyza(b)) => Ok(Color::Xyza(a.mix(b, t))),
+            (Color::LinearRec2020(a), Color::LinearRec2020(b)) => {
+                Ok(Color::LinearRec2020(a.mix(b, t)))
+            }
             _ => Err(MismatchedUnitsError),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::assert_approx_eq;
+
+    #[test]
+    fn rec2020_constructors() {
+        let color = Color::rec2020(1.0, 0.5, 0.25);
+        assert_eq!(
+            color,
+            Color::LinearRec2020(LinearRec2020::new(1.0, 0.5, 0.25, 1.0))
+        );
+
+        let color = Color::rec2020a(1.0, 0.5, 0.25, 0.5);
+        assert_eq!(
+            color,
+            Color::LinearRec2020(LinearRec2020::new(1.0, 0.5, 0.25, 0.5))
+        );
+    }
+
+    #[test]
+    fn display_p3_constructor() {
+        // P3 white is D65 white: it converts to (1, 1, 1) in linear sRGB.
+        let white = Color::display_p3(1.0, 1.0, 1.0);
+        let linear = white.to_linear();
+        assert_approx_eq!(linear.red, 1.0, 1e-4);
+        assert_approx_eq!(linear.green, 1.0, 1e-4);
+        assert_approx_eq!(linear.blue, 1.0, 1e-4);
+
+        // P3 red is outside the sRGB gamut: in Rec. 2020 it is (essentially)
+        // non-negative, while linear sRGB needs a negative green component.
+        let red = Color::display_p3(1.0, 0.0, 0.0);
+        let rec2020: LinearRec2020 = red.into();
+        assert_approx_eq!(rec2020.red, 0.7538, 1e-3);
+        assert_approx_eq!(rec2020.green, 0.0457, 1e-3);
+        assert!(rec2020.blue.abs() < 2e-3);
+        // Published CSS Color 4 reference value: color(display-p3 1 0 0) is
+        // approximately (1.2249, -0.0421, -0.0196) in linear sRGB.
+        let linear: LinearRgba = red.into();
+        assert_approx_eq!(linear.red, 1.2249, 1e-3);
+        assert_approx_eq!(linear.green, -0.0421, 1e-3);
+        assert_approx_eq!(linear.blue, -0.0196, 1e-3);
+
+        // Alpha is carried through.
+        let translucent = Color::display_p3a(0.5, 0.5, 0.5, 0.25);
+        assert_approx_eq!(translucent.alpha(), 0.25, 1e-6);
+    }
+
+    #[test]
+    fn xy_y_constructor() {
+        // D65 white at unit luminance.
+        let white = Color::xy_y(0.3127, 0.3290, 1.0);
+        let Color::Xyza(xyza) = white else {
+            panic!("xy_y must produce a Color::Xyza, got {white:?}");
+        };
+        assert_approx_eq!(xyza.x, 0.9504559, 1e-5);
+        assert_approx_eq!(xyza.y, 1.0, 1e-6);
+        assert_approx_eq!(xyza.z, 1.0890578, 1e-5);
+        assert_approx_eq!(xyza.alpha, 1.0, 1e-6);
+
+        // HDR luminance scales linearly.
+        let bright = Color::xy_y(0.3127, 0.3290, 5.0);
+        let Color::Xyza(bright) = bright else {
+            unreachable!();
+        };
+        assert_approx_eq!(bright.y, 5.0, 1e-6);
+        assert_approx_eq!(bright.x, 5.0 * 0.9504559, 1e-4);
     }
 }

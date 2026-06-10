@@ -11,6 +11,12 @@
     dt_lut_sampler,
 }
 
+// Only pulled in when the Gran Turismo 7 operator is selected, so every other
+// specialization composes exactly as before.
+#ifdef TONEMAP_METHOD_GRAN_TURISMO_7
+#import bevy_core_pipeline::tonemapping_gt7::tone_mapping_gran_turismo_7
+#endif
+
 // Half the size of the crossfade region between shadows and midtones and
 // between midtones and highlights. This value, 0.1, corresponds to 10% of the
 // gamut on either side of the cutoff point.
@@ -422,6 +428,8 @@ fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     color = sample_blender_filmic_lut(color.rgb);
 #else ifdef TONEMAP_METHOD_PBR_NEUTRAL
     color = tonemapping_pbr_neutral(color.rgb);
+#else ifdef TONEMAP_METHOD_GRAN_TURISMO_7
+    color = tone_mapping_gran_turismo_7(color.rgb);
 #endif
 
     // Perceptual post tonemapping grading

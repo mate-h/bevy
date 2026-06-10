@@ -1,4 +1,5 @@
 use crate::camera::extract_cameras;
+use crate::extract_resource::ExtractResourcePlugin;
 use crate::renderer::WgpuWrapper;
 use crate::{
     render_resource::{SurfaceTexture, TextureView},
@@ -11,7 +12,8 @@ use bevy_ecs::{entity::EntityHashMap, prelude::*};
 use bevy_log::{debug, info, warn};
 use bevy_utils::default;
 use bevy_window::{
-    CompositeAlphaMode, PresentMode, PrimaryWindow, RawHandleWrapper, Window, WindowClosing,
+    CompositeAlphaMode, DisplayTarget, PresentMode, PrimaryWindow, RawHandleWrapper, Window,
+    WindowClosing,
 };
 use core::{
     num::NonZero,
@@ -21,18 +23,25 @@ use wgpu::{
     SurfaceConfiguration, SurfaceTargetUnsafe, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 
+pub mod display_target;
 pub mod screenshot;
 
+pub use display_target::*;
 use screenshot::ScreenshotPlugin;
 
 pub struct WindowRenderPlugin;
 
 impl Plugin for WindowRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ScreenshotPlugin);
+        app.add_plugins((
+            ScreenshotPlugin,
+            ExtractResourcePlugin::<ManualDisplayTargets>::default(),
+        ))
+        .init_resource::<ManualDisplayTargets>();
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
+                .init_resource::<ManualDisplayTargets>()
                 .init_gpu_resource::<ExtractedWindows>()
                 .init_gpu_resource::<WindowSurfaces>()
                 .add_systems(ExtractSchedule, extract_windows.before(extract_cameras))
@@ -67,6 +76,16 @@ pub struct ExtractedWindow {
     pub size_changed: bool,
     pub present_mode_changed: bool,
     pub alpha_mode: CompositeAlphaMode,
+    /// The [`DisplayTarget`] extracted from the window entity, describing the
+    /// display this window's surface feeds (paper white, peak luminance,
+    /// gamut, transfer).
+    ///
+    /// This is the per-surface calibration shared by every camera rendering
+    /// to this window; use [`resolve_display_target`] to look it up uniformly
+    /// across render-target kinds. It is plumbed here so that surface
+    /// configuration and view preparation can consume it; it does not affect
+    /// surface format selection yet.
+    pub display_target: DisplayTarget,
     /// Whether this window needs an initial buffer commit.
     ///
     /// On Wayland, windows must present at least once before they are shown.
@@ -125,11 +144,23 @@ impl DerefMut for ExtractedWindows {
 fn extract_windows(
     mut extracted_windows: ResMut<ExtractedWindows>,
     mut closing: Extract<MessageReader<WindowClosing>>,
-    windows: Extract<Query<(Entity, &Window, &RawHandleWrapper, Option<&PrimaryWindow>)>>,
+    windows: Extract<
+        Query<(
+            Entity,
+            &Window,
+            Option<&DisplayTarget>,
+            &RawHandleWrapper,
+            Option<&PrimaryWindow>,
+        )>,
+    >,
     mut removed: Extract<RemovedComponents<RawHandleWrapper>>,
     mut window_surfaces: ResMut<WindowSurfaces>,
 ) {
-    for (entity, window, handle, primary) in windows.iter() {
+    for (entity, window, display_target, handle, primary) in windows.iter() {
+        // `DisplayTarget` is a required component of `Window`, but tolerate
+        // its removal by falling back to the SDR default rather than
+        // dropping the window from extraction.
+        let display_target = display_target.copied().unwrap_or_default();
         if primary.is_some() {
             extracted_windows.primary = Some(entity);
         }
@@ -153,8 +184,14 @@ fn extract_windows(
             swap_chain_texture_view_format: None,
             present_mode_changed: false,
             alpha_mode: window.composite_alpha_mode,
+            display_target,
             needs_initial_present: true,
         });
+
+        // Keep the extracted `DisplayTarget` in sync every frame. Change
+        // detection (for e.g. surface reconfiguration) is deliberately not
+        // implemented yet; nothing consumes changes at this stage.
+        extracted_window.display_target = display_target;
 
         if extracted_window.swap_chain_texture.is_none() {
             // If we called present on the previous swap-chain texture last update,

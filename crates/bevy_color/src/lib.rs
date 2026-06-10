@@ -12,6 +12,7 @@
 //!
 //! - [`Srgba`] (standard RGBA, with gamma correction)
 //! - [`LinearRgba`] (linear RGBA, without gamma correction)
+//! - [`LinearRec2020`] (linear RGBA with wide-gamut Rec. 2020 primaries)
 //! - [`Hsla`] (hue, saturation, lightness, alpha)
 //! - [`Hsva`] (hue, saturation, value, alpha)
 //! - [`Hwba`] (hue, whiteness, blackness, alpha)
@@ -108,6 +109,7 @@ mod hwba;
 mod interpolate;
 mod laba;
 mod lcha;
+mod linear_rec2020;
 mod linear_rgba;
 mod okcolor_convert;
 mod okhsla;
@@ -115,6 +117,7 @@ mod okhsva;
 mod oklaba;
 mod oklcha;
 pub mod palettes;
+mod primaries;
 mod srgba;
 #[cfg(test)]
 mod test_colors;
@@ -127,8 +130,8 @@ mod xyza;
 /// This includes the most common types in this crate, re-exported for your convenience.
 pub mod prelude {
     pub use crate::{
-        color::*, color_ops::*, hsla::*, hsva::*, hwba::*, laba::*, lcha::*, linear_rgba::*,
-        oklaba::*, oklcha::*, srgba::*, xyza::*,
+        color::*, color_ops::*, hsla::*, hsva::*, hwba::*, laba::*, lcha::*, linear_rec2020::*,
+        linear_rgba::*, oklaba::*, oklcha::*, srgba::*, xyza::*,
     };
 }
 
@@ -142,11 +145,13 @@ pub use hsva::*;
 pub use hwba::*;
 pub use laba::*;
 pub use lcha::*;
+pub use linear_rec2020::*;
 pub use linear_rgba::*;
 pub use okhsla::*;
 pub use okhsva::*;
 pub use oklaba::*;
 pub use oklcha::*;
+pub use primaries::*;
 pub use srgba::*;
 pub use xyza::*;
 
@@ -168,6 +173,7 @@ where
     Self: From<Color> + Into<Color>,
     Self: From<Srgba> + Into<Srgba>,
     Self: From<LinearRgba> + Into<LinearRgba>,
+    Self: From<LinearRec2020> + Into<LinearRec2020>,
     Self: From<Hsla> + Into<Hsla>,
     Self: From<Hsva> + Into<Hsva>,
     Self: From<Hwba> + Into<Hwba>,
