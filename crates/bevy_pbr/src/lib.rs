@@ -474,6 +474,7 @@ pub fn stbn_placeholder() -> Image {
         texture_view_descriptor: None,
         asset_usage: RenderAssetUsages::RENDER_WORLD,
         copy_on_resize: false,
+        source_primaries: Default::default(),
     }
 }
 
@@ -504,6 +505,7 @@ pub fn area_light_luts_placeholder() -> Image {
         }),
         asset_usage: RenderAssetUsages::RENDER_WORLD,
         copy_on_resize: false,
+        source_primaries: Default::default(),
     }
 }
 

@@ -23,7 +23,7 @@ use bevy_ecs::{
 };
 use bevy_image::{
     CompressedImageFormats, Image, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
-    ImageType, TextureError,
+    ImageType, SourceColorPrimaries, TextureError,
 };
 use bevy_light::{DirectionalLight, PointLight, SpotLight};
 use bevy_math::{Mat4, Vec3};
@@ -1224,7 +1224,7 @@ async fn load_image<'a, 'b>(
             let start = view.offset();
             let end = view.offset() + view.length();
             let buffer = &buffer_data[view.buffer().index()][start..end];
-            let image = Image::from_buffer(
+            let mut image = Image::from_buffer(
                 buffer,
                 ImageType::MimeType(mime_type),
                 supported_compressed_formats,
@@ -1232,6 +1232,10 @@ async fn load_image<'a, 'b>(
                 ImageSampler::Descriptor(sampler_descriptor),
                 settings.load_materials,
             )?;
+            // glTF 2.0 core mandates sRGB (BT.709) color primaries for all textures,
+            // so stamp them explicitly. Support for a wide-gamut KHR extension would
+            // arrive together with that extension.
+            image.source_primaries = SourceColorPrimaries::Bt709;
             Ok(ImageOrPath::Image {
                 image,
                 label: GltfAssetLabel::Texture(gltf_texture.index()),
@@ -1245,15 +1249,19 @@ async fn load_image<'a, 'b>(
             if let Ok(data_uri) = DataUri::parse(uri) {
                 let bytes = data_uri.decode()?;
                 let image_type = ImageType::MimeType(data_uri.mime_type);
+                let mut image = Image::from_buffer(
+                    &bytes,
+                    mime_type.map(ImageType::MimeType).unwrap_or(image_type),
+                    supported_compressed_formats,
+                    is_srgb,
+                    ImageSampler::Descriptor(sampler_descriptor),
+                    settings.load_materials,
+                )?;
+                // glTF 2.0 core mandates sRGB (BT.709) color primaries for all
+                // textures, so stamp them explicitly.
+                image.source_primaries = SourceColorPrimaries::Bt709;
                 Ok(ImageOrPath::Image {
-                    image: Image::from_buffer(
-                        &bytes,
-                        mime_type.map(ImageType::MimeType).unwrap_or(image_type),
-                        supported_compressed_formats,
-                        is_srgb,
-                        ImageSampler::Descriptor(sampler_descriptor),
-                        settings.load_materials,
-                    )?,
+                    image,
                     label: GltfAssetLabel::Texture(gltf_texture.index()),
                 })
             } else {
@@ -2038,6 +2046,10 @@ impl ImageOrPath {
                 .load_builder()
                 .with_settings(move |settings: &mut ImageLoaderSettings| {
                     settings.is_srgb = is_srgb;
+                    // glTF 2.0 core mandates sRGB (BT.709) color primaries for all
+                    // textures, so stamp them explicitly. Support for a wide-gamut
+                    // KHR extension would arrive together with that extension.
+                    settings.source_primaries = Some(SourceColorPrimaries::Bt709);
                     settings.sampler = ImageSampler::Descriptor(sampler_descriptor.clone());
                     settings.asset_usage = render_asset_usages;
                 })

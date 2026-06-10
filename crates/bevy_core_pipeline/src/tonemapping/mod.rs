@@ -18,7 +18,7 @@ use bevy_render::{
     },
     renderer::RenderDevice,
     texture::{FallbackImage, GpuImage},
-    view::{ExtractedView, ViewTarget, ViewUniform},
+    view::{DisplayTargetUniform, ExtractedView, ViewDisplayTarget, ViewTarget, ViewUniform},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal};
@@ -29,8 +29,10 @@ mod node;
 
 use bevy_utils::default;
 pub use gt7::{
-    GranTurismo7Params, Gt7ToneMapping, Gt7ToneMappingCurve, GRAN_TURISMO_SDR_PAPER_WHITE,
-    REC_2020_TO_REC_709, REC_709_TO_REC_2020, REFERENCE_LUMINANCE,
+    prepare_gt7_params_uniforms, GranTurismo7Params, Gt7ParamsUniform, Gt7ParamsUniforms,
+    Gt7ToneMapping, Gt7ToneMappingCurve, ViewGt7ParamsUniformOffset, GRAN_TURISMO_SDR_PAPER_WHITE,
+    GT7_MAX_HDR_PEAK_NITS, GT7_MIN_HDR_PEAK_NITS, REC_2020_TO_REC_709, REC_709_TO_REC_2020,
+    REFERENCE_LUMINANCE,
 };
 pub use node::tonemapping;
 
@@ -93,6 +95,7 @@ impl Plugin for TonemappingPlugin {
         app.add_plugins((
             ExtractComponentPlugin::<Tonemapping>::default(),
             ExtractComponentPlugin::<DebandDither>::default(),
+            ExtractComponentPlugin::<GranTurismo7Params>::default(),
         ));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -100,10 +103,14 @@ impl Plugin for TonemappingPlugin {
         };
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<TonemappingPipeline>>()
+            .init_gpu_resource::<Gt7ParamsUniforms>()
             .add_systems(RenderStartup, init_tonemapping_pipeline)
             .add_systems(
                 Render,
-                prepare_view_tonemapping_pipelines.in_set(RenderSystems::Prepare),
+                (
+                    prepare_view_tonemapping_pipelines.in_set(RenderSystems::Prepare),
+                    prepare_gt7_params_uniforms.in_set(RenderSystems::PrepareResources),
+                ),
             );
     }
 }
@@ -111,6 +118,14 @@ impl Plugin for TonemappingPlugin {
 #[derive(Resource)]
 pub struct TonemappingPipeline {
     texture_bind_group: BindGroupLayoutDescriptor,
+    /// [`Self::texture_bind_group`] plus the per-view
+    /// [`DisplayTargetUniform`] at binding 5. Used by pipelines specialized
+    /// with [`TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM`].
+    display_target_bind_group: BindGroupLayoutDescriptor,
+    /// [`Self::display_target_bind_group`] plus the per-view
+    /// [`Gt7ParamsUniform`] at binding 6. Used by pipelines specialized with
+    /// [`TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM`].
+    display_target_gt7_bind_group: BindGroupLayoutDescriptor,
     sampler: Sampler,
     fullscreen_shader: FullscreenShader,
     fragment_shader: Handle<Shader>,
@@ -204,6 +219,28 @@ bitflags! {
         /// Saturation/contrast/gamma/gain/lift for one or more sections
         /// (shadows, midtones, highlights) need to be adjusted.
         const SECTIONAL_COLOR_GRADING   = 0x04;
+        /// The per-view [`DisplayTargetUniform`] is bound (at binding 5) and
+        /// the `DISPLAY_TARGET_UNIFORM` shader def is pushed.
+        ///
+        /// Set when the view's resolved [`ViewDisplayTarget`] differs from
+        /// the plain SDR default
+        /// ([`DisplayTarget::SDR_SRGB`](bevy_window::DisplayTarget::SDR_SRGB)),
+        /// or when an active operator needs the calibration data
+        /// (currently: whenever [`Self::GT7_PARAMS_UNIFORM`] is set, so the
+        /// GT7 params binding index stays fixed). Views on default SDR
+        /// targets never set this flag, keeping their pipelines —
+        /// layout, shader defs, and composed shader source — byte-identical
+        /// to those produced before `DisplayTarget` existed.
+        const DISPLAY_TARGET_UNIFORM    = 0x08;
+        /// The per-view [`Gt7ParamsUniform`] is bound (at binding 6) and the
+        /// `GT7_PARAMS_UNIFORM` shader def is pushed, replacing the GT7
+        /// operator's baked SDR defaults with prepared per-camera values.
+        ///
+        /// Set when the view's [`Tonemapping`] is
+        /// [`Tonemapping::GranTurismo7`] **and** the camera has a
+        /// [`GranTurismo7Params`] component. Implies
+        /// [`Self::DISPLAY_TARGET_UNIFORM`].
+        const GT7_PARAMS_UNIFORM        = 0x10;
     }
 }
 
@@ -251,6 +288,28 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
             shader_defs.push("SECTIONAL_COLOR_GRADING".into());
         }
 
+        // The display-target / GT7-params uniforms are strictly additive:
+        // when the flags are unset (every view on a default SDR_SRGB target
+        // without GT7 per-camera params), no defs are pushed and the layout
+        // below stays the pre-`DisplayTarget` one, so SDR pipelines remain
+        // byte-identical.
+        if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM)
+        {
+            shader_defs.push("DISPLAY_TARGET_UNIFORM".into());
+        }
+        if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM)
+        {
+            shader_defs.push("GT7_PARAMS_UNIFORM".into());
+            shader_defs.push(ShaderDefVal::UInt(
+                "GT7_PARAMS_BINDING_INDEX".into(),
+                GT7_PARAMS_BINDING_INDEX,
+            ));
+        }
+
         match key.tonemapping {
             Tonemapping::None => shader_defs.push("TONEMAP_METHOD_NONE".into()),
             Tonemapping::Reinhard => shader_defs.push("TONEMAP_METHOD_REINHARD".into()),
@@ -293,9 +352,23 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
                 shader_defs.push("TONEMAP_METHOD_GRAN_TURISMO_7".into());
             }
         }
+        let bind_group_layout = if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM)
+        {
+            self.display_target_gt7_bind_group.clone()
+        } else if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM)
+        {
+            self.display_target_bind_group.clone()
+        } else {
+            self.texture_bind_group.clone()
+        };
+
         RenderPipelineDescriptor {
             label: Some("tonemapping pipeline".into()),
-            layout: vec![self.texture_bind_group.clone()],
+            layout: vec![bind_group_layout],
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.fragment_shader.clone(),
@@ -311,6 +384,19 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
         }
     }
 }
+
+/// Binding index of the per-view [`DisplayTargetUniform`] in the tonemapping
+/// pass bind group. Only part of the layout (and the shader) when
+/// [`TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM`] is set; the index
+/// is hardcoded in `tonemapping.wgsl` under the matching shader def.
+pub const DISPLAY_TARGET_BINDING_INDEX: u32 = 5;
+
+/// Binding index of the per-view [`Gt7ParamsUniform`] in the tonemapping pass
+/// bind group. Only part of the layout (and the shader) when
+/// [`TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM`] is set; pushed into
+/// `gt7.wgsl` as the `GT7_PARAMS_BINDING_INDEX` shader def so other bind
+/// groups can rebind it at a different index later.
+pub const GT7_PARAMS_BINDING_INDEX: u32 = 6;
 
 pub fn init_tonemapping_pipeline(
     mut commands: Commands,
@@ -335,18 +421,72 @@ pub fn init_tonemapping_pipeline(
     let tonemap_texture_bind_group =
         BindGroupLayoutDescriptor::new("tonemapping_hdr_texture_bind_group_layout", &entries);
 
+    // Layout variants that additionally carry the per-view display-target
+    // calibration uniform, and the GT7 operator's params uniform on top of
+    // that. Kept separate from the base layout so SDR pipelines stay
+    // byte-identical to pre-`DisplayTarget` Bevy.
+    let display_target_entries = entries.extend_with_indices(((
+        DISPLAY_TARGET_BINDING_INDEX,
+        uniform_buffer::<DisplayTargetUniform>(true),
+    ),));
+    let tonemap_display_target_bind_group = BindGroupLayoutDescriptor::new(
+        "tonemapping_display_target_bind_group_layout",
+        &display_target_entries,
+    );
+
+    let display_target_gt7_entries = display_target_entries.extend_with_indices(((
+        GT7_PARAMS_BINDING_INDEX,
+        uniform_buffer::<Gt7ParamsUniform>(true),
+    ),));
+    let tonemap_display_target_gt7_bind_group = BindGroupLayoutDescriptor::new(
+        "tonemapping_display_target_gt7_bind_group_layout",
+        &display_target_gt7_entries,
+    );
+
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
 
     commands.insert_resource(TonemappingPipeline {
         texture_bind_group: tonemap_texture_bind_group,
+        display_target_bind_group: tonemap_display_target_bind_group,
+        display_target_gt7_bind_group: tonemap_display_target_gt7_bind_group,
         sampler,
         fullscreen_shader: fullscreen_shader.clone(),
         fragment_shader: load_embedded_asset!(asset_server.as_ref(), "tonemapping.wgsl"),
     });
 }
 
+/// The specialized tonemapping pipeline of a view, plus the
+/// [`TonemappingPipelineKeyFlags`] it was specialized with (which the
+/// tonemapping node uses to bind the matching optional uniforms).
 #[derive(Component)]
-pub struct ViewTonemappingPipeline(CachedRenderPipelineId);
+pub struct ViewTonemappingPipeline {
+    pipeline_id: CachedRenderPipelineId,
+    flags: TonemappingPipelineKeyFlags,
+}
+
+impl ViewTonemappingPipeline {
+    /// The bind group layout this view's pipeline was specialized with
+    /// (matching the layout selection in
+    /// [`TonemappingPipeline::specialize`](SpecializedRenderPipeline::specialize)).
+    fn bind_group_layout<'a>(
+        &self,
+        pipeline: &'a TonemappingPipeline,
+    ) -> &'a BindGroupLayoutDescriptor {
+        if self
+            .flags
+            .contains(TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM)
+        {
+            &pipeline.display_target_gt7_bind_group
+        } else if self
+            .flags
+            .contains(TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM)
+        {
+            &pipeline.display_target_bind_group
+        } else {
+            &pipeline.texture_bind_group
+        }
+    }
+}
 
 pub fn prepare_view_tonemapping_pipelines(
     mut commands: Commands,
@@ -359,11 +499,16 @@ pub fn prepare_view_tonemapping_pipelines(
             &ExtractedView,
             Option<&Tonemapping>,
             Option<&DebandDither>,
+            Option<&ViewDisplayTarget>,
+            Option<&GranTurismo7Params>,
         ),
         With<ViewTarget>,
     >,
 ) {
-    for (entity, view, tonemapping, dither) in view_targets.iter() {
+    for (entity, view, tonemapping, dither, view_display_target, gt7_params) in view_targets.iter()
+    {
+        let tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
+
         // As an optimization, we omit parts of the shader that are unneeded.
         let mut flags = TonemappingPipelineKeyFlags::empty();
         flags.set(
@@ -381,17 +526,41 @@ pub fn prepare_view_tonemapping_pipelines(
                 .any(|section| *section != default()),
         );
 
+        // The GT7 params uniform is active exactly when the operator is GT7
+        // and the camera opted in with a `GranTurismo7Params` component
+        // (`prepare_gt7_params_uniforms` uses the same predicate).
+        let gt7_uniform_active = tonemapping == Tonemapping::GranTurismo7 && gt7_params.is_some();
+        // The display-target uniform is bound for views whose resolved
+        // display target is not the plain SDR default, and whenever an
+        // operator needs it (currently: the GT7 params uniform path, which
+        // keeps binding 5 occupied so the params binding index is stable).
+        // Views on default SDR targets push neither flag, so their pipeline
+        // key, layout, and shader stay byte-identical to before
+        // `DisplayTarget` existed.
+        let display_target_uniform_active = gt7_uniform_active
+            || view_display_target
+                .is_some_and(|view_display_target| !view_display_target.is_plain_sdr_srgb());
+        flags.set(
+            TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM,
+            display_target_uniform_active,
+        );
+        flags.set(
+            TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM,
+            gt7_uniform_active,
+        );
+
         let key = TonemappingPipelineKey {
             target_format: view.target_format,
             deband_dither: *dither.unwrap_or(&DebandDither::Disabled),
-            tonemapping: *tonemapping.unwrap_or(&Tonemapping::None),
+            tonemapping,
             flags,
         };
         let pipeline = pipelines.specialize(&pipeline_cache, &upscaling_pipeline, key);
 
-        commands
-            .entity(entity)
-            .insert(ViewTonemappingPipeline(pipeline));
+        commands.entity(entity).insert(ViewTonemappingPipeline {
+            pipeline_id: pipeline,
+            flags,
+        });
     }
 }
 /// Enables a debanding shader that applies dithering to mitigate color banding in the final image for a given [`Camera`] entity.
@@ -484,5 +653,6 @@ pub fn lut_placeholder() -> Image {
         texture_view_descriptor: None,
         asset_usage: RenderAssetUsages::RENDER_WORLD,
         copy_on_resize: false,
+        source_primaries: Default::default(),
     }
 }

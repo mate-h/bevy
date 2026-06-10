@@ -10,12 +10,13 @@
 //! | `C`                | Toggle Compensation Curve              |
 //! | `M`                | Toggle Metering Mask                   |
 //! | `V`                | Visualize Metering Mask                |
+//! | `P`                | Toggle Physiological Adaptation        |
 
 use bevy::{
     light::Skybox,
     math::{cubic_splines::LinearSpline, primitives::Plane3d, vec2},
     post_process::auto_exposure::{
-        AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
+        AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin, PhysiologicalAdaptation,
     },
     prelude::*,
 };
@@ -125,7 +126,7 @@ fn setup(
 
     let text_font = TextFont::default();
 
-    commands.spawn((Text::new("Left / Right - Rotate Camera\nC - Toggle Compensation Curve\nM - Toggle Metering Mask\nV - Visualize Metering Mask"),
+    commands.spawn((Text::new("Left / Right - Rotate Camera\nC - Toggle Compensation Curve\nM - Toggle Metering Mask\nV - Visualize Metering Mask\nP - Toggle Physiological Adaptation"),
             text_font.clone(), Node {
             position_type: PositionType::Absolute,
             top: px(12),
@@ -194,6 +195,25 @@ fn example_control_system(
             };
     }
 
+    if input.just_pressed(KeyCode::KeyP) {
+        auto_exposure.physiological = match auto_exposure.physiological {
+            Some(_) => None,
+            // The default `PhysiologicalAdaptation` models real human time scales — full
+            // dark adaptation takes tens of minutes — which would be invisible in a short
+            // demo session. This example therefore uses heavily accelerated long-term
+            // speeds and a tight bounding range, so that turning towards the bright slot
+            // (or away from it) visibly hits the long-term bound within a second and then
+            // slowly continues adapting over the following seconds.
+            None => Some(PhysiologicalAdaptation {
+                speed_brighten: 0.4,
+                speed_darken: 0.1,
+                bound_brighten: 2.0,
+                bound_darken: 1.0,
+                initial_long_term_ev: None,
+            }),
+        };
+    }
+
     mask_image.display = if input.pressed(KeyCode::KeyV) {
         Display::Flex
     } else {
@@ -201,13 +221,18 @@ fn example_control_system(
     };
 
     display.0 = format!(
-        "Compensation Curve: {}\nMetering Mask: {}",
+        "Compensation Curve: {}\nMetering Mask: {}\nPhysiological Adaptation: {}",
         if auto_exposure.compensation_curve == resources.basic_compensation_curve {
             "Enabled"
         } else {
             "Disabled"
         },
         if auto_exposure.metering_mask == resources.basic_metering_mask {
+            "Enabled"
+        } else {
+            "Disabled"
+        },
+        if auto_exposure.physiological.is_some() {
             "Enabled"
         } else {
             "Disabled"

@@ -37,6 +37,7 @@ mod image_loader;
 #[cfg(feature = "ktx2")]
 mod ktx2;
 mod saver;
+mod source_color_primaries;
 mod texture_atlas;
 mod texture_atlas_builder;
 
@@ -53,6 +54,7 @@ pub use image_loader::*;
 #[cfg(feature = "ktx2")]
 pub use ktx2::*;
 pub use saver::*;
+pub use source_color_primaries::*;
 pub use texture_atlas::*;
 pub use texture_atlas_builder::*;
 

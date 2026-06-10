@@ -27,6 +27,8 @@ pub struct ViewAutoExposurePipeline {
     pub metering_mask: Handle<Image>,
 }
 
+/// CPU mirror of the `AutoExposure` settings uniform in `auto_exposure.wgsl`.
+/// The field order and types must match the WGSL struct exactly.
 #[derive(ShaderType, Clone, Copy)]
 pub struct AutoExposureUniform {
     pub(super) min_log_lum: f32,
@@ -37,6 +39,24 @@ pub struct AutoExposureUniform {
     pub(super) speed_up: f32,
     pub(super) speed_down: f32,
     pub(super) exponential_transition_distance: f32,
+    pub(super) metering_bias: f32,
+    pub(super) external_reference_ev: f32,
+    pub(super) external_reference_weight: f32,
+    pub(super) long_term_speed_up: f32,
+    pub(super) long_term_speed_down: f32,
+    pub(super) long_term_bound_up: f32,
+    pub(super) long_term_bound_down: f32,
+    pub(super) physiological: u32,
+}
+
+/// CPU mirror of the per-view `AutoExposureState` storage buffer in `auto_exposure.wgsl`.
+/// The field order and types must match the WGSL struct exactly.
+#[derive(ShaderType, Clone, Copy, Debug, PartialEq)]
+pub struct AutoExposureState {
+    /// The smoothed short-term exposure correction, in EV.
+    pub(super) exposure: f32,
+    /// The long-term physiological adaptation envelope, in EV.
+    pub(super) long_term: f32,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -61,7 +81,7 @@ pub fn init_auto_exposure_pipeline(mut commands: Commands, asset_server: Res<Ass
                     texture_1d(TextureSampleType::Float { filterable: false }),
                     uniform_buffer::<AutoExposureCompensationCurveUniform>(false),
                     storage_buffer_sized(false, NonZero::<u64>::new(HISTOGRAM_BIN_COUNT * 4)),
-                    storage_buffer_sized(false, NonZero::<u64>::new(4)),
+                    storage_buffer::<AutoExposureState>(false),
                     storage_buffer::<ViewUniform>(true),
                 ),
             ),

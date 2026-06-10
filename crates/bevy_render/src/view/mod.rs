@@ -1,3 +1,4 @@
+pub mod display_target_uniform;
 pub mod visibility;
 pub mod window;
 
@@ -6,6 +7,7 @@ use bevy_camera::{
     Exposure, MainPassResolutionOverride, NormalizedRenderTarget,
 };
 use bevy_diagnostic::FrameCount;
+pub use display_target_uniform::*;
 pub use visibility::*;
 pub use window::*;
 
@@ -169,6 +171,7 @@ pub struct ViewPlugin;
 impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "view.wgsl");
+        load_shader_library!(app, "display_target.wgsl");
 
         app
             // NOTE: windows.is_changed() handles cases where a window was resized
@@ -199,6 +202,13 @@ impl Plugin for ViewPlugin {
                         .after(crate::render_asset::prepare_assets::<GpuImage>)
                         .ambiguous_with(crate::camera::sort_cameras), // doesn't use `sorted_camera_index_for_target`
                     prepare_view_uniforms.in_set(RenderSystems::PrepareResources),
+                    // Resolved before `prepare_windows` only to keep resource
+                    // access on `ExtractedWindows` unambiguous; the
+                    // `display_target` field it reads is set during extraction.
+                    prepare_view_display_targets
+                        .in_set(RenderSystems::PrepareViews)
+                        .before(prepare_windows),
+                    prepare_display_target_uniforms.in_set(RenderSystems::PrepareResources),
                     collect_visible_cpu_culled_entities.in_set(RenderSystems::PrepareAssets),
                 ),
             );
@@ -209,6 +219,7 @@ impl Plugin for ViewPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_gpu_resource::<ViewUniforms>()
+                .init_gpu_resource::<DisplayTargetUniforms>()
                 .init_gpu_resource::<ViewTargetAttachments>();
         }
     }

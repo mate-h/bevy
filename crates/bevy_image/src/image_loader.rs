@@ -1,6 +1,6 @@
 use crate::{
     image::{Image, ImageFormat, ImageType, TextureError},
-    TextureReinterpretationError,
+    SourceColorPrimaries, TextureReinterpretationError,
 };
 use bevy_asset::{io::Reader, AssetLoader, LoadContext, RenderAssetUsages};
 use bevy_reflect::TypePath;
@@ -156,6 +156,15 @@ pub struct ImageLoaderSettings {
     /// uniform type.
     #[serde(default)]
     pub array_layout: Option<ImageArrayLayout>,
+    /// The color primaries the image data is expressed in, stamped on
+    /// [`Image::source_primaries`]. This is metadata only and does not affect how
+    /// the image is decoded or rendered.
+    ///
+    /// `None` (the default) trusts color-primary metadata carried by the file
+    /// itself (currently the KTX2 data format descriptor), falling back to
+    /// [`SourceColorPrimaries::Bt709`]. `Some` overrides whatever the file says.
+    #[serde(default)]
+    pub source_primaries: Option<SourceColorPrimaries>,
 }
 
 impl Default for ImageLoaderSettings {
@@ -167,6 +176,7 @@ impl Default for ImageLoaderSettings {
             sampler: ImageSampler::Default,
             asset_usage: RenderAssetUsages::default(),
             array_layout: None,
+            source_primaries: None,
         }
     }
 }
@@ -242,6 +252,13 @@ impl AssetLoader for ImageLoader {
             image.texture_descriptor.format = format;
         }
 
+        // An explicit loader setting takes priority over the file's own color
+        // metadata (stamped by `Image::from_buffer`), which in turn defaults to
+        // BT.709.
+        if let Some(source_primaries) = settings.source_primaries {
+            image.source_primaries = source_primaries;
+        }
+
         if let Some(array_layout) = settings.array_layout {
             let image = match array_layout {
                 ImageArrayLayout::RowCount { rows } => {
@@ -279,4 +296,40 @@ impl AssetLoader for ImageLoader {
 pub struct FileTextureError {
     error: TextureError,
     path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_primaries_serde_round_trip() {
+        for source_primaries in [
+            None,
+            Some(SourceColorPrimaries::Bt709),
+            Some(SourceColorPrimaries::Bt2020),
+            Some(SourceColorPrimaries::DisplayP3),
+        ] {
+            let settings = ImageLoaderSettings {
+                source_primaries,
+                ..Default::default()
+            };
+            let serialized = serde_json::to_string(&settings).unwrap();
+            let deserialized: ImageLoaderSettings = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized.source_primaries, source_primaries);
+        }
+    }
+
+    #[test]
+    fn settings_metadata_without_source_primaries_still_deserializes() {
+        // `.meta` files written before `source_primaries` existed must keep loading.
+        let mut serialized = serde_json::to_value(ImageLoaderSettings::default()).unwrap();
+        assert!(serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("source_primaries")
+            .is_some());
+        let deserialized: ImageLoaderSettings = serde_json::from_value(serialized).unwrap();
+        assert_eq!(deserialized.source_primaries, None);
+    }
 }

@@ -8,6 +8,9 @@
     fullscreen_vertex_shader::FullscreenVertexOutput,
     tonemapping::{tone_mapping, screen_space_dither},
 }
+#ifdef DISPLAY_TARGET_UNIFORM
+#import bevy_render::display_target::DisplayTargetUniform
+#endif
 
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -15,6 +18,15 @@
 @group(0) @binding(2) var hdr_sampler: sampler;
 @group(0) @binding(3) var dt_lut_texture: texture_3d<f32>;
 @group(0) @binding(4) var dt_lut_sampler: sampler;
+#ifdef DISPLAY_TARGET_UNIFORM
+// Per-view display-target calibration, bound only when the pipeline is
+// specialized with the DISPLAY_TARGET_UNIFORM shader def (i.e. the view's
+// display target is not the plain SDR sRGB default, or an active operator
+// needs it). Not read by this pass yet: the transfer-encoding work consumes
+// it, and the GT7 operator receives display-target-derived parameters through
+// its own params uniform (see gt7.wgsl) computed on the CPU.
+@group(0) @binding(5) var<uniform> display_target: DisplayTargetUniform;
+#endif
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {

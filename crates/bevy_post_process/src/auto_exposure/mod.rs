@@ -20,11 +20,13 @@ mod buffers;
 mod compensation_curve;
 mod pipeline;
 mod settings;
+#[cfg(test)]
+mod tests;
 
 use buffers::{extract_buffers, prepare_buffers, AutoExposureBuffers};
 pub use compensation_curve::{AutoExposureCompensationCurve, AutoExposureCompensationCurveError};
 use pipeline::{AutoExposurePass, AutoExposurePipeline, ViewAutoExposurePipeline};
-pub use settings::AutoExposure;
+pub use settings::{AutoExposure, AutoExposureExternalReference, PhysiologicalAdaptation};
 
 use crate::auto_exposure::{
     compensation_curve::GpuAutoExposureCompensationCurve, pipeline::init_auto_exposure_pipeline,

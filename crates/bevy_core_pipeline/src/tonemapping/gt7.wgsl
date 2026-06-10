@@ -17,10 +17,11 @@
 //
 // `k_a`/`k_b`/`k_c` and `peak_ucs` are closed-form products of the user-facing
 // parameters (see `Gt7ToneMappingCurve::new` and `Gt7ToneMapping::new` in
-// gt7.rs); they are intended to be computed once on the CPU (or taken from
-// `gt7_default_sdr_params` below) rather than derived per pixel. When
-// per-camera parameter plumbing lands, a uniform with exactly these fields
-// replaces `gt7_default_sdr_params()` at the call site.
+// gt7.rs); they are computed once on the CPU rather than derived per pixel.
+// Under the GT7_PARAMS_UNIFORM shader def this struct is fed per view from
+// the `Gt7ParamsUniform` buffer prepared by `prepare_gt7_params_uniforms`
+// (gt7.rs — keep the field order in sync); without the def the baked SDR
+// defaults from `gt7_default_sdr_params()` are used.
 struct Gt7Params {
     // Display peak in frame-buffer units (peak_nits / 100).
     peak: f32,
@@ -39,9 +40,20 @@ struct Gt7Params {
     // Chroma fade band, as fractions of `peak_ucs` (fade_end may exceed 1.0).
     fade_start: f32,
     fade_end: f32,
-    // 1 / 2.5 in SDR mode, 1.0 in HDR mode.
+    // Post-clamp output scale: 1 / 2.5 in SDR mode (rescales the
+    // 250-nit-referred result into [0, 1]); 100 / paper_white_nits in HDR
+    // mode (seam renormalization so 1.0 = paper white at operator output).
     sdr_correction_factor: f32,
 }
+
+#ifdef GT7_PARAMS_UNIFORM
+// Per-view GT7 parameters prepared on the CPU (`Gt7ParamsUniform` in gt7.rs).
+// Bound only when the pipeline is specialized with the GT7_PARAMS_UNIFORM
+// shader def: the view's tonemapping is GranTurismo7 AND the camera has a
+// `GranTurismo7Params` component. The binding index is pushed as a shader def
+// so other bind groups can rebind it elsewhere (6 in the tonemapping pass).
+@group(0) @binding(#GT7_PARAMS_BINDING_INDEX) var<uniform> gt7_params_uniform: Gt7Params;
+#endif
 
 // Default SDR-mode parameters (curve defaults alpha = 0.25, mid_point = 0.538,
 // linear_section = 0.444, toe_strength = 1.28 at peak 2.5 fb = 250 nits).
@@ -239,8 +251,21 @@ fn gt7_tone_map(rgb: vec3<f32>, params: Gt7Params) -> vec3<f32> {
 // gamut-mapping and transfer-encoding passes — lights up with the display
 // encoder workstream; this wrapper is only used while tone mapping feeds the
 // SDR sRGB chain directly.
+//
+// Under GT7_PARAMS_UNIFORM the baked defaults are replaced by per-view
+// parameters prepared on the CPU (which may configure the operator in HDR
+// mode, with curve constants derived from the display target's peak and the
+// seam renormalization folded into sdr_correction_factor). The input scaling
+// is unchanged in both modes (paper-white strategy (a): the curve always sees
+// Gran Turismo's 250-nit-calibrated scene), and until the encoder lands the
+// output still goes through the Rec.2020 → Rec.709 + saturate SDR chain, so
+// HDR-mode highlights above paper white are clipped on screen for now.
 fn tone_mapping_gran_turismo_7(color: vec3<f32>) -> vec3<f32> {
+#ifdef GT7_PARAMS_UNIFORM
+    let params = gt7_params_uniform;
+#else
     let params = gt7_default_sdr_params();
+#endif
     let rec2020 = GT7_REC_709_TO_REC_2020 * color;
     let fb = rec2020 * (GT7_SDR_PAPER_WHITE / GT7_REFERENCE_LUMINANCE);
     let mapped = gt7_tone_map(fb, params);

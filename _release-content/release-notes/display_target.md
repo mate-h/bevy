@@ -14,10 +14,20 @@ transfer function the final signal should be encoded with (`DisplayTransfer`:
 sRGB, scRGB-linear, PQ, or HLG). It is a required component of `Window`, so
 every window automatically gets one. The default, `DisplayTarget::SDR_SRGB`
 (paper white and peak of 100 nits, Rec.709, sRGB), reproduces Bevy's existing
-SDR output exactly — in this release `DisplayTarget` is inert data and has no
-effect on rendering. It is the foundation that upcoming HDR output support
+SDR output exactly. It is the foundation that upcoming HDR output support
 (peak-aware tone mapping, wide-gamut output, and HDR swapchain formats) will
 be parameterized by.
+
+In the render world, every camera view resolves its target's calibration into
+a `ViewDisplayTarget` component, and a per-view `DisplayTargetUniform`
+(luminance values plus gamut/transfer indices, importable in WGSL as
+`bevy_render::display_target`) is prepared each frame. The tonemapping pass
+binds it only for views whose display target differs from the SDR default (or
+whose operator needs it, like `Tonemapping::GranTurismo7` with per-camera
+params) — views on default SDR targets keep pipelines byte-identical to
+previous releases. Today the uniform parameterizes the GT7 operator's HDR
+mode; the upcoming gamut-mapping and transfer-encoding passes consume it
+next.
 
 Render targets that aren't windows, such as `RenderTarget::Image` and
 `RenderTarget::TextureView` (used by OpenXR), have no window entity to host

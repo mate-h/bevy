@@ -16,6 +16,8 @@
 // have a lot of bright specular reflections.
 //
 // The final target_exposure is finally used to smoothly adjust the exposure value over time.
+// Optionally, a two-stage physiological adaptation model bounds this short-term exposure by a
+// slowly moving long-term adaptation envelope (see `PhysiologicalAdaptation` on the Rust side).
 
 #import bevy_render::view::View
 #import bevy_render::globals::Globals
@@ -32,6 +34,22 @@ struct AutoExposure {
     speed_up: f32,
     speed_down: f32,
     exponential_transition_distance: f32,
+    metering_bias: f32,
+    external_reference_ev: f32,
+    external_reference_weight: f32,
+    long_term_speed_up: f32,
+    long_term_speed_down: f32,
+    long_term_bound_up: f32,
+    long_term_bound_down: f32,
+    physiological: u32,
+}
+
+// The per-view adaptation state, persisted on the GPU from frame to frame.
+struct AutoExposureState {
+    // The smoothed short-term exposure correction, in EV.
+    exposure: f32,
+    // The long-term physiological adaptation envelope, in EV.
+    long_term: f32,
 }
 
 struct CompensationCurve {
@@ -55,7 +73,7 @@ struct CompensationCurve {
 
 @group(0) @binding(6) var<storage, read_write> histogram: array<atomic<u32>, 64>;
 
-@group(0) @binding(7) var<storage, read_write> exposure: f32;
+@group(0) @binding(7) var<storage, read_write> state: AutoExposureState;
 
 @group(0) @binding(8) var<storage, read_write> view: View;
 
@@ -164,6 +182,21 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
             + settings.min_log_lum;
     }
 
+    // External metering references — the seam for GT7-style multi-reference metering.
+    // An externally computed scene reference (e.g. sun illuminance, sky dome or light
+    // probe luminance, estimated on the CPU) is fused with the histogram average as a
+    // weighted average, where the histogram always has weight 1.0. A constant metering
+    // bias is then applied to the fused result.
+    // Both statements are skipped entirely at their neutral values, so the default
+    // configuration executes exactly the same arithmetic as before they were added.
+    if settings.external_reference_weight > 0.0 {
+        avg_lum = (avg_lum + settings.external_reference_ev * settings.external_reference_weight)
+            / (1.0 + settings.external_reference_weight);
+    }
+    if settings.metering_bias != 0.0 {
+        avg_lum += settings.metering_bias;
+    }
+
     // The position in the compensation curve texture to sample for avg_lum.
     let u = (avg_lum - compensation_curve.min_log_lum) * compensation_curve.inv_log_lum_range;
 
@@ -175,7 +208,8 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
         + compensation_curve.min_compensation
         - avg_lum;
 
-    // Smoothly adjust the `exposure` towards the `target_exposure`
+    // Smoothly adjust the short-term `exposure` towards the `target_exposure`
+    var exposure = state.exposure;
     let delta = target_exposure - exposure;
     if target_exposure > exposure {
         let speed_down = settings.speed_down * globals.delta_time;
@@ -186,6 +220,37 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
         let exp_up = speed_up / settings.exponential_transition_distance;
         exposure = exposure + max(-speed_up, delta * exp_up);
     }
+
+    // Track the long-term physiological adaptation envelope: a slow, asymmetric follower
+    // of the short-term exposure, modeling receptor sensitivity (photopigment bleaching
+    // and recovery). The envelope is updated even when physiological adaptation is
+    // disabled — it never feeds back into the exposure in that case — so that enabling
+    // it at runtime starts from an envelope that already follows the current exposure.
+    var long_term = state.long_term;
+    let long_term_delta = exposure - long_term;
+    if exposure > long_term {
+        let long_term_speed_down = settings.long_term_speed_down * globals.delta_time;
+        let long_term_exp_down = long_term_speed_down / settings.exponential_transition_distance;
+        long_term = long_term + min(long_term_speed_down, long_term_delta * long_term_exp_down);
+    } else {
+        let long_term_speed_up = settings.long_term_speed_up * globals.delta_time;
+        let long_term_exp_up = long_term_speed_up / settings.exponential_transition_distance;
+        long_term = long_term + max(-long_term_speed_up, long_term_delta * long_term_exp_up);
+    }
+
+    // Two-stage adaptation: the long-term envelope bounds the short-term result, so e.g.
+    // dark scenes stay dark — even if the short-term stage wants to lift them — until the
+    // long-term envelope has had time to adapt.
+    if settings.physiological != 0u {
+        exposure = clamp(
+            exposure,
+            long_term - settings.long_term_bound_down,
+            long_term + settings.long_term_bound_up,
+        );
+    }
+
+    state.exposure = exposure;
+    state.long_term = long_term;
 
     // Apply the exposure to the color grading settings, from where it will be used for the color
     // grading pass.

@@ -1,11 +1,13 @@
-use crate::{Image, TextureFormatPixelInfo};
+use crate::{Image, SourceColorPrimaries, TextureFormatPixelInfo};
 use bevy_asset::RenderAssetUsages;
 use bevy_asset::{io::Reader, AssetLoader, LoadContext};
+use bevy_color::Chromaticity;
 use bevy_reflect::TypePath;
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wgpu_types::{Extent3d, TextureDimension, TextureFormat};
+use {bevy_utils::once, tracing::warn};
 
 /// Loads HDR textures as Texture assets
 #[derive(Clone, Default, TypePath)]
@@ -16,6 +18,15 @@ pub struct HdrTextureLoader;
 pub struct HdrTextureLoaderSettings {
     /// Where the asset will be used - see the docs on [`RenderAssetUsages`] for details.
     pub asset_usage: RenderAssetUsages,
+    /// The color primaries the image data is expressed in, stamped on
+    /// [`Image::source_primaries`]. This is metadata only and does not affect how
+    /// the image is decoded.
+    ///
+    /// `None` (the default) trusts the file's `PRIMARIES=` header line when present,
+    /// falling back to [`SourceColorPrimaries::Bt709`]. `Some` overrides whatever
+    /// the file says.
+    #[serde(default)]
+    pub source_primaries: Option<SourceColorPrimaries>,
 }
 
 /// Possible errors that can be produced by [`HdrTextureLoader`]
@@ -64,7 +75,7 @@ impl AssetLoader for HdrTextureLoader {
             rgba_data.extend_from_slice(&alpha.to_le_bytes());
         }
 
-        Ok(Image::new(
+        let mut image = Image::new(
             Extent3d {
                 width: info.width,
                 height: info.height,
@@ -74,10 +85,106 @@ impl AssetLoader for HdrTextureLoader {
             rgba_data,
             format,
             settings.asset_usage,
-        ))
+        );
+        // An explicit loader setting takes priority over the file's own `PRIMARIES=`
+        // metadata, which in turn defaults to BT.709.
+        image.source_primaries = settings
+            .source_primaries
+            .or_else(|| parse_radiance_primaries(&info.custom_attributes))
+            .unwrap_or_default();
+        Ok(image)
     }
 
     fn extensions(&self) -> &[&str] {
         &["hdr"]
+    }
+}
+
+/// Parses a Radiance `PRIMARIES=` header line (eight CIE 1931 xy coordinates: red,
+/// green, blue, white) from the decoder's custom attributes and matches it against
+/// the supported [`SourceColorPrimaries`] (see
+/// [`SourceColorPrimaries::from_chromaticities`] for the matching tolerance).
+///
+/// Returns `None` when the line is absent or malformed, and warns (once) when the
+/// line parses but describes a primary set Bevy does not support; callers fall back
+/// to [`SourceColorPrimaries::Bt709`] in both cases.
+fn parse_radiance_primaries(
+    custom_attributes: &[(String, String)],
+) -> Option<SourceColorPrimaries> {
+    let (_, value) = custom_attributes
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PRIMARIES"))?;
+    let mut coordinates = [0.0f32; 8];
+    let mut values = value.split_whitespace();
+    for coordinate in &mut coordinates {
+        *coordinate = values.next()?.parse().ok()?;
+    }
+    if values.next().is_some() {
+        // Malformed: a `PRIMARIES=` line carries exactly eight coordinates.
+        return None;
+    }
+    let source_primaries = SourceColorPrimaries::from_chromaticities(
+        Chromaticity::new(coordinates[0], coordinates[1]),
+        Chromaticity::new(coordinates[2], coordinates[3]),
+        Chromaticity::new(coordinates[4], coordinates[5]),
+        Chromaticity::new(coordinates[6], coordinates[7]),
+    );
+    if source_primaries.is_none() {
+        once!(warn!(
+            "Radiance HDR file declares PRIMARIES \"{value}\" that do not match a supported \
+            primary set; assuming BT.709",
+        ));
+    }
+    source_primaries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attributes(value: &str) -> Vec<(String, String)> {
+        vec![("PRIMARIES".to_owned(), value.to_owned())]
+    }
+
+    #[test]
+    fn radiance_primaries_match_known_sets() {
+        assert_eq!(
+            parse_radiance_primaries(&attributes(
+                "0.640 0.330 0.300 0.600 0.150 0.060 0.3127 0.3290"
+            )),
+            Some(SourceColorPrimaries::Bt709)
+        );
+        assert_eq!(
+            parse_radiance_primaries(&attributes(
+                "0.708 0.292 0.170 0.797 0.131 0.046 0.3127 0.3290"
+            )),
+            Some(SourceColorPrimaries::Bt2020)
+        );
+        assert_eq!(
+            parse_radiance_primaries(&attributes(
+                "0.680 0.320 0.265 0.690 0.150 0.060 0.3127 0.3290"
+            )),
+            Some(SourceColorPrimaries::DisplayP3)
+        );
+    }
+
+    #[test]
+    fn radiance_primaries_reject_unknown_or_malformed() {
+        // No PRIMARIES attribute at all.
+        assert_eq!(parse_radiance_primaries(&[]), None);
+        // Radiance's own default primaries are not quite BT.709 (green = 0.290, 0.600).
+        assert_eq!(
+            parse_radiance_primaries(&attributes(
+                "0.640 0.330 0.290 0.600 0.150 0.060 0.333 0.333"
+            )),
+            None
+        );
+        // Malformed: too few coordinates.
+        assert_eq!(parse_radiance_primaries(&attributes("0.640 0.330")), None);
+        // Malformed: not numbers.
+        assert_eq!(
+            parse_radiance_primaries(&attributes("a b c d e f g h")),
+            None
+        );
     }
 }
