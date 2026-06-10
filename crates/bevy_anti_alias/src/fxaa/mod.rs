@@ -16,7 +16,7 @@ use bevy_render::{
         *,
     },
     renderer::RenderDevice,
-    view::ExtractedView,
+    view::{ExtractedView, ViewDisplayTarget},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::Shader;
@@ -160,22 +160,36 @@ pub struct FxaaPipelineKey {
     edge_threshold: Sensitivity,
     edge_threshold_min: Sensitivity,
     target_format: TextureFormat,
+    /// Whether the view's resolved display target transfer is HDR
+    /// (scRGB-linear / PQ / HLG); see [`ViewDisplayTarget::is_hdr_transfer`].
+    ///
+    /// The post-tonemap input on such views is paper-white-relative
+    /// display-linear and exceeds 1.0, which would defeat FXAA's absolute
+    /// `EDGE_THRESHOLD_MIN` presets and its `sqrt` perceptual luma proxy, so
+    /// the shader compiles with the `HDR_DISPLAY_TARGET` def and saturates
+    /// the edge-detection luma to [0, 1]. SDR views keep the def-less
+    /// pipeline byte-for-byte.
+    hdr: bool,
 }
 
 impl SpecializedRenderPipeline for FxaaPipeline {
     type Key = FxaaPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let mut shader_defs = vec![
+            format!("EDGE_THRESH_{}", key.edge_threshold.get_str()).into(),
+            format!("EDGE_THRESH_MIN_{}", key.edge_threshold_min.get_str()).into(),
+        ];
+        if key.hdr {
+            shader_defs.push("HDR_DISPLAY_TARGET".into());
+        }
         RenderPipelineDescriptor {
             label: Some("fxaa".into()),
             layout: vec![self.texture_bind_group.clone()],
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.fragment_shader.clone(),
-                shader_defs: vec![
-                    format!("EDGE_THRESH_{}", key.edge_threshold.get_str()).into(),
-                    format!("EDGE_THRESH_MIN_{}", key.edge_threshold_min.get_str()).into(),
-                ],
+                shader_defs,
                 targets: vec![Some(ColorTargetState {
                     format: key.target_format,
                     blend: None,
@@ -193,9 +207,12 @@ pub fn prepare_fxaa_pipelines(
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<FxaaPipeline>>,
     fxaa_pipeline: Res<FxaaPipeline>,
-    cameras: Query<(Entity, &ExtractedView, &Fxaa), With<ExtractedCamera>>,
+    cameras: Query<
+        (Entity, &ExtractedView, &Fxaa, Option<&ViewDisplayTarget>),
+        With<ExtractedCamera>,
+    >,
 ) {
-    for (entity, view, fxaa) in &cameras {
+    for (entity, view, fxaa, display_target) in &cameras {
         if !fxaa.enabled {
             continue;
         }
@@ -206,6 +223,8 @@ pub fn prepare_fxaa_pipelines(
                 edge_threshold: fxaa.edge_threshold,
                 edge_threshold_min: fxaa.edge_threshold_min,
                 target_format: view.target_format,
+                // Missing `ViewDisplayTarget` means plain SDR (see its docs).
+                hdr: display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
             },
         );
 

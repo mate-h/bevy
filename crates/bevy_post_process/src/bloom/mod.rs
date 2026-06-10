@@ -27,7 +27,7 @@ use bevy_render::{
     render_resource::*,
     renderer::{RenderContext, RenderDevice, ViewQuery},
     texture::{CachedTexture, TextureCache},
-    view::ViewTarget,
+    view::{ViewDisplayTarget, ViewTarget},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use downsampling_pipeline::{
@@ -38,7 +38,42 @@ use upsampling_pipeline::{
     prepare_upsampling_pipeline, BloomUpsamplingPipeline, UpsamplingPipelineIds,
 };
 
+/// The bloom pyramid format used for views on SDR display targets.
+///
+/// `Rg11b10Ufloat` halves the bandwidth/memory of `Rgba16Float` and its range
+/// (~`[6.1e-5, 65504]`, no sign bit, no alpha) is sufficient for the
+/// scene-linear input, but its mantissa is coarse above ~1.0.
 const BLOOM_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rg11b10Ufloat;
+
+/// The bloom pyramid format used for views whose resolved display target has
+/// an HDR transfer.
+///
+/// On HDR output, above-paper-white scene content survives all the way to the
+/// display, and `Rg11b10Ufloat`'s coarse mantissa above 1.0 produces visible
+/// quantization banding in the Karis-averaged downsample sums. `Rgba16Float`
+/// has uniform precision across the HDR range at twice the memory cost
+/// (~89 MB/frame vs ~44 MB/frame at 4K with the default 8-level chain) —
+/// spent only on views that can actually show the difference. SDR views keep
+/// [`BLOOM_TEXTURE_FORMAT`] bit-for-bit.
+const BLOOM_TEXTURE_FORMAT_HDR: TextureFormat = TextureFormat::Rgba16Float;
+
+/// The paper white assumed when a view has no resolved display target
+/// (mirrors `DisplayTarget::SDR_SRGB.paper_white_nits`).
+const DEFAULT_PAPER_WHITE_NITS: f32 = 100.0;
+
+/// Returns the bloom pyramid texture format for a view, keyed on whether the
+/// view's resolved display target transfer is HDR.
+///
+/// Used by texture creation ([`prepare_bloom_textures`]) and both pipeline
+/// specializations so they can never disagree about the format. A missing
+/// [`ViewDisplayTarget`] means plain SDR (see its docs).
+pub(crate) fn bloom_texture_format(display_target: Option<&ViewDisplayTarget>) -> TextureFormat {
+    if display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer) {
+        BLOOM_TEXTURE_FORMAT_HDR
+    } else {
+        BLOOM_TEXTURE_FORMAT
+    }
+}
 
 #[derive(Default)]
 pub struct BloomPlugin;
@@ -68,6 +103,12 @@ impl Plugin for BloomPlugin {
             .add_systems(
                 Render,
                 (
+                    // Runs in `Queue`: after `PrepareViews` (so the
+                    // `ViewDisplayTarget` insertions are applied) and before
+                    // `PrepareResources`, where `UniformComponentPlugin`
+                    // writes the (possibly re-resolved) `BloomUniforms`
+                    // components to the GPU.
+                    resolve_bloom_threshold_nits.in_set(RenderSystems::Queue),
                     prepare_downsampling_pipeline.in_set(RenderSystems::Prepare),
                     prepare_upsampling_pipeline.in_set(RenderSystems::Prepare),
                     prepare_bloom_textures.in_set(RenderSystems::PrepareResources),
@@ -314,13 +355,39 @@ impl BloomTexture {
     }
 }
 
+/// Re-resolves nits-based bloom thresholds
+/// ([`BloomPrefilter::threshold_nits`]) against the paper white of the view's
+/// resolved display target, overwriting the provisional (100-nit) packing
+/// done at extract time.
+///
+/// Must run after the `ViewDisplayTarget` insertions from
+/// `RenderSystems::PrepareViews` are applied and before
+/// `RenderSystems::PrepareResources` writes the [`BloomUniforms`] components
+/// to the GPU; it is therefore scheduled in `RenderSystems::Queue`.
+fn resolve_bloom_threshold_nits(
+    mut views: Query<(&Bloom, &mut BloomUniforms, Option<&ViewDisplayTarget>)>,
+) {
+    for (bloom, mut uniforms, display_target) in &mut views {
+        if bloom.prefilter.threshold_nits.is_none() {
+            continue;
+        }
+        let paper_white_nits = display_target
+            .map(|target| target.resolved.sanitized_paper_white_nits())
+            .unwrap_or(DEFAULT_PAPER_WHITE_NITS);
+        uniforms.threshold_precomputations = BloomUniforms::threshold_precomputations(
+            bloom.prefilter.resolve_threshold(paper_white_nits),
+            bloom.prefilter.threshold_softness,
+        );
+    }
+}
+
 fn prepare_bloom_textures(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
-    views: Query<(Entity, &ExtractedCamera, &Bloom)>,
+    views: Query<(Entity, &ExtractedCamera, &Bloom, Option<&ViewDisplayTarget>)>,
 ) {
-    for (entity, camera, bloom) in &views {
+    for (entity, camera, bloom, display_target) in &views {
         if let Some(viewport) = camera.physical_viewport_size {
             // How many times we can halve the resolution minus one so we don't go unnecessarily low
             let mip_count = bloom.max_mip_dimension.ilog2().max(2) - 1;
@@ -340,7 +407,7 @@ fn prepare_bloom_textures(
                 mip_level_count: mip_count,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: BLOOM_TEXTURE_FORMAT,
+                format: bloom_texture_format(display_target),
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             };

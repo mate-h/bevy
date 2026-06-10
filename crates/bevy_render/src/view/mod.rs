@@ -24,6 +24,7 @@ use crate::{
         CachedTexture, ColorAttachment, DepthAttachment, GpuImage, ManualTextureViews,
         OutputColorAttachment, TextureCache,
     },
+    working_color_space::{linear_rgba_rec709_to_working, WorkingColorSpace},
     GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 use alloc::sync::{Arc, Weak};
@@ -1219,6 +1220,7 @@ type MainTextureKey = (
 pub fn prepare_view_targets(
     mut commands: Commands,
     clear_color_global: Res<ClearColor>,
+    working_color_space: Res<WorkingColorSpace>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
     cameras: Query<(
@@ -1261,13 +1263,33 @@ pub fn prepare_view_targets(
             _ => Some(clear_color_global.0),
         };
 
-        // Convert clear color to the format expected by the main texture
+        // Convert clear color to the format expected by the main texture.
+        //
+        // The main texture holds scene-referred working-space values, so the
+        // clear color converts Rec.709 → working space first (a bit-for-bit
+        // identity for the default `WorkingColorSpace::Rec709`). The Oklab
+        // compositing space is Rec.709-fit and is NOT working-space-aware
+        // (documented caveat: `CompositingSpace::Oklab` degrades under
+        // `WorkingColorSpace::Rec2020`).
         let converted_clear_color: Option<WgpuColor> =
             clear_color.map(|color| match camera.compositing_space {
                 // If main texture stores Oklab or Srgb, convert Color to it for correct clear.
                 Some(CompositingSpace::Oklab) => Oklaba::from(color).into(),
-                Some(CompositingSpace::Srgb) => Srgba::from(color).into(),
-                Some(CompositingSpace::Linear) | None => LinearRgba::from(color).into(),
+                // Keep the direct conversion for Rec.709 (bit-for-bit with
+                // the pre-working-space behavior); only Rec.2020 routes
+                // through linear for the primaries conversion.
+                Some(CompositingSpace::Srgb) => match *working_color_space {
+                    WorkingColorSpace::Rec709 => Srgba::from(color).into(),
+                    WorkingColorSpace::Rec2020 => Srgba::from(linear_rgba_rec709_to_working(
+                        LinearRgba::from(color),
+                        WorkingColorSpace::Rec2020,
+                    ))
+                    .into(),
+                },
+                Some(CompositingSpace::Linear) | None => {
+                    linear_rgba_rec709_to_working(LinearRgba::from(color), *working_color_space)
+                        .into()
+                }
             });
 
         let key: MainTextureKey = (

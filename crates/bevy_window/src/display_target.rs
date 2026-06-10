@@ -131,6 +131,62 @@ impl DisplayTarget {
         transfer: DisplayTransfer::Srgb,
     };
 
+    /// Returns `self` with [`paper_white_nits`](Self::paper_white_nits) set
+    /// to `nits`.
+    ///
+    /// Builder-style helper for deriving calibrated targets from a base value:
+    ///
+    /// ```
+    /// # use bevy_window::{DisplayTarget, DisplayTransfer};
+    /// let hdr = DisplayTarget::SDR_SRGB
+    ///     .with_paper_white(200.0)
+    ///     .with_peak(1000.0)
+    ///     .with_transfer(DisplayTransfer::ScRgbLinear);
+    /// assert_eq!(hdr.peak_luminance_nits, 1000.0);
+    /// ```
+    pub const fn with_paper_white(mut self, nits: f32) -> Self {
+        self.paper_white_nits = nits;
+        self
+    }
+
+    /// Returns `self` with [`peak_luminance_nits`](Self::peak_luminance_nits)
+    /// set to `nits`.
+    ///
+    /// See [`with_paper_white`](Self::with_paper_white) for the builder
+    /// pattern these helpers support.
+    pub const fn with_peak(mut self, nits: f32) -> Self {
+        self.peak_luminance_nits = nits;
+        self
+    }
+
+    /// Returns `self` with [`min_luminance_nits`](Self::min_luminance_nits)
+    /// set to `nits`.
+    ///
+    /// See [`with_paper_white`](Self::with_paper_white) for the builder
+    /// pattern these helpers support.
+    pub const fn with_min_luminance(mut self, nits: f32) -> Self {
+        self.min_luminance_nits = nits;
+        self
+    }
+
+    /// Returns `self` with [`gamut`](Self::gamut) set to `gamut`.
+    ///
+    /// See [`with_paper_white`](Self::with_paper_white) for the builder
+    /// pattern these helpers support.
+    pub const fn with_gamut(mut self, gamut: DisplayGamut) -> Self {
+        self.gamut = gamut;
+        self
+    }
+
+    /// Returns `self` with [`transfer`](Self::transfer) set to `transfer`.
+    ///
+    /// See [`with_paper_white`](Self::with_paper_white) for the builder
+    /// pattern these helpers support.
+    pub const fn with_transfer(mut self, transfer: DisplayTransfer) -> Self {
+        self.transfer = transfer;
+        self
+    }
+
     /// The luminance ceiling [`sanitized_paper_white_nits`] clamps to: the PQ
     /// (SMPTE ST 2084) coding ceiling of 10000 nits, the brightest luminance
     /// any supported transfer function can represent.
@@ -336,6 +392,46 @@ mod tests {
         assert_eq!(
             target.sanitized_paper_white_nits(),
             DisplayTarget::MAX_PAPER_WHITE_NITS
+        );
+    }
+
+    #[test]
+    fn builder_helpers_set_exactly_one_field() {
+        let base = DisplayTarget::SDR_SRGB;
+        assert_eq!(
+            base.with_paper_white(200.0),
+            DisplayTarget {
+                paper_white_nits: 200.0,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_peak(1000.0),
+            DisplayTarget {
+                peak_luminance_nits: 1000.0,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_min_luminance(0.05),
+            DisplayTarget {
+                min_luminance_nits: 0.05,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_gamut(DisplayGamut::Rec2020),
+            DisplayTarget {
+                gamut: DisplayGamut::Rec2020,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_transfer(DisplayTransfer::ScRgbLinear),
+            DisplayTarget {
+                transfer: DisplayTransfer::ScRgbLinear,
+                ..base
+            }
         );
     }
 

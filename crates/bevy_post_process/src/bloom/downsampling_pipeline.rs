@@ -1,6 +1,6 @@
 use bevy_core_pipeline::FullscreenShader;
 
-use super::{Bloom, BLOOM_TEXTURE_FORMAT};
+use super::{bloom_texture_format, Bloom};
 use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_ecs::{
     prelude::{Component, Entity},
@@ -14,6 +14,7 @@ use bevy_render::{
         *,
     },
     renderer::RenderDevice,
+    view::ViewDisplayTarget,
 };
 use bevy_shader::Shader;
 use bevy_utils::default;
@@ -40,6 +41,11 @@ pub struct BloomDownsamplingPipelineKeys {
     prefilter: bool,
     first_downsample: bool,
     uniform_scale: bool,
+    /// The bloom pyramid format the pass renders into: `Rg11b10Ufloat` for
+    /// views on SDR display targets (bit-for-bit the historical pipeline),
+    /// `Rgba16Float` for views whose resolved display target transfer is HDR
+    /// (see [`bloom_texture_format`]).
+    texture_format: TextureFormat,
 }
 
 /// The uniform struct extracted from [`Bloom`] attached to a Camera.
@@ -51,6 +57,26 @@ pub struct BloomUniforms {
     pub viewport: Vec4,
     pub scale: Vec2,
     pub aspect: f32,
+}
+
+impl BloomUniforms {
+    /// Packs the soft-knee threshold curve parameters consumed by
+    /// `soft_threshold` in `bloom.wgsl`
+    /// (see <https://catlikecoding.com/unity/tutorials/advanced-rendering/bloom/#3.4>).
+    ///
+    /// `threshold` is in scene-linear framebuffer units; `threshold_softness`
+    /// is clamped to `[0, 1]`. This is the single source of the packing math,
+    /// shared by the extract-time packing and the prepare-time
+    /// `threshold_nits` re-resolution.
+    pub(crate) fn threshold_precomputations(threshold: f32, threshold_softness: f32) -> Vec4 {
+        let knee = threshold * threshold_softness.clamp(0.0, 1.0);
+        Vec4::new(
+            threshold,
+            threshold - knee,
+            2.0 * knee,
+            0.25 / (knee + 0.00001),
+        )
+    }
 }
 
 pub fn init_bloom_downsampling_pipeline(
@@ -134,7 +160,7 @@ impl SpecializedRenderPipeline for BloomDownsamplingPipeline {
                 shader_defs,
                 entry_point: Some(entry_point),
                 targets: vec![Some(ColorTargetState {
-                    format: BLOOM_TEXTURE_FORMAT,
+                    format: key.texture_format,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -150,10 +176,11 @@ pub fn prepare_downsampling_pipeline(
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<BloomDownsamplingPipeline>>,
     pipeline: Res<BloomDownsamplingPipeline>,
-    views: Query<(Entity, &Bloom)>,
+    views: Query<(Entity, &Bloom, Option<&ViewDisplayTarget>)>,
 ) {
-    for (entity, bloom) in &views {
-        let prefilter = bloom.prefilter.threshold > 0.0;
+    for (entity, bloom, display_target) in &views {
+        let prefilter = bloom.prefilter.is_active();
+        let texture_format = bloom_texture_format(display_target);
 
         let pipeline_id = pipelines.specialize(
             &pipeline_cache,
@@ -162,6 +189,7 @@ pub fn prepare_downsampling_pipeline(
                 prefilter,
                 first_downsample: false,
                 uniform_scale: bloom.scale == Vec2::ONE,
+                texture_format,
             },
         );
 
@@ -172,6 +200,7 @@ pub fn prepare_downsampling_pipeline(
                 prefilter,
                 first_downsample: true,
                 uniform_scale: bloom.scale == Vec2::ONE,
+                texture_format,
             },
         );
 

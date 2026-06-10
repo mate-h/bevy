@@ -1,0 +1,13 @@
+// Headless probe for the HDR calibration example. CI machines have no HDR
+// display, so this exercises the documented downgrade path: the scRGB-linear
+// request resolves back to plain SDR (warn + degrade) and the calibration
+// patterns render clipped through the byte-identical SDR pipeline. Frame 200
+// leaves headroom for surface (re)negotiation and the first pattern to settle.
+(
+    setup: (
+        fixed_frame_time: Some(0.05),
+    ),
+    events: [
+        (200, ScreenshotAndExit),
+    ]
+)

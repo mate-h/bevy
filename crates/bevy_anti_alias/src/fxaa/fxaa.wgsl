@@ -68,7 +68,23 @@ fn QUALITY(q: i32) -> f32 {
 }
 
 fn rgb2luma(rgb: vec3<f32>) -> f32 {
+#ifdef HDR_DISPLAY_TARGET
+    // On HDR display targets the post-tonemap input is paper-white-relative
+    // display-linear and exceeds 1.0 (up to peak / paper-white), while FXAA's
+    // absolute EDGE_THRESHOLD_MIN presets and the sqrt() perceptual proxy were
+    // tuned for a [0, 1] signal. Saturating the luma keeps every threshold
+    // operating in the calibrated [0, 1] domain: edges involving
+    // above-paper-white values are detected at their 1.0-clamped contrast, and
+    // values at or below paper white behave exactly as on SDR targets. (The
+    // final color resample still reads the unmodified HDR texel, so pixel
+    // values are never clamped — only the edge-detection metric is.)
+    //
+    // SDR pipelines never set HDR_DISPLAY_TARGET: a saturate would be a no-op
+    // there, but omitting the def keeps the generated shader byte-identical.
+    return sqrt(saturate(dot(rgb, vec3<f32>(0.299, 0.587, 0.114))));
+#else
     return sqrt(dot(rgb, vec3<f32>(0.299, 0.587, 0.114)));
+#endif
 }
 
 // Performs FXAA post-process anti-aliasing as described in the Nvidia FXAA white paper and the associated shader code.

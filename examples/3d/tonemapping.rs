@@ -21,14 +21,29 @@ use std::f32::consts::PI;
 const SHADER_ASSET_PATH: &str = "shaders/tonemapping_test_patterns.wgsl";
 
 fn main() {
+    // Pass `--rec2020` to opt into the wide (Rec.2020) working color space.
+    // This is a project-global, startup-time setting on `RenderPlugin`: the
+    // scene then renders with Rec.2020 primaries (the native input space of
+    // `Tonemapping::GranTurismo7`), while SDR output remains Rec.709-encoded.
+    let working_color_space = if std::env::args().any(|arg| arg == "--rec2020") {
+        bevy::render::working_color_space::WorkingColorSpace::Rec2020
+    } else {
+        bevy::render::working_color_space::WorkingColorSpace::Rec709
+    };
+
     App::new()
         .add_plugins((
-            DefaultPlugins.set(AssetPlugin {
-                // We enable loading assets from arbitrary filesystem paths as this example allows
-                // drag and dropping a local image for color grading
-                unapproved_path_mode: UnapprovedPathMode::Allow,
-                ..default()
-            }),
+            DefaultPlugins
+                .set(AssetPlugin {
+                    // We enable loading assets from arbitrary filesystem paths as this example allows
+                    // drag and dropping a local image for color grading
+                    unapproved_path_mode: UnapprovedPathMode::Allow,
+                    ..default()
+                })
+                .set(bevy::render::RenderPlugin {
+                    working_color_space,
+                    ..default()
+                }),
             MaterialPlugin::<ColorGradientMaterial>::default(),
         ))
         .insert_resource(CameraTransform(

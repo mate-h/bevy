@@ -20,6 +20,7 @@ use bevy_render::{
     renderer::RenderDevice,
     texture::{FallbackImage, GpuImage},
     view::{DisplayTargetUniform, ExtractedView, ViewDisplayTarget, ViewTarget, ViewUniform},
+    working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal};
@@ -132,6 +133,17 @@ pub struct TonemappingPipeline {
     sampler: Sampler,
     fullscreen_shader: FullscreenShader,
     fragment_shader: Handle<Shader>,
+    /// The project-global working color space, captured at `RenderStartup`.
+    ///
+    /// When this is [`WorkingColorSpace::Rec2020`], every specialization
+    /// receives the `WORKING_COLOR_SPACE_REC2020` shader def (the tone
+    /// mapping pass consumes Rec.2020 scene-linear input); when it is the
+    /// default [`WorkingColorSpace::Rec709`], no def is pushed and every
+    /// pipeline composes byte-identically to before the working-space axis
+    /// existed. This is deliberately NOT part of
+    /// [`TonemappingPipelineKey`]: the working space is immutable for the
+    /// lifetime of the app, so it cannot change a cached pipeline's meaning.
+    working_color_space: WorkingColorSpace,
 }
 
 /// Optionally enables a tonemapping shader that attempts to map linear input stimulus into a perceptually uniform image for a given [`Camera`] entity.
@@ -319,6 +331,13 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let mut shader_defs = Vec::new();
 
+        // Project-global working-space axis: pushed for every specialization
+        // when (and only when) the app opted into the Rec.2020 working
+        // space, so default projects compose byte-identically.
+        if self.working_color_space.is_rec2020() {
+            shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+        }
+
         shader_defs.push(ShaderDefVal::UInt(
             "TONEMAPPING_LUT_TEXTURE_BINDING_INDEX".into(),
             3,
@@ -482,6 +501,7 @@ pub fn init_tonemapping_pipeline(
     render_device: Res<RenderDevice>,
     fullscreen_shader: Res<FullscreenShader>,
     asset_server: Res<AssetServer>,
+    working_color_space: Res<WorkingColorSpace>,
 ) {
     let mut entries = DynamicBindGroupLayoutEntries::new_with_indices(
         ShaderStages::FRAGMENT,
@@ -531,6 +551,7 @@ pub fn init_tonemapping_pipeline(
         sampler,
         fullscreen_shader: fullscreen_shader.clone(),
         fragment_shader: load_embedded_asset!(asset_server.as_ref(), "tonemapping.wgsl"),
+        working_color_space: *working_color_space,
     });
 }
 
@@ -581,11 +602,28 @@ pub fn prepare_view_tonemapping_pipelines(
         Option<&ViewDisplayTarget>,
         Option<&GranTurismo7Params>,
     )>,
+    working_color_space: Res<WorkingColorSpace>,
 ) {
     for (entity, view, view_target, tonemapping, dither, view_display_target, gt7_params) in
         view_targets.iter()
     {
         let tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
+
+        // Working-space diagnostic: the Rec.2020 → display-primaries
+        // conversion happens in the tonemapping pass, which
+        // `Tonemapping::None` cameras skip entirely (true passthrough). Such
+        // cameras present raw Rec.2020 values on a Rec.709-encoded chain,
+        // which reads as oversaturated. Warn instead of degrading silently.
+        if working_color_space.is_rec2020() && tonemapping == Tonemapping::None {
+            warn_once!(
+                "`WorkingColorSpace::Rec2020` is enabled but a camera uses \
+                `Tonemapping::None` (the default for `Camera2d`). The Rec.2020 → Rec.709 \
+                conversion runs in the tonemapping pass, so this camera's output will be \
+                reinterpreted (oversaturated). Give the camera an active `Tonemapping` \
+                operator (e.g. `Tonemapping::ReinhardLuminance` or \
+                `Tonemapping::GranTurismo7`)."
+            );
+        }
 
         // As an optimization, we omit parts of the shader that are unneeded.
         let mut flags = TonemappingPipelineKeyFlags::empty();

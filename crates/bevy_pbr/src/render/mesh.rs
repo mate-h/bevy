@@ -67,6 +67,7 @@ use bevy_render::{
     sync_world::MainEntityHashSet,
     texture::{DefaultImageSampler, GpuImage},
     view::{self, NoIndirectDrawing, RenderVisibilityRanges, RetainedViewEntity},
+    working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
     Extract,
 };
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal, ShaderSettings};
@@ -2701,6 +2702,17 @@ pub struct MeshPipeline {
     /// Whether mesh metadata will use uniform buffers on account of storage buffers
     /// being unavailable on this platform.
     pub metadata_use_uniform_buffers: bool,
+
+    /// The project-global working color space, captured at `RenderStartup`.
+    ///
+    /// When this is `WorkingColorSpace::Rec2020`, every specialization
+    /// receives the `WORKING_COLOR_SPACE_REC2020` shader def (composed
+    /// material base color / emissive, lightmap samples, and environment-map
+    /// radiance convert into the working space in the fragment shaders);
+    /// when it is the default `WorkingColorSpace::Rec709`, no def is pushed
+    /// and every pipeline composes byte-identically to before the
+    /// working-space axis existed.
+    pub working_color_space: WorkingColorSpace,
 }
 
 fn init_mesh_pipeline(
@@ -2709,6 +2721,7 @@ fn init_mesh_pipeline(
     render_adapter: Res<RenderAdapter>,
     view_layouts: Res<MeshPipelineViewLayouts>,
     asset_server: Res<AssetServer>,
+    working_color_space: Res<WorkingColorSpace>,
 ) {
     let shader = load_embedded_asset!(asset_server.as_ref(), "mesh.wgsl");
 
@@ -2732,6 +2745,7 @@ fn init_mesh_pipeline(
         metadata_use_uniform_buffers: bevy_render::storage_buffers_are_unsupported(
             &render_device.limits(),
         ),
+        working_color_space: *working_color_space,
     };
 
     commands.insert_resource(res);
@@ -2779,6 +2793,7 @@ pub fn build_dummy_white_gpu_image(
         texture_descriptor: image.texture_descriptor,
         texture_view_descriptor: image.texture_view_descriptor,
         had_data: true,
+        source_primaries: image.source_primaries,
     }
 }
 
@@ -3292,6 +3307,13 @@ impl SpecializedMeshPipeline for MeshPipeline {
 
         // Let the shader code know that it's running in a mesh pipeline.
         shader_defs.push("MESH_PIPELINE".into());
+
+        // Project-global working-space axis: pushed for every specialization
+        // when (and only when) the app opted into the Rec.2020 working
+        // space, so default projects compose byte-identically.
+        if self.working_color_space.is_rec2020() {
+            shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+        }
 
         shader_defs.push("VERTEX_OUTPUT_INSTANCE_INDEX".into());
 

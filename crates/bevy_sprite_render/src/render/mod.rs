@@ -36,6 +36,7 @@ use bevy_render::{
         texture_format_from_code, texture_format_to_code, ExtractedView, Msaa, ViewUniform,
         ViewUniformOffset, ViewUniforms,
     },
+    working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
     Extract,
 };
 use bevy_shader::Shader;
@@ -50,9 +51,18 @@ pub struct SpritePipeline {
     view_layout: BindGroupLayoutDescriptor,
     material_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
+    /// The project-global working color space, captured at `RenderStartup`.
+    /// Under `WorkingColorSpace::Rec2020` the sprite fragment shader
+    /// converts its composed color (instance tint × texture sample) into the
+    /// working space (`WORKING_COLOR_SPACE_REC2020` shader def).
+    working_color_space: WorkingColorSpace,
 }
 
-pub fn init_sprite_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub fn init_sprite_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    working_color_space: Res<WorkingColorSpace>,
+) {
     let view_layout = BindGroupLayoutDescriptor::new(
         "sprite_view_layout",
         &BindGroupLayoutEntries::sequential(
@@ -76,6 +86,7 @@ pub fn init_sprite_pipeline(mut commands: Commands, asset_server: Res<AssetServe
         view_layout,
         material_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "sprite.wgsl"),
+        working_color_space: *working_color_space,
     });
 }
 
@@ -136,6 +147,13 @@ impl SpecializedRenderPipeline for SpritePipeline {
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let mut shader_defs = Vec::new();
+
+        // Project-global working-space axis: pushed for every specialization
+        // when (and only when) the app opted into the Rec.2020 working
+        // space, so default projects compose byte-identically.
+        if self.working_color_space.is_rec2020() {
+            shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+        }
 
         if key.contains(SpritePipelineKey::SRGB_COMPOSITING) {
             shader_defs.push("SRGB_OUTPUT".into());

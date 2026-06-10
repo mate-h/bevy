@@ -70,7 +70,21 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     var rgb = color.rgb;
 
-    // 2. Gamut transform: working primaries → display primaries.
+    // 2. Gamut transform: tone-map-output primaries → display primaries.
+    //
+    // Input-contract note for the working-space axis (T2.5): the tone
+    // mapping pass emits Rec.709 display-linear under EVERY
+    // `WorkingColorSpace` — Rec.709-fit operators receive a Rec.2020 →
+    // Rec.709 conversion at the pass entry, and the GT7 operator keeps its
+    // own Rec.2020 → Rec.709 back-conversion. So this stage's input is
+    // Rec.709 regardless of the working space, and the defs below are
+    // unchanged by `WorkingColorSpace::Rec2020`. When the GT7 HDR-native
+    // output path lands (operator output staying Rec.2020 for HDR targets),
+    // this stage becomes a true working → display transform: Rec.2020 input
+    // + PQ/Rec.2020 display = identity, Rec.2020 input + scRGB (Rec.709
+    // coordinates) = the inverse REC_2020_TO_REC_709 matrix, with the
+    // max(0) clip below becoming load-bearing for out-of-gamut colors
+    // (T2.6's hue-preserving compression is the real fix).
 #ifdef DISPLAY_GAMUT_REC2020
     rgb = REC_709_TO_REC_2020 * rgb;
 #endif

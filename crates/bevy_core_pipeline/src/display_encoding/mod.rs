@@ -45,6 +45,7 @@ use bevy_render::{
     },
     renderer::RenderDevice,
     view::{DisplayTargetUniform, ExtractedView, ViewDisplayTarget},
+    working_color_space::WorkingColorSpace,
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::Shader;
@@ -252,8 +253,23 @@ pub fn prepare_view_display_encoding_pipelines(
         &ViewDisplayTarget,
         Option<&Tonemapping>,
     )>,
+    working_color_space: Res<WorkingColorSpace>,
 ) {
     for (entity, view, camera, view_display_target, tonemapping) in &views {
+        // D1 guidance: HDR display output reaches noticeably wider gamuts
+        // when the scene is rendered in the Rec.2020 working space. This is
+        // advisory only (the Rec.709 working space remains correct, just
+        // gamut-limited); a global axis must never flip automatically
+        // because one window went HDR.
+        if view_display_target.is_hdr_transfer() && !working_color_space.is_rec2020() {
+            warn_once!(
+                "A camera is rendering to an HDR display target while the working color \
+                space is the default `WorkingColorSpace::Rec709`. Output is correct but \
+                limited to the Rec.709 gamut; consider opting into the wide working space \
+                with `RenderPlugin {{ working_color_space: WorkingColorSpace::Rec2020, .. }}`."
+            );
+        }
+
         if !view_display_target.is_hdr_transfer() {
             // sRGB transfer: hardware encode on the upscaling blit, no pass.
             // (Render-world entities are retained, so the component must be

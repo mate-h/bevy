@@ -67,7 +67,7 @@ use bevy_render::{
     },
     renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
     texture::{CachedTexture, GpuImage, TextureCache},
-    view::{ExtractedView, ViewTarget},
+    view::{ExtractedView, ViewDisplayTarget, ViewTarget},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::{Shader, ShaderDefVal};
@@ -178,6 +178,23 @@ pub struct SmaaNeighborhoodBlendingPipelineKey {
     target_format: TextureFormat,
     /// The quality preset.
     preset: SmaaPreset,
+}
+
+/// A unique identifier for an SMAA edge-detection pipeline (phase 1).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SmaaEdgeDetectionPipelineKey {
+    /// The quality preset.
+    preset: SmaaPreset,
+    /// Whether the view's resolved display target transfer is HDR
+    /// (scRGB-linear / PQ / HLG); see [`ViewDisplayTarget::is_hdr_transfer`].
+    ///
+    /// The post-tonemap input on such views is paper-white-relative
+    /// display-linear and exceeds 1.0, which would shift `SMAA_THRESHOLD`'s
+    /// effective sensitivity, so the edge-detection shader compiles with the
+    /// `HDR_DISPLAY_TARGET` def and saturates the edge-detection luma to
+    /// [0, 1]. SDR views keep the def-less pipeline byte-for-byte. Only
+    /// phase 1 reads luma; phases 2 and 3 are unaffected.
+    hdr: bool,
 }
 
 /// A render world component that holds the pipeline IDs for the SMAA passes.
@@ -456,10 +473,13 @@ pub fn init_smaa_pipelines(mut commands: Commands, asset_server: Res<AssetServer
 
 // Phase 1: edge detection.
 impl SpecializedRenderPipeline for SmaaEdgeDetectionPipeline {
-    type Key = SmaaPreset;
+    type Key = SmaaEdgeDetectionPipelineKey;
 
-    fn specialize(&self, preset: Self::Key) -> RenderPipelineDescriptor {
-        let shader_defs = vec!["SMAA_EDGE_DETECTION".into(), preset.shader_def()];
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let mut shader_defs = vec!["SMAA_EDGE_DETECTION".into(), key.preset.shader_def()];
+        if key.hdr {
+            shader_defs.push("HDR_DISPLAY_TARGET".into());
+        }
 
         // We mark the pixels that we touched with a 1 so that the blending
         // weight calculation (phase 2) will only consider those. This reduces
@@ -613,13 +633,20 @@ fn prepare_smaa_pipelines(
     pipeline_cache: Res<PipelineCache>,
     mut specialized_render_pipelines: ResMut<SmaaSpecializedRenderPipelines>,
     smaa_pipelines: Res<SmaaPipelines>,
-    cameras: Query<(Entity, &ExtractedView, &Smaa), With<ExtractedCamera>>,
+    cameras: Query<
+        (Entity, &ExtractedView, &Smaa, Option<&ViewDisplayTarget>),
+        With<ExtractedCamera>,
+    >,
 ) {
-    for (entity, view, smaa) in &cameras {
+    for (entity, view, smaa, display_target) in &cameras {
         let edge_detection_pipeline_id = specialized_render_pipelines.edge_detection.specialize(
             &pipeline_cache,
             &smaa_pipelines.edge_detection,
-            smaa.preset,
+            SmaaEdgeDetectionPipelineKey {
+                preset: smaa.preset,
+                // Missing `ViewDisplayTarget` means plain SDR (see its docs).
+                hdr: display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
+            },
         );
 
         let blending_weight_calculation_pipeline_id = specialized_render_pipelines

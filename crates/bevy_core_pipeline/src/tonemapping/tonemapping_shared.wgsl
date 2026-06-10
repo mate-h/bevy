@@ -17,6 +17,12 @@
 #import bevy_core_pipeline::tonemapping_gt7::tone_mapping_gran_turismo_7
 #endif
 
+// Only pulled in when the project opted into the Rec.2020 working space, so
+// default (Rec.709) projects compose exactly as before.
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec2020_to_rec709
+#endif
+
 // Half the size of the crossfade region between shadows and midtones and
 // between midtones and highlights. This value, 0.1, corresponds to 10% of the
 // gamut on either side of the cutoff point.
@@ -382,6 +388,27 @@ fn sectional_color_grading(
 fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     var color = max(in.rgb, vec3(0.0));
     var color_grading = in_color_grading;   // So we can take pointers to it.
+
+#ifdef WORKING_COLOR_SPACE_REC2020
+#ifndef TONEMAP_METHOD_GRAN_TURISMO_7
+    // The scene buffer holds linear Rec.2020 working-space values, but every
+    // operator below (and the color grading stack: white balance, sectional
+    // grading, saturation) is fit to Rec.709 primaries and cannot be rebaked
+    // (the AgX / Tony McMapface / Blender Filmic LUTs have no algorithmic
+    // source). Convert to Rec.709 at the pass entry; the output contract of
+    // this pass (Rec.709 display-linear, 1.0 = paper white) is unchanged, so
+    // the UI pass, FXAA/SMAA luma weights, the display encoder, and the sRGB
+    // blit chain all see exactly what they saw before. Working-space colors
+    // outside the Rec.709 gamut are clipped here (documented limitation of
+    // Rec.709-fit operators under the wide working space).
+    //
+    // The Gran Turismo 7 operator is Rec.2020-native and instead skips its
+    // own Rec.709 → Rec.2020 input expansion (see gt7.wgsl); for GT7 the
+    // grading stack above the operator runs on Rec.2020 values with its
+    // Rec.709-fit constants (documented caveat).
+    color = max(rec2020_to_rec709(color), vec3(0.0));
+#endif
+#endif
 
     // Rotate hue if needed, by converting to and from HSV. Remember that hue is
     // an angle, so it needs to be modulo 2π.

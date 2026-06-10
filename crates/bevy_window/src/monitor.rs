@@ -17,6 +17,21 @@ use {bevy_ecs::prelude::ReflectComponent, bevy_reflect::Reflect};
 ///
 /// This component is synchronized with `winit` through `bevy_winit`, but is effectively
 /// read-only as `winit` does not support changing monitor properties.
+///
+/// # HDR capability metadata
+///
+/// `Monitor` currently carries **no luminance, gamut, or HDR-capability fields** (peak/min
+/// luminance, EDID-derived primaries, current HDR enablement): `winit` 0.30 exposes none of
+/// these on its `MonitorHandle`, and `wgpu` has no display-capability query either (tracked
+/// upstream under <https://github.com/gfx-rs/wgpu/issues/2920>). Such fields would be purely
+/// additive here once an upstream source exists.
+///
+/// Until then, display calibration is described by the user-authoritative
+/// [`DisplayTarget`](crate::DisplayTarget) component on each [`Window`](crate::Window),
+/// populated from OS settings, user input, or an HGIG-style calibration flow (see the
+/// `hdr_calibration` example). The [`WindowMonitorChanged`](crate::WindowMonitorChanged)
+/// event signals when a window moves to a different monitor and recalibration may be
+/// warranted.
 #[derive(Component, Debug, Clone)]
 #[require(HasWindows)]
 #[cfg_attr(

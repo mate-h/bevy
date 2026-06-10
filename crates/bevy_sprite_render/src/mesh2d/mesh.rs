@@ -6,6 +6,7 @@ use bevy_render::{
     camera::{DirtySpecializations, ExtractedCamera},
     mesh::{allocator::MeshSlabId, MeshMetadata, MeshMetadataFallbackBuffer},
     render_resource::binding_types::{storage_buffer_read_only, uniform_buffer_sized},
+    working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
     RenderStartup,
 };
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal, ShaderSettings};
@@ -305,12 +306,19 @@ pub struct Mesh2dPipeline {
     pub mesh_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
     pub per_object_buffer_batch_size: Option<u32>,
+    /// The project-global working color space, captured at `RenderStartup`.
+    /// Under `WorkingColorSpace::Rec2020` the 2D mesh / material fragment
+    /// shaders convert their composed colors into the working space
+    /// (`WORKING_COLOR_SPACE_REC2020` shader def, inherited by `Material2d`
+    /// pipelines).
+    pub working_color_space: WorkingColorSpace,
 }
 
 pub fn init_mesh_2d_pipeline(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     asset_server: Res<AssetServer>,
+    working_color_space: Res<WorkingColorSpace>,
 ) {
     let view_layout = BindGroupLayoutDescriptor::new(
         "mesh2d_view_layout",
@@ -346,6 +354,7 @@ pub fn init_mesh_2d_pipeline(
             &render_device.limits(),
         ),
         shader: load_embedded_asset!(asset_server.as_ref(), "mesh2d.wgsl"),
+        working_color_space: *working_color_space,
     });
 }
 
@@ -579,6 +588,13 @@ impl SpecializedMeshPipeline for Mesh2dPipeline {
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut shader_defs = Vec::new();
         let mut vertex_attributes = Vec::new();
+
+        // Project-global working-space axis: pushed for every specialization
+        // when (and only when) the app opted into the Rec.2020 working
+        // space, so default projects compose byte-identically.
+        if self.working_color_space.is_rec2020() {
+            shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+        }
 
         if layout.0.contains(Mesh::ATTRIBUTE_POSITION) {
             shader_defs.push("VERTEX_POSITIONS".into());

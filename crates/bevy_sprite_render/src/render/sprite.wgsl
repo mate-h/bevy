@@ -4,6 +4,9 @@
 #ifdef OKLAB_OUTPUT
 #import bevy_render::color_operations::linear_rgb_to_oklab
 #endif
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec709_to_rec2020
+#endif
 
 #import bevy_render::{
     maths::affine3_to_square,
@@ -57,6 +60,12 @@ fn vertex(in: VertexInput) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = in.color * textureSample(sprite_texture, sprite_sampler, in.uv);
+
+#ifdef WORKING_COLOR_SPACE_REC2020
+    // The composed sprite color (Rec.709 tint × Rec.709-authored texture)
+    // converts into the Rec.2020 working space once, after composition.
+    color = vec4(rec709_to_rec2020(color.rgb), color.a);
+#endif
 
 #ifdef SRGB_OUTPUT
     color = vec4(linear_to_srgb(color.rgb), color.a);

@@ -1444,6 +1444,18 @@ category = "3D Rendering"
 wasm = true
 
 [[example]]
+name = "hdr_calibration"
+path = "examples/3d/hdr_calibration.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.hdr_calibration]
+name = "HDR Calibration"
+description = "HGIG-style calibration patterns for tuning a window's DisplayTarget on an HDR display"
+category = "3D Rendering"
+# HDR display output is not reachable through WebGPU/WebGL
+wasm = false
+
+[[example]]
 name = "orthographic"
 path = "examples/3d/orthographic.rs"
 doc-scrape-examples = true

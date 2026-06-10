@@ -77,8 +77,11 @@ pub const GT7_MAX_HDR_PEAK_NITS: f32 = 10000.0;
 /// (`GT7_REC_709_TO_REC_2020`, note: column-major there); the two must stay
 /// bit-identical so this module remains an exact parity reference for the
 /// shader.
-// TODO: deduplicate with shared color-space matrix constants once they land in
-// `bevy_color` / `bevy_render::color_operations` (HDR workstream T2.x).
+// The shared engine-wide constants now live in
+// `bevy_render::working_color_space` (`REC709_TO_REC2020`, column-major
+// `Mat3`); the row-major copies here are kept as the parity-fixture format
+// and are bit-identity-locked against the shared constants by
+// `matrices_bitwise_match_bevy_render_working_color_space`.
 pub const REC_709_TO_REC_2020: [[f32; 3]; 3] = [
     [0.627_403_9, 0.329_283_03, 0.043_313_067],
     [0.069_097_29, 0.919_540_4, 0.011_362_315],
@@ -593,6 +596,34 @@ impl Gt7ToneMapping {
             rec709[2].clamp(0.0, 1.0),
         ]
     }
+
+    /// CPU mirror of the `tone_mapping_gran_turismo_7` WGSL wrapper under the
+    /// `WORKING_COLOR_SPACE_REC2020` shader def (gt7.wgsl), i.e. the SDR seam
+    /// when Bevy's working color space is
+    /// `bevy_render::working_color_space::WorkingColorSpace::Rec2020`.
+    ///
+    /// Identical to [`Self::apply_bevy_scene_linear_sdr`] except that the
+    /// input is already native linear Rec.2020 (the working space), so the
+    /// Rec.709 → Rec.2020 input expansion is skipped. The output
+    /// back-conversion to Rec.709 (+ clamp) is unchanged: the tone mapping
+    /// pass's output contract is Rec.709 display-linear in every working
+    /// space (the sRGB chain hardware-encodes from it, and the display
+    /// encoder's input contract is Rec.709 until the GT7 HDR-native output
+    /// path lands).
+    pub fn apply_bevy_scene_linear_sdr_rec2020_native(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let fb = [
+            rgb[0] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
+            rgb[1] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
+            rgb[2] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
+        ];
+        let mapped = self.apply(fb);
+        let rec709 = mat3_mul_vec3(&REC_2020_TO_REC_709, mapped);
+        [
+            rec709[0].clamp(0.0, 1.0),
+            rec709[1].clamp(0.0, 1.0),
+            rec709[2].clamp(0.0, 1.0),
+        ]
+    }
 }
 
 fn mat3_mul_vec3(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
@@ -1065,6 +1096,69 @@ mod tests {
             mat3_mul_vec3(&REC_709_TO_REC_2020, [0.25, 0.5, 0.75]),
         );
         assert_rgb_eq(round_trip, [0.25, 0.5, 0.75]);
+    }
+
+    /// The local matrix constants and the shared
+    /// `bevy_render::working_color_space` constants must stay bit-identical
+    /// (both are the canonical f64-derived BT.2087 values; gt7.rs is the
+    /// declared CPU parity reference for the shaders).
+    #[test]
+    fn matrices_bitwise_match_bevy_render_working_color_space() {
+        let pairs = [
+            (
+                &REC_709_TO_REC_2020,
+                bevy_render::working_color_space::REC709_TO_REC2020,
+            ),
+            (
+                &REC_2020_TO_REC_709,
+                bevy_render::working_color_space::REC2020_TO_REC709,
+            ),
+        ];
+        for (rows, mat) in pairs {
+            for (row_index, row) in rows.iter().enumerate() {
+                for (col_index, value) in row.iter().enumerate() {
+                    // `gt7.rs` matrices are row-major; `Mat3` is column-major.
+                    let shared = mat.col(col_index)[row_index];
+                    assert_eq!(
+                        value.to_bits(),
+                        shared.to_bits(),
+                        "matrix entry [{row_index}][{col_index}] differs: {value:?} vs {shared:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Rec.2020-native SDR seam (`WORKING_COLOR_SPACE_REC2020`) must be
+    /// bit-identical to the legacy Rec.709 seam fed the same color: the
+    /// legacy path computes the identical Rec.709 → Rec.2020 expansion as
+    /// its first step, so handing the expanded value to the native seam
+    /// replays the exact same float operations.
+    #[test]
+    fn rec2020_native_seam_matches_legacy_seam_bitwise() {
+        let sdr = Gt7ToneMapping::new_sdr();
+        let inputs: [[f32; 3]; 6] = [
+            [0.5, 1.23, 0.75],
+            [12.3, 4.56, 7.89],
+            [1504.7, 0.0, 0.001],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.538, 1.11, 0.444],
+        ];
+        for rec709 in inputs {
+            let legacy = sdr.apply_bevy_scene_linear_sdr(rec709);
+            let native = sdr.apply_bevy_scene_linear_sdr_rec2020_native(mat3_mul_vec3(
+                &REC_709_TO_REC_2020,
+                rec709,
+            ));
+            for (l, n) in legacy.iter().zip(native.iter()) {
+                assert_eq!(
+                    l.to_bits(),
+                    n.to_bits(),
+                    "seam mismatch for input {rec709:?}: {legacy:?} vs {native:?}"
+                );
+            }
+        }
     }
 
     #[test]

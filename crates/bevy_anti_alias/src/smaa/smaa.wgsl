@@ -567,6 +567,24 @@ fn neighborhood_blending_vertex_main(@builtin(vertex_index) vertex_index: u32)
  *
  * IMPORTANT NOTICE: luma edge detection requires gamma-corrected colors, and
  * thus 'color_texture' should be a non-sRGB texture.
+ *
+ * Bevy note: in Bevy this pass actually reads *display-linear* values, not
+ * the gamma-corrected ones the reference shader was tuned for. The view
+ * target is either an sRGB texture (hardware-decoded to linear on sample) or,
+ * for tone-mapped cameras, an Rgba16Float texture holding display-linear
+ * values directly — numerically the same signal modulo quantization. This is
+ * a long-standing, deliberate deviation: SMAA_THRESHOLD operates on linear
+ * luma here (slightly more sensitive in shadows, slightly less in
+ * highlights than the reference tuning).
+ *
+ * On HDR display targets (HDR_DISPLAY_TARGET) the input is additionally
+ * paper-white-relative and exceeds 1.0 up to peak / paper-white, which would
+ * shift SMAA_THRESHOLD's effective sensitivity arbitrarily, so the luma used
+ * for edge detection is saturated to [0, 1]: edges between above-paper-white
+ * values are detected at their 1.0-clamped contrast, and values at or below
+ * paper white behave exactly as on SDR targets. Only the edge metric is
+ * clamped; blending (pass 3) still reads the unmodified HDR texels. SDR
+ * pipelines never set the def and compile byte-identically.
  */
 @fragment
 fn luma_edge_detection_fragment_main(in: EdgeDetectionVaryings) -> @location(0) vec4<f32> {
@@ -576,10 +594,17 @@ fn luma_edge_detection_fragment_main(in: EdgeDetectionVaryings) -> @location(0) 
 
     // Calculate luma:
     let weights = vec3(0.2126, 0.7152, 0.0722);
+#ifdef HDR_DISPLAY_TARGET
+    let L = saturate(dot(textureSample(color_texture, color_sampler, in.tex_coord).rgb, weights));
+
+    let Lleft = saturate(dot(textureSample(color_texture, color_sampler, in.offset_0.xy).rgb, weights));
+    let Ltop  = saturate(dot(textureSample(color_texture, color_sampler, in.offset_0.zw).rgb, weights));
+#else
     let L = dot(textureSample(color_texture, color_sampler, in.tex_coord).rgb, weights);
 
     let Lleft = dot(textureSample(color_texture, color_sampler, in.offset_0.xy).rgb, weights);
     let Ltop  = dot(textureSample(color_texture, color_sampler, in.offset_0.zw).rgb, weights);
+#endif
 
     // We do the usual threshold:
     var delta: vec4<f32> = vec4(abs(L - vec2(Lleft, Ltop)), 0.0, 0.0);
@@ -591,16 +616,26 @@ fn luma_edge_detection_fragment_main(in: EdgeDetectionVaryings) -> @location(0) 
     }
 
     // Calculate right and bottom deltas:
+#ifdef HDR_DISPLAY_TARGET
+    let Lright  = saturate(dot(textureSample(color_texture, color_sampler, in.offset_1.xy).rgb, weights));
+    let Lbottom = saturate(dot(textureSample(color_texture, color_sampler, in.offset_1.zw).rgb, weights));
+#else
     let Lright  = dot(textureSample(color_texture, color_sampler, in.offset_1.xy).rgb, weights);
     let Lbottom = dot(textureSample(color_texture, color_sampler, in.offset_1.zw).rgb, weights);
+#endif
     delta = vec4(delta.xy, abs(L - vec2(Lright, Lbottom)));
 
     // Calculate the maximum delta in the direct neighborhood:
     var max_delta = max(delta.xy, delta.zw);
 
     // Calculate left-left and top-top deltas:
+#ifdef HDR_DISPLAY_TARGET
+    let Lleftleft = saturate(dot(textureSample(color_texture, color_sampler, in.offset_2.xy).rgb, weights));
+    let Ltoptop   = saturate(dot(textureSample(color_texture, color_sampler, in.offset_2.zw).rgb, weights));
+#else
     let Lleftleft = dot(textureSample(color_texture, color_sampler, in.offset_2.xy).rgb, weights);
     let Ltoptop   = dot(textureSample(color_texture, color_sampler, in.offset_2.zw).rgb, weights);
+#endif
     delta = vec4(delta.xy, abs(vec2(Lleft, Ltop) - vec2(Lleftleft, Ltoptop)));
 
     // Calculate the final maximum delta:

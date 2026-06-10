@@ -92,9 +92,11 @@ const GT7_SDR_PAPER_WHITE: f32 = 250.0;
 
 // Full-precision linear Rec.709 → Rec.2020 matrix (D65, per ITU-R BT.2087).
 // Bevy's working space is currently scene-linear Rec.709; the operator is
-// native Rec.2020. Keep in sync with `REC_709_TO_REC_2020` in gt7.rs.
-// TODO: deduplicate with shared color-space constants once they land in
-// `bevy_render::color_operations` (HDR workstream T2.x).
+// native Rec.2020 (unless WORKING_COLOR_SPACE_REC2020 is set, in which case
+// the expansion below is skipped). Keep in sync with `REC_709_TO_REC_2020`
+// in gt7.rs and with the shared `bevy_render::working_color_space` module
+// (identical literals; this module deliberately imports nothing so it stays
+// self-contained and fixture-locked).
 const GT7_REC_709_TO_REC_2020 = mat3x3<f32>(
     0.627403895934699, 0.06909728935823199, 0.016391438875150228,   // column 0
     0.32928303837788375, 0.919540395075459, 0.08801330787722578,    // column 1
@@ -238,14 +240,22 @@ fn gt7_tone_map(rgb: vec3<f32>, params: Gt7Params) -> vec3<f32> {
 // `Gt7ToneMapping::apply_bevy_scene_linear_sdr` (gt7.rs).
 //
 // Contract:
-// 1. Input is Bevy's scene-linear Rec.709 working space (1.0 ≈ SDR paper
-//    white); convert to the operator's native linear Rec.2020.
+// 1. Input is Bevy's scene-linear working space (1.0 ≈ SDR paper white). The
+//    default working space is Rec.709 and is converted to the operator's
+//    native linear Rec.2020; under WORKING_COLOR_SPACE_REC2020 the input is
+//    already native Rec.2020 and the expansion is skipped (the operator is
+//    the one Bevy tonemapper that consumes the wide working space without a
+//    gamut-clipping entry conversion — see tonemapping_shared.wgsl).
 // 2. Multiply by 2.5: Bevy's 1.0 maps to GT7's 250-nit paper white
 //    (2.5 frame-buffer units), matching GT's "SDR 1.0 == 250 nits" assumption.
 // 3. Run the operator in SDR mode; the 1/2.5 correction factor brings the
 //    display-referred result back to [0, 1].
 // 4. Convert Rec.2020 → Rec.709 for the existing sRGB output chain, clamped to
 //    [0, 1] (out-of-gamut Rec.2020 results have no SDR Rec.709 representation).
+//    This back-conversion is kept under WORKING_COLOR_SPACE_REC2020 too: the
+//    pass's output contract is Rec.709 display-linear in every configuration
+//    (the SDR chain hardware-encodes sRGB from it, and the display encoder's
+//    input contract is Rec.709 until the GT7 HDR-native output path lands).
 //
 // The HDR path — operator output staying in Rec.2020 at [0, peak/100] for the
 // gamut-mapping and transfer-encoding passes — lights up with the display
@@ -266,7 +276,14 @@ fn tone_mapping_gran_turismo_7(color: vec3<f32>) -> vec3<f32> {
 #else
     let params = gt7_default_sdr_params();
 #endif
+#ifdef WORKING_COLOR_SPACE_REC2020
+    // The working space IS the operator's native linear Rec.2020: no input
+    // expansion. Mirrored on the CPU by
+    // `Gt7ToneMapping::apply_bevy_scene_linear_sdr_rec2020_native` (gt7.rs).
+    let rec2020 = color;
+#else
     let rec2020 = GT7_REC_709_TO_REC_2020 * color;
+#endif
     let fb = rec2020 * (GT7_SDR_PAPER_WHITE / GT7_REFERENCE_LUMINANCE);
     let mapped = gt7_tone_map(fb, params);
     return saturate(GT7_REC_2020_TO_REC_709 * mapped);
