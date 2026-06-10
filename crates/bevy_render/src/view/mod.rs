@@ -1267,14 +1267,29 @@ pub fn prepare_view_targets(
         //
         // The main texture holds scene-referred working-space values, so the
         // clear color converts Rec.709 → working space first (a bit-for-bit
-        // identity for the default `WorkingColorSpace::Rec709`). The Oklab
-        // compositing space is Rec.709-fit and is NOT working-space-aware
-        // (documented caveat: `CompositingSpace::Oklab` degrades under
+        // identity for the default `WorkingColorSpace::Rec709`). Under
+        // `WorkingColorSpace::Rec2020` the 2D shaders convert composed colors
+        // to Rec.2020 BEFORE the Oklab compositing encode, so cleared pixels
+        // must follow the same `oklab(working-space values)` buffer
+        // convention or the tonemapping decode's working→Rec.709 step would
+        // mis-convert them. Oklab's LMS matrices remain Rec.709-fit, so
+        // perceptual blending of Rec.2020 values is approximate (documented
+        // caveat: `CompositingSpace::Oklab` degrades under
         // `WorkingColorSpace::Rec2020`).
         let converted_clear_color: Option<WgpuColor> =
             clear_color.map(|color| match camera.compositing_space {
                 // If main texture stores Oklab or Srgb, convert Color to it for correct clear.
-                Some(CompositingSpace::Oklab) => Oklaba::from(color).into(),
+                // Keep the direct conversion for Rec.709 (bit-for-bit with
+                // the pre-working-space behavior); only Rec.2020 routes
+                // through linear for the primaries conversion.
+                Some(CompositingSpace::Oklab) => match *working_color_space {
+                    WorkingColorSpace::Rec709 => Oklaba::from(color).into(),
+                    WorkingColorSpace::Rec2020 => Oklaba::from(linear_rgba_rec709_to_working(
+                        LinearRgba::from(color),
+                        WorkingColorSpace::Rec2020,
+                    ))
+                    .into(),
+                },
                 // Keep the direct conversion for Rec.709 (bit-for-bit with
                 // the pre-working-space behavior); only Rec.2020 routes
                 // through linear for the primaries conversion.

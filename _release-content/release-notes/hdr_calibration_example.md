@@ -12,8 +12,9 @@ in-app, HGIG-style calibration flow — and doubles as a reference for shipping
 an "HDR settings" screen in your own game:
 
 - **Peak luminance**: a near-peak checkerboard behind a center patch that
-  tracks `peak_luminance_nits`; raise the value until the patch just
-  disappears into the clipped background.
+  tracks `peak_luminance_nits`; if the patch is already invisible, lower the
+  value until it appears, then raise it until it just disappears into the
+  clipped background.
 - **Paper white**: a reference white card at exactly `1.0` (with a 203-nit
   ITU-R BT.2408 strip for comparison) while adjusting `paper_white_nits`.
 - **Black level**: near-black steps at fixed absolute luminances for picking

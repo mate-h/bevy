@@ -876,6 +876,15 @@ pbr_input.material.uv_transform = uv_transform;
         rec709_to_rec2020(pbr_input.material.emissive.rgb),
         pbr_input.material.emissive.a,
     );
+    // `attenuation_color` is a Rec.709-authored uniform-only color (no
+    // texture composition) that tints the working-space transmitted
+    // background via a per-channel Beer–Lambert term, so it must convert
+    // here too (the CPU route is unavailable: `AsBindGroupShaderType` has no
+    // `World` access).
+    pbr_input.material.attenuation_color = vec4(
+        rec709_to_rec2020(pbr_input.material.attenuation_color.rgb),
+        pbr_input.material.attenuation_color.a,
+    );
 #ifdef LIGHTMAP
     pbr_input.lightmap_light = rec709_to_rec2020(pbr_input.lightmap_light);
 #endif

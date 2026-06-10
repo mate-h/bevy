@@ -36,6 +36,7 @@ use bevy_render::{
     sync_world::RenderEntity,
     texture::GpuImage,
     view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget},
+    working_color_space::{linear_rgba_rec709_to_working, WorkingColorSpace},
     Extract,
 };
 use bevy_shader::Shader;
@@ -603,6 +604,7 @@ pub fn prepare_volumetric_fog_uniforms(
     fog_volumes: Query<(Entity, &FogVolume, &GlobalTransform)>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    working_color_space: Res<WorkingColorSpace>,
     mut local_from_world_matrices: Local<Vec<Affine3A>>,
 ) {
     // Do this up front to avoid O(n^2) matrix inversion.
@@ -650,9 +652,24 @@ pub fn prepare_volumetric_fog_uniforms(
                 clip_from_local: hull_clip_from_local,
                 uvw_from_world: UVW_FROM_LOCAL * *local_from_world,
                 far_planes: get_far_planes(&view_from_local),
-                fog_color: fog_volume.fog_color.to_linear().to_vec3(),
-                light_tint: fog_volume.light_tint.to_linear().to_vec3(),
-                ambient_color: volumetric_fog.ambient_color.to_linear().to_vec3(),
+                // These colors are composed in-shader with light colors that
+                // were converted to the working color space at extract time, so
+                // they must be converted here too (identity for `Rec709`).
+                fog_color: linear_rgba_rec709_to_working(
+                    fog_volume.fog_color.to_linear(),
+                    *working_color_space,
+                )
+                .to_vec3(),
+                light_tint: linear_rgba_rec709_to_working(
+                    fog_volume.light_tint.to_linear(),
+                    *working_color_space,
+                )
+                .to_vec3(),
+                ambient_color: linear_rgba_rec709_to_working(
+                    volumetric_fog.ambient_color.to_linear(),
+                    *working_color_space,
+                )
+                .to_vec3(),
                 ambient_intensity: volumetric_fog.ambient_intensity,
                 step_count: volumetric_fog.step_count,
                 bounding_radius,

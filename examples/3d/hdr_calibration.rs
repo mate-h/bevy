@@ -30,6 +30,11 @@ use bevy::{
 
 /// The `DisplayTarget` requested at startup (and restored with `R`): a common
 /// HDR baseline of 200-nit paper white on a 1000-nit display over scRGB.
+///
+/// The 1000-nit starting candidate exceeds the real peak of most consumer HDR
+/// panels (typically 400–800 nits), so the peak-luminance pattern instructs a
+/// two-directional procedure: lower the candidate first if the center square
+/// is already invisible.
 const INITIAL_HDR_TARGET: DisplayTarget = DisplayTarget::SDR_SRGB
     .with_paper_white(200.0)
     .with_peak(1000.0)
@@ -155,10 +160,13 @@ fn setup(
 
     // Pattern 1: peak luminance. A near-peak checkerboard (10000/9000 nits —
     // both clip to whatever the display can actually do) behind a center
-    // patch drawn at the *candidate* peak. Raise the candidate until the
-    // center square just disappears into the clipped background: at that
-    // point `peak_luminance_nits` matches the display's real peak (HGIG
-    // "MaxTML" pattern).
+    // patch drawn at the *candidate* peak. The candidate starts at 1000 nits
+    // (`INITIAL_HDR_TARGET`), which already clips on dimmer panels, so the
+    // procedure is two-directional: if the center square is already invisible,
+    // lower the candidate until it appears, then raise it until it just
+    // disappears into the clipped background — at that point
+    // `peak_luminance_nits` matches the display's real peak (HGIG "MaxTML"
+    // pattern).
     let peak_root = commands
         .spawn((
             Transform::default(),
@@ -501,9 +509,10 @@ fn update_ui(
     match *pattern {
         CalibrationPattern::PeakLuminance => ui.push_str(
             "The background checkerboard is at 9000/10000 nits (clipped to the display's\n\
-             real peak); the center square tracks `peak_luminance_nits`. Raise the peak\n\
-             (Up) until the center square just disappears into the background: that value\n\
-             is the display's peak luminance.\n",
+             real peak); the center square tracks `peak_luminance_nits`. If the center\n\
+             square is already invisible, lower the peak (Down) until it appears, then\n\
+             raise it (Up) until it just disappears into the background: that value is\n\
+             the display's peak luminance.\n",
         ),
         CalibrationPattern::PaperWhite => ui.push_str(
             "The card is at exactly 1.0 = paper white, like this UI text. Adjust\n\
