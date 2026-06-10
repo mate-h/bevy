@@ -26,8 +26,9 @@ The pass reads the per-view `DisplayTarget` calibration and performs:
 
 - a full-precision Rec.709 → Rec.2020 gamut transform when the target gamut is
   `DisplayGamut::Rec2020` (identity for Rec.709),
-- out-of-gamut handling (currently a per-channel clip; hue-preserving gamut
-  compression is planned),
+- out-of-gamut handling: ACES-RGC-style perceptual gamut compression when the
+  gamut transform can produce out-of-gamut colors, with a per-channel-clip
+  debug fallback (see the display gamut compression release note),
 - the display transfer function: scRGB-linear (`× paper_white_nits / 80`) or
   PQ/ST-2084 (absolute nits normalized to 10000), selected by
   `DisplayTransfer`.

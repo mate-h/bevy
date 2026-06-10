@@ -7,7 +7,10 @@
 //! space. This pass — scheduled after the UI pass and before the upscaling
 //! blit — converts that buffer into the display's signal: a 3×3 gamut
 //! transform from the working primaries to the display primaries, an
-//! out-of-gamut handling step, and the display transfer function (OETF).
+//! out-of-gamut handling step (ACES-RGC-style chroma compression when the
+//! gamut transform can produce out-of-gamut colors — see
+//! [`DisplayGamutCompression`] and the [`gamut_compression`] module — plus an
+//! always-on `max(0)` safety clip), and the display transfer function (OETF).
 //!
 //! **Plain SDR targets never run this pass.** For the default
 //! [`DisplayTarget::SDR_SRGB`](bevy_window::DisplayTarget) (and any other
@@ -37,8 +40,10 @@ use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
 use bevy_camera::CompositingSpace;
 use bevy_ecs::prelude::*;
 use bevy_log::{info_once, warn_once};
+use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     camera::ExtractedCamera,
+    extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_resource::{
         binding_types::{sampler, texture_2d, uniform_buffer},
         *,
@@ -54,6 +59,7 @@ use bevy_window::{DisplayGamut, DisplayTransfer};
 
 use crate::tonemapping::Tonemapping;
 
+pub mod gamut_compression;
 mod node;
 
 pub use node::display_encoding;
@@ -70,6 +76,10 @@ impl Plugin for DisplayEncodingPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "display_encoding.wgsl");
 
+        app.register_type::<DisplayGamutCompression>()
+            .init_resource::<DisplayGamutCompression>()
+            .add_plugins(ExtractResourcePlugin::<DisplayGamutCompression>::default());
+
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -82,6 +92,102 @@ impl Plugin for DisplayEncodingPlugin {
                 prepare_view_display_encoding_pipelines.in_set(RenderSystems::Prepare),
             );
     }
+}
+
+/// Controls how the display-encoding pass handles colors that fall outside
+/// the display gamut after its gamut-transform stage.
+///
+/// The primary handling (per DECISIONS.md D3) is a perceptual,
+/// hue-approximate chroma compression toward the achromatic axis in the
+/// style of the ACES 1.3 Reference Gamut Compression — see the
+/// [`gamut_compression`] module for the algorithm, constants, citations, and
+/// the CPU mirror of the shader implementation. The debug fallback is the
+/// plain hue-shifting per-channel clip (`max(c, 0.0)`), which always runs
+/// after the compression as a final safety (PQ encoding requires
+/// non-negative input) and *is* the entire handling when compression is off.
+///
+/// Out-of-gamut colors can only come out of the gamut stage when it
+/// *contracts* — when the pass's input primaries are wider than the resolved
+/// display primaries. The pass's input is currently Rec.709 display-linear
+/// under every [`WorkingColorSpace`] (the tone-mapping pass converts at its
+/// exit), and the reachable display gamuts are Rec.709 (scRGB, identity) and
+/// Rec.2020 (PQ, an expansion), so under [`DisplayGamutCompression::Auto`]
+/// the compression is currently never active — it lights up when the GT7
+/// HDR-native output path keeps operator output in the Rec.2020 working
+/// space and the gamut stage becomes a true working → display transform.
+/// [`DisplayGamutCompression::Always`] forces it on for HDR-transfer views
+/// today (e.g. to exercise or demonstrate the path).
+#[derive(Resource, ExtractResource, Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+#[reflect(Resource, Debug, Default, Clone, PartialEq, Hash)]
+pub enum DisplayGamutCompression {
+    /// Compress exactly when the gamut stage can produce out-of-gamut colors
+    /// (a gamut contraction). Identity and expanding transforms keep the
+    /// plain clip, which is a no-op for their in-gamut-by-construction
+    /// inputs. This is the default.
+    #[default]
+    Auto,
+    /// Always compress on views the display-encoding pass runs for.
+    ///
+    /// Note that compression is not free for in-gamut colors: channels whose
+    /// distance from the achromatic axis exceeds the ACES RGC threshold
+    /// (≈ 0.8) are pulled slightly inward to make room for the compressed
+    /// out-of-gamut range, so forcing this on a path with no possible
+    /// out-of-gamut input desaturates highly saturated colors for no
+    /// benefit.
+    Always,
+    /// Debug fallback (DECISIONS.md D3): replace the compression with the
+    /// hue-shifting per-channel clip, for A/B comparison. Pushes the
+    /// `DISPLAY_GAMUT_CLIP_DEBUG` shader def instead of
+    /// `DISPLAY_GAMUT_COMPRESSION`.
+    Clip,
+}
+
+/// The resolved per-pipeline out-of-gamut handling of the gamut stage, after
+/// [`DisplayGamutCompression`] and the gamut-contraction rule have been
+/// applied by [`prepare_view_display_encoding_pipelines`].
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum OutOfGamutHandling {
+    /// Only the always-on final `max(c, 0.0)` safety clip; no shader def.
+    /// Used when the gamut stage cannot produce out-of-gamut colors.
+    Clip,
+    /// ACES-RGC-style chroma compression (`DISPLAY_GAMUT_COMPRESSION`),
+    /// followed by the safety clip.
+    Compress,
+    /// The per-channel clip selected explicitly as a debug fallback
+    /// (`DISPLAY_GAMUT_CLIP_DEBUG`); behaves like [`Self::Clip`] but
+    /// specializes a visibly distinct pipeline.
+    ClipDebug,
+}
+
+/// The color primaries of the display-encoding pass's *input* (the main
+/// texture it reads).
+///
+/// The tone-mapping pass currently emits Rec.709 display-linear under every
+/// [`WorkingColorSpace`]: Rec.709-fit operators receive a Rec.2020 → Rec.709
+/// conversion at the pass entry and the GT7 operator keeps its own
+/// Rec.2020 → Rec.709 back-conversion (see `tonemapping_shared.wgsl` /
+/// `gt7.wgsl`). When the GT7 HDR-native output path lands and operator
+/// output stays in the working primaries for HDR targets, this becomes
+/// working-space-dependent — which is what makes
+/// [`DisplayGamutCompression::Auto`] light up for Rec.2020-working →
+/// Rec.709-display (scRGB) contractions.
+const fn encoder_input_gamut(_working_color_space: WorkingColorSpace) -> DisplayGamut {
+    DisplayGamut::Rec709
+}
+
+/// Whether transforming from `source` primaries to `display` primaries can
+/// produce out-of-gamut (negative-component) colors, i.e. whether the source
+/// gamut is strictly wider than the display gamut
+/// (Rec.2020 ⊃ Display P3 ⊃ Rec.709).
+const fn is_gamut_contraction(source: DisplayGamut, display: DisplayGamut) -> bool {
+    const fn coverage_rank(gamut: DisplayGamut) -> u8 {
+        match gamut {
+            DisplayGamut::Rec709 => 0,
+            DisplayGamut::DisplayP3 => 1,
+            DisplayGamut::Rec2020 => 2,
+        }
+    }
+    coverage_rank(source) > coverage_rank(display)
 }
 
 /// Render-world resource holding the display-encoding pass's bind group
@@ -151,6 +257,13 @@ pub struct DisplayEncodingPipelineKey {
     /// ([`DisplayTransfer::ScRgbLinear`] or [`DisplayTransfer::Pq`]);
     /// sRGB targets never get this pass.
     pub transfer: DisplayTransfer,
+    /// The resolved out-of-gamut handling of the gamut stage (see
+    /// [`DisplayGamutCompression`]). Under the default
+    /// [`DisplayGamutCompression::Auto`] this is currently always
+    /// [`OutOfGamutHandling::Clip`]: the pass's Rec.709 input makes both
+    /// reachable gamut stages (identity for scRGB, an expansion for PQ)
+    /// unable to produce out-of-gamut colors.
+    pub out_of_gamut: OutOfGamutHandling,
 }
 
 impl SpecializedRenderPipeline for DisplayEncodingPipeline {
@@ -188,6 +301,17 @@ impl SpecializedRenderPipeline for DisplayEncodingPipeline {
             DisplayTransfer::Srgb | DisplayTransfer::Hlg => unreachable!(
                 "only HDR transfers (scRGB / PQ) are encoded by the display-encoding pass"
             ),
+        }
+
+        match key.out_of_gamut {
+            // The always-on max(0) safety clip is the entire handling.
+            OutOfGamutHandling::Clip => {}
+            OutOfGamutHandling::Compress => {
+                shader_defs.push("DISPLAY_GAMUT_COMPRESSION".into());
+            }
+            OutOfGamutHandling::ClipDebug => {
+                shader_defs.push("DISPLAY_GAMUT_CLIP_DEBUG".into());
+            }
         }
 
         RenderPipelineDescriptor {
@@ -241,6 +365,12 @@ pub struct ViewDisplayEncodingPipeline {
 ///   (benign: the authored value is a natural description of an HDR panel).
 /// * PQ with a non-Rec.2020 gamut → [`DisplayGamut::Rec2020`]: PQ is
 ///   canonically Rec.2020. `warn_once!`.
+///
+/// It also resolves the gamut stage's out-of-gamut handling from
+/// [`DisplayGamutCompression`]: compression is keyed in exactly when the
+/// gamut stage is a contraction (its input primaries are wider than the
+/// resolved display primaries — see `encoder_input_gamut`) or when forced
+/// with [`DisplayGamutCompression::Always`].
 pub fn prepare_view_display_encoding_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
@@ -254,6 +384,7 @@ pub fn prepare_view_display_encoding_pipelines(
         Option<&Tonemapping>,
     )>,
     working_color_space: Res<WorkingColorSpace>,
+    gamut_compression: Res<DisplayGamutCompression>,
 ) {
     for (entity, view, camera, view_display_target, tonemapping) in &views {
         // D1 guidance: HDR display output reaches noticeably wider gamuts
@@ -336,11 +467,24 @@ pub fn prepare_view_display_encoding_pipelines(
             gamut = DisplayGamut::Rec2020;
         }
 
+        let out_of_gamut = match *gamut_compression {
+            DisplayGamutCompression::Auto => {
+                if is_gamut_contraction(encoder_input_gamut(*working_color_space), gamut) {
+                    OutOfGamutHandling::Compress
+                } else {
+                    OutOfGamutHandling::Clip
+                }
+            }
+            DisplayGamutCompression::Always => OutOfGamutHandling::Compress,
+            DisplayGamutCompression::Clip => OutOfGamutHandling::ClipDebug,
+        };
+
         let key = DisplayEncodingPipelineKey {
             target_format: view.target_format,
             source_space: camera.compositing_space,
             gamut,
             transfer,
+            out_of_gamut,
         };
         let pipeline_id = pipelines.specialize(&pipeline_cache, &encoding_pipeline, key);
 

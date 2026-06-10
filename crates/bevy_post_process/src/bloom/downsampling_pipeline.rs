@@ -17,7 +17,8 @@ use bevy_render::{
     view::ViewDisplayTarget,
 };
 use bevy_shader::Shader;
-use bevy_utils::default;
+use bevy_utils::{default, once};
+use tracing::warn;
 
 #[derive(Component)]
 pub struct BloomDownsamplingPipelineIds {
@@ -179,7 +180,15 @@ pub fn prepare_downsampling_pipeline(
     views: Query<(Entity, &Bloom, Option<&ViewDisplayTarget>)>,
 ) {
     for (entity, bloom, display_target) in &views {
-        let prefilter = bloom.prefilter.is_active();
+        // `Bloom::thresholding_active` (not `BloomPrefilter::is_active`):
+        // the GT7 glare scatter model is threshold-free by construction.
+        let prefilter = bloom.thresholding_active();
+        if !prefilter && bloom.prefilter.is_active() {
+            once!(warn!(
+                "Bloom prefilter thresholds are ignored under BloomScatterModel::Gt7Glare: \
+                a physical glare PSF integrates the total scene energy"
+            ));
+        }
         let texture_format = bloom_texture_format(display_target);
 
         let pipeline_id = pipelines.specialize(

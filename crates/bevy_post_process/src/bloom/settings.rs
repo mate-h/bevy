@@ -121,6 +121,17 @@ pub struct Bloom {
     /// anamorphic blur by using a large x-value. For large values, you may need to increase
     /// [`Bloom::max_mip_dimension`] to reduce sampling artifacts.
     pub scale: Vec2,
+
+    /// Selects how the blurred pyramid levels are weighted when composited
+    /// back onto the image (default: [`BloomScatterModel::Aesthetic`], the
+    /// existing parametric curve).
+    ///
+    /// [`BloomScatterModel::Gt7Glare`] replaces the parametric curve with
+    /// per-level weights derived from the diffraction pattern of a camera
+    /// aperture, turning bloom into a physically based veiling glare in the
+    /// style of Gran Turismo 7. See [`BloomScatterModel`] for the parameters
+    /// it overrides.
+    pub scatter: BloomScatterModel,
 }
 
 impl Bloom {
@@ -142,6 +153,18 @@ impl Bloom {
         composite_mode: BloomCompositeMode::EnergyConserving,
         max_mip_dimension: Self::DEFAULT_MAX_MIP_DIMENSION,
         scale: Vec2::ONE,
+        scatter: BloomScatterModel::Aesthetic,
+    };
+
+    /// Physically based veiling glare in the style of Gran Turismo 7: the
+    /// pyramid levels are weighted by the diffraction pattern of an f/5.6
+    /// camera aperture instead of the parametric curve. See
+    /// [`BloomScatterModel::Gt7Glare`].
+    pub const GT7_GLARE: Self = Self {
+        scatter: BloomScatterModel::Gt7Glare {
+            f_number: BloomScatterModel::DEFAULT_F_NUMBER,
+        },
+        ..Self::NATURAL
     };
 
     /// Emulates the look of stylized anamorphic bloom, stretched horizontally.
@@ -166,6 +189,7 @@ impl Bloom {
         composite_mode: BloomCompositeMode::Additive,
         max_mip_dimension: Self::DEFAULT_MAX_MIP_DIMENSION,
         scale: Vec2::ONE,
+        scatter: BloomScatterModel::Aesthetic,
     };
 
     /// A preset that applies a very strong bloom, and blurs the whole screen.
@@ -182,13 +206,96 @@ impl Bloom {
         composite_mode: BloomCompositeMode::EnergyConserving,
         max_mip_dimension: Self::DEFAULT_MAX_MIP_DIMENSION,
         scale: Vec2::ONE,
+        scatter: BloomScatterModel::Aesthetic,
     };
+
+    /// Returns `true` when the downsampling passes must apply the
+    /// soft-threshold prefilter curve.
+    ///
+    /// This is [`BloomPrefilter::is_active`] gated on the scatter model:
+    /// [`BloomScatterModel::Gt7Glare`] always integrates the total scene
+    /// energy (a physical point-spread function has no brightness cutoff;
+    /// GT7's glare is threshold-free), so any configured prefilter is
+    /// ignored under it.
+    pub fn thresholding_active(&self) -> bool {
+        matches!(self.scatter, BloomScatterModel::Aesthetic) && self.prefilter.is_active()
+    }
+
+    /// The composite mode the upsampling pipeline actually uses.
+    ///
+    /// [`BloomScatterModel::Gt7Glare`] derives its blend constants as
+    /// chained energy-conserving lerp factors (see `bloom::glare`), so it
+    /// forces [`BloomCompositeMode::EnergyConserving`] regardless of
+    /// [`composite_mode`](Self::composite_mode);
+    /// [`BloomScatterModel::Aesthetic`] uses the configured mode unchanged.
+    pub fn effective_composite_mode(&self) -> BloomCompositeMode {
+        match self.scatter {
+            BloomScatterModel::Aesthetic => self.composite_mode,
+            BloomScatterModel::Gt7Glare { .. } => BloomCompositeMode::EnergyConserving,
+        }
+    }
 }
 
 impl Default for Bloom {
     fn default() -> Self {
         Self::NATURAL
     }
+}
+
+/// How [`Bloom`] distributes scattered light across its blur pyramid when
+/// compositing it back onto the image.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Reflect)]
+#[reflect(Default, Clone, PartialEq)]
+pub enum BloomScatterModel {
+    /// The hand-tuned parametric curve Bevy's bloom has always used, shaped
+    /// by [`Bloom::intensity`], [`Bloom::low_frequency_boost`],
+    /// [`Bloom::low_frequency_boost_curvature`] and
+    /// [`Bloom::high_pass_frequency`]. This is the default and renders
+    /// exactly as before this enum existed.
+    #[default]
+    Aesthetic,
+
+    /// Physically based veiling glare inspired by Gran Turismo 7 (SIGGRAPH
+    /// 2025): the per-level weights are derived from the Fraunhofer
+    /// diffraction point-spread function (the polychromatic Airy pattern) of
+    /// an ideal circular aperture at the given F-number, instead of the
+    /// parametric curve.
+    ///
+    /// GT7's own 240 hand-calibrated weights are unpublished; Bevy derives
+    /// the weights from the documented physical model (see the
+    /// `bloom::glare` module docs for the derivation and references), so
+    /// this is *inspired by* GT7 rather than a clone of its constants.
+    ///
+    /// Under this model:
+    /// - [`Bloom::intensity`] keeps its meaning as the total fraction of
+    ///   energy scattered out of the sharp image (energy-conserving), while
+    ///   the F-number shapes how that energy spreads across blur radii.
+    /// - The [`Bloom::prefilter`] threshold is ignored (a physical PSF
+    ///   applies to all light; GT7's glare is threshold-free) and
+    ///   [`Bloom::composite_mode`] is forced to
+    ///   [`BloomCompositeMode::EnergyConserving`].
+    /// - [`Bloom::low_frequency_boost`],
+    ///   [`Bloom::low_frequency_boost_curvature`] and
+    ///   [`Bloom::high_pass_frequency`] are unused.
+    Gt7Glare {
+        /// The aperture F-number (focal length over aperture diameter) of
+        /// the virtual camera, clamped to the standard full-stop ladder
+        /// range `[1.0, 22.0]`.
+        ///
+        /// Diffraction scales with the F-number: small values (f/1.0, wide
+        /// aperture) produce a tight glare that falls off steeply with
+        /// radius, large values (f/22, stopped down) spread the energy into
+        /// a wide, soft veil. Defaults to f/5.6
+        /// ([`BloomScatterModel::DEFAULT_F_NUMBER`]). Non-finite or
+        /// non-positive values fall back to the default with a warning.
+        f_number: f32,
+    },
+}
+
+impl BloomScatterModel {
+    /// The default aperture F-number for [`Self::Gt7Glare`] (mid-ladder,
+    /// a common photographic walk-around aperture).
+    pub const DEFAULT_F_NUMBER: f32 = super::glare::DEFAULT_F_NUMBER;
 }
 
 /// Applies a threshold filter to the input image to extract the brightest

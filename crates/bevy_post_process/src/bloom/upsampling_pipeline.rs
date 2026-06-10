@@ -137,11 +137,16 @@ pub fn prepare_upsampling_pipeline(
     views: Query<(&ExtractedView, Entity, &Bloom, Option<&ViewDisplayTarget>)>,
 ) {
     for (view, entity, bloom, display_target) in &views {
+        // `effective_composite_mode`: the GT7 glare scatter model derives
+        // its blend constants as energy-conserving lerp factors and forces
+        // that blend state; `Aesthetic` uses the configured mode unchanged.
+        let composite_mode = bloom.effective_composite_mode();
+
         let pipeline_id = pipelines.specialize(
             &pipeline_cache,
             &pipeline,
             BloomUpsamplingPipelineKeys {
-                composite_mode: bloom.composite_mode,
+                composite_mode,
                 // The intermediate upsample passes render into the bloom
                 // pyramid, whose format is per-view (fp16 on HDR display
                 // targets); the final pass below targets the view target.
@@ -153,7 +158,7 @@ pub fn prepare_upsampling_pipeline(
             &pipeline_cache,
             &pipeline,
             BloomUpsamplingPipelineKeys {
-                composite_mode: bloom.composite_mode,
+                composite_mode,
                 target_format: view.target_format,
             },
         );

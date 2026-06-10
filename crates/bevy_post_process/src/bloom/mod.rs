@@ -1,9 +1,10 @@
 mod downsampling_pipeline;
+mod glare;
 mod settings;
 mod upsampling_pipeline;
 
 use bevy_image::ToExtents;
-pub use settings::{Bloom, BloomCompositeMode, BloomPrefilter};
+pub use settings::{Bloom, BloomCompositeMode, BloomPrefilter, BloomScatterModel};
 
 use crate::bloom::{
     downsampling_pipeline::init_bloom_downsampling_pipeline,
@@ -550,19 +551,140 @@ fn prepare_bloom_bind_groups(
 ///
 /// This function can be visually previewed for all values of *mip* (normalized) with tweakable
 /// [`Bloom`] parameters on [Desmos graphing calculator](https://www.desmos.com/calculator/ncc8xbhzzl).
+///
+/// For [`BloomScatterModel::Gt7Glare`] the parametric curve is replaced by
+/// blend constants realizing the physically derived diffraction weights; see
+/// [`glare::blend_factor`]. The glare weights are tied to the absolute texel
+/// scale of the pyramid levels (a point-spread function has a physical size),
+/// not normalized to the chain depth, so that branch does not use `max_mip`.
 fn compute_blend_factor(bloom: &Bloom, mip: f32, max_mip: f32) -> f32 {
-    let mut lf_boost =
-        (1.0 - ops::powf(
-            1.0 - (mip / max_mip),
-            1.0 / (1.0 - bloom.low_frequency_boost_curvature),
-        )) * bloom.low_frequency_boost;
-    let high_pass_lq = 1.0
-        - (((mip / max_mip) - bloom.high_pass_frequency) / bloom.high_pass_frequency)
-            .clamp(0.0, 1.0);
-    lf_boost *= match bloom.composite_mode {
-        BloomCompositeMode::EnergyConserving => 1.0 - bloom.intensity,
-        BloomCompositeMode::Additive => 1.0,
-    };
+    match bloom.scatter {
+        BloomScatterModel::Aesthetic => {
+            let mut lf_boost =
+                (1.0 - ops::powf(
+                    1.0 - (mip / max_mip),
+                    1.0 / (1.0 - bloom.low_frequency_boost_curvature),
+                )) * bloom.low_frequency_boost;
+            let high_pass_lq = 1.0
+                - (((mip / max_mip) - bloom.high_pass_frequency) / bloom.high_pass_frequency)
+                    .clamp(0.0, 1.0);
+            lf_boost *= match bloom.composite_mode {
+                BloomCompositeMode::EnergyConserving => 1.0 - bloom.intensity,
+                BloomCompositeMode::Additive => 1.0,
+            };
 
-    (bloom.intensity + lf_boost) * high_pass_lq
+            (bloom.intensity + lf_boost) * high_pass_lq
+        }
+        BloomScatterModel::Gt7Glare { f_number } => {
+            glare::blend_factor(f_number, bloom.intensity, mip as u32)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_math::Vec2;
+
+    /// A verbatim copy of the historical `compute_blend_factor` body, used
+    /// to lock the default ([`BloomScatterModel::Aesthetic`]) path
+    /// bit-for-bit.
+    fn legacy_compute_blend_factor(bloom: &Bloom, mip: f32, max_mip: f32) -> f32 {
+        let mut lf_boost =
+            (1.0 - ops::powf(
+                1.0 - (mip / max_mip),
+                1.0 / (1.0 - bloom.low_frequency_boost_curvature),
+            )) * bloom.low_frequency_boost;
+        let high_pass_lq = 1.0
+            - (((mip / max_mip) - bloom.high_pass_frequency) / bloom.high_pass_frequency)
+                .clamp(0.0, 1.0);
+        lf_boost *= match bloom.composite_mode {
+            BloomCompositeMode::EnergyConserving => 1.0 - bloom.intensity,
+            BloomCompositeMode::Additive => 1.0,
+        };
+
+        (bloom.intensity + lf_boost) * high_pass_lq
+    }
+
+    /// Every existing settings combination (scatter model untouched) must
+    /// produce bit-identical blend factors to the pre-glare implementation.
+    #[test]
+    fn aesthetic_blend_factors_bit_identical_to_legacy() {
+        let presets = [
+            Bloom::NATURAL,
+            Bloom::ANAMORPHIC,
+            Bloom::OLD_SCHOOL,
+            Bloom::SCREEN_BLUR,
+            Bloom {
+                intensity: 0.37,
+                low_frequency_boost: 0.21,
+                low_frequency_boost_curvature: 0.5,
+                high_pass_frequency: 0.66,
+                composite_mode: BloomCompositeMode::Additive,
+                scale: Vec2::new(2.0, 1.0),
+                ..Bloom::NATURAL
+            },
+        ];
+        for bloom in &presets {
+            for max_mip in [3.0f32, 7.0, 9.0] {
+                for mip in 0..=(max_mip as u32) {
+                    let mip = mip as f32;
+                    assert_eq!(
+                        compute_blend_factor(bloom, mip, max_mip).to_bits(),
+                        legacy_compute_blend_factor(bloom, mip, max_mip).to_bits(),
+                        "mismatch at mip {mip}/{max_mip}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The glare scatter model ignores the prefilter (no threshold; the PSF
+    /// integrates total energy) and forces energy-conserving compositing,
+    /// while `Aesthetic` keeps the configured behavior.
+    #[test]
+    fn glare_overrides_threshold_and_composite_mode() {
+        let mut bloom = Bloom {
+            composite_mode: BloomCompositeMode::Additive,
+            ..Bloom::OLD_SCHOOL
+        };
+        assert!(bloom.thresholding_active());
+        assert_eq!(
+            bloom.effective_composite_mode(),
+            BloomCompositeMode::Additive
+        );
+
+        bloom.scatter = BloomScatterModel::Gt7Glare { f_number: 8.0 };
+        assert!(!bloom.thresholding_active());
+        assert_eq!(
+            bloom.effective_composite_mode(),
+            BloomCompositeMode::EnergyConserving
+        );
+    }
+
+    /// The glare branch's final-pass blend constant is the intensity (total
+    /// scattered energy), and the curve-shape parameters of the parametric
+    /// model have no effect on it.
+    #[test]
+    fn glare_blend_factor_uses_psf_not_parametric_curve() {
+        let glare = Bloom {
+            scatter: BloomScatterModel::Gt7Glare { f_number: 5.6 },
+            ..Bloom::NATURAL
+        };
+        assert_eq!(compute_blend_factor(&glare, 0.0, 7.0), glare.intensity);
+
+        // Parametric-curve dials are inert under the glare model.
+        let tweaked = Bloom {
+            low_frequency_boost: 0.0,
+            low_frequency_boost_curvature: 0.1,
+            high_pass_frequency: 0.5,
+            ..glare.clone()
+        };
+        for mip in 0..8 {
+            assert_eq!(
+                compute_blend_factor(&glare, mip as f32, 7.0).to_bits(),
+                compute_blend_factor(&tweaked, mip as f32, 7.0).to_bits()
+            );
+        }
+    }
 }

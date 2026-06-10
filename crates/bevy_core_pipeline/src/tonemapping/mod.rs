@@ -221,6 +221,28 @@ impl Tonemapping {
     }
 }
 
+/// Render-world marker component: the view's white-balance matrix
+/// ([`ColorGradingUniform::balance`](bevy_render::view::ColorGradingUniform))
+/// is composed with an additional correction on the GPU, outside of the
+/// static [`ColorGrading`](bevy_render::view::ColorGrading) temperature/tint
+/// values.
+///
+/// The tonemapping pass normally enables its `WHITE_BALANCE` shader def only
+/// when the user's static `ColorGrading` temperature or tint is non-zero
+/// (see [`prepare_view_tonemapping_pipelines`]). A GPU-side producer — such
+/// as `AutoWhiteBalance` in `bevy_post_process`, whose metering compute pass
+/// multiplies an automatic correction matrix into
+/// `view.color_grading.balance` — must insert this marker on the render-world
+/// view entity (e.g. through its
+/// [`ExtractComponent::Out`](bevy_render::extract_component::ExtractComponent)
+/// bundle) so the shader path that consumes the matrix stays compiled in even
+/// when the static deltas are zero.
+///
+/// Views without this marker keep today's predicate and pipeline keys
+/// unchanged.
+#[derive(Component, Default, Clone, Copy, Debug)]
+pub struct ExternalWhiteBalance;
+
 /// Keeps the auto-managed [`TonemappingEnabled`] marker (in `bevy_camera`,
 /// where [`Tonemapping`] itself is not visible) in sync with each camera's
 /// [`Tonemapping`] component: present iff the operator is not
@@ -601,11 +623,20 @@ pub fn prepare_view_tonemapping_pipelines(
         Option<&DebandDither>,
         Option<&ViewDisplayTarget>,
         Option<&GranTurismo7Params>,
+        Has<ExternalWhiteBalance>,
     )>,
     working_color_space: Res<WorkingColorSpace>,
 ) {
-    for (entity, view, view_target, tonemapping, dither, view_display_target, gt7_params) in
-        view_targets.iter()
+    for (
+        entity,
+        view,
+        view_target,
+        tonemapping,
+        dither,
+        view_display_target,
+        gt7_params,
+        external_white_balance,
+    ) in view_targets.iter()
     {
         let tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
 
@@ -631,9 +662,14 @@ pub fn prepare_view_tonemapping_pipelines(
             TonemappingPipelineKeyFlags::HUE_ROTATE,
             view.color_grading.global.hue != 0.0,
         );
+        // The white-balance path is also kept compiled in when a GPU-side
+        // producer (e.g. auto white balance) composes into the view's balance
+        // matrix; see [`ExternalWhiteBalance`].
         flags.set(
             TonemappingPipelineKeyFlags::WHITE_BALANCE,
-            view.color_grading.global.temperature != 0.0 || view.color_grading.global.tint != 0.0,
+            view.color_grading.global.temperature != 0.0
+                || view.color_grading.global.tint != 0.0
+                || external_white_balance,
         );
         flags.set(
             TonemappingPipelineKeyFlags::SECTIONAL_COLOR_GRADING,

@@ -12,8 +12,13 @@ use tracing::warn;
 use super::{
     pipeline::{AutoExposureState, AutoExposureUniform},
     settings::PhysiologicalAdaptation,
-    AutoExposure, AutoExposureExternalReference,
+    AutoExposure, AutoExposureExternalReference, AutoWhiteBalance,
 };
+
+/// The CIE 1931 *xy* chromaticity of the D65 white point, matching `D65_XY`
+/// in `bevy_render::view` and `AWB_D65_XY` in `auto_exposure.wgsl`; keep them
+/// in sync.
+const D65_XY: (f32, f32) = (0.31272, 0.32903);
 
 #[derive(Resource, Default)]
 pub(super) struct AutoExposureBuffers {
@@ -25,9 +30,19 @@ pub(super) struct AutoExposureBuffer {
     pub(super) settings: UniformBuffer<AutoExposureUniform>,
 }
 
+/// One extracted camera that needs its settings uniform (re)built. Cameras
+/// carry [`AutoExposure`], [`AutoWhiteBalance`], or both; the shared metering
+/// pass serves whichever is present.
+type ExtractedCamera = (
+    Entity,
+    Option<AutoExposure>,
+    Option<AutoExposureExternalReference>,
+    Option<AutoWhiteBalance>,
+);
+
 #[derive(Resource)]
 pub(super) struct ExtractedStateBuffers {
-    changed: Vec<(Entity, AutoExposure, Option<AutoExposureExternalReference>)>,
+    changed: Vec<ExtractedCamera>,
     removed: Vec<Entity>,
 }
 
@@ -37,45 +52,94 @@ pub(super) fn extract_buffers(
         Query<
             (
                 RenderEntity,
-                &AutoExposure,
+                Option<&AutoExposure>,
                 Option<&AutoExposureExternalReference>,
+                Option<&AutoWhiteBalance>,
             ),
-            Or<(
-                Changed<AutoExposure>,
-                Changed<AutoExposureExternalReference>,
-            )>,
+            (
+                Or<(With<AutoExposure>, With<AutoWhiteBalance>)>,
+                Or<(
+                    Changed<AutoExposure>,
+                    Changed<AutoExposureExternalReference>,
+                    Changed<AutoWhiteBalance>,
+                )>,
+            ),
         >,
     >,
     mut removed: Extract<RemovedComponents<AutoExposure>>,
     mut removed_references: Extract<RemovedComponents<AutoExposureExternalReference>>,
+    mut removed_white_balance: Extract<RemovedComponents<AutoWhiteBalance>>,
     cameras: Extract<
-        Query<(
-            RenderEntity,
-            &AutoExposure,
-            Option<&AutoExposureExternalReference>,
-        )>,
+        Query<
+            (
+                RenderEntity,
+                Option<&AutoExposure>,
+                Option<&AutoExposureExternalReference>,
+                Option<&AutoWhiteBalance>,
+            ),
+            Or<(With<AutoExposure>, With<AutoWhiteBalance>)>,
+        >,
     >,
 ) {
-    let mut changed: Vec<_> = changed
+    let mut changed: Vec<ExtractedCamera> = changed
         .iter()
-        .map(|(entity, settings, reference)| (entity, settings.clone(), reference.copied()))
+        .map(|(entity, settings, reference, white_balance)| {
+            (
+                entity,
+                settings.cloned(),
+                reference.copied(),
+                white_balance.copied(),
+            )
+        })
         .collect();
+    let mut fully_removed = Vec::new();
 
-    // Removing only the `AutoExposureExternalReference` component does not trigger the
-    // `Changed` filters above, but the settings uniform must still be rebuilt without
-    // the reference. Read the live component state instead of assuming the reference is
-    // gone: a remove + re-insert within the same frame still buffers a removal event, and
-    // unconditionally pushing `None` here would override the freshly inserted reference
-    // (the `changed` entries above are processed first, in order).
-    for entity in removed_references.read() {
-        if let Ok((render_entity, settings, reference)) = cameras.get(entity) {
-            changed.push((render_entity, settings.clone(), reference.copied()));
+    // Removing one of the components does not trigger the `Changed` filters
+    // above, but the settings uniform must still be rebuilt from whatever is
+    // left on the camera. Read the live component state instead of assuming
+    // the removed component is gone: a remove + re-insert within the same
+    // frame still buffers a removal event, and unconditionally pushing the
+    // component as absent here would override the freshly inserted value
+    // (the `changed` entries above are processed first, in order). Only when
+    // the camera no longer matches the metering query at all is the buffer
+    // torn down.
+    {
+        let mut handle_removal = |entity: Entity| {
+            if let Ok((render_entity, settings, reference, white_balance)) = cameras.get(entity) {
+                changed.push((
+                    render_entity,
+                    settings.cloned(),
+                    reference.copied(),
+                    white_balance.copied(),
+                ));
+            } else {
+                fully_removed.push(entity);
+            }
+        };
+
+        for entity in removed.read() {
+            handle_removal(entity);
+        }
+        for entity in removed_white_balance.read() {
+            handle_removal(entity);
+        }
+        for entity in removed_references.read() {
+            // The reference alone never owns a buffer; only re-push live
+            // state for cameras that still meter.
+            if let Ok((render_entity, settings, reference, white_balance)) = cameras.get(entity) {
+                changed.push((
+                    render_entity,
+                    settings.cloned(),
+                    reference.copied(),
+                    white_balance.copied(),
+                ));
+            }
         }
     }
 
     commands.insert_resource(ExtractedStateBuffers {
         changed,
-        removed: removed.read().collect(),
+        removed: fully_removed,
     });
 }
 
@@ -85,8 +149,12 @@ pub(super) fn prepare_buffers(
     mut extracted: ResMut<ExtractedStateBuffers>,
     mut buffers: ResMut<AutoExposureBuffers>,
 ) {
-    for (entity, settings, reference) in extracted.changed.drain(..) {
-        let uniform = build_uniform(&settings, reference.as_ref());
+    for (entity, settings, reference, white_balance) in extracted.changed.drain(..) {
+        let uniform = build_uniform(
+            settings.as_ref(),
+            reference.as_ref(),
+            white_balance.as_ref(),
+        );
 
         match buffers.buffers.entry(entity) {
             Entry::Occupied(mut entry) => {
@@ -98,7 +166,7 @@ pub(super) fn prepare_buffers(
             }
             Entry::Vacant(entry) => {
                 let value = entry.insert(AutoExposureBuffer {
-                    state: StorageBuffer::from(initial_state(&settings)),
+                    state: StorageBuffer::from(initial_state(settings.as_ref())),
                     settings: UniformBuffer::from(uniform),
                 });
 
@@ -113,17 +181,39 @@ pub(super) fn prepare_buffers(
     }
 }
 
-/// Builds the settings uniform for one view from the [`AutoExposure`] component and the
-/// optional [`AutoExposureExternalReference`] component, sanitizing invalid values.
+/// Builds the settings uniform for one view from the optional [`AutoExposure`],
+/// [`AutoExposureExternalReference`], and [`AutoWhiteBalance`] components,
+/// sanitizing invalid values.
 ///
 /// When [`AutoExposure::physiological`] is `None`, the long-term envelope parameters are
 /// still filled in (with their defaults) because the compute shader keeps the envelope
 /// tracking the short-term exposure even while it is disabled; only the
 /// `physiological` flag controls whether the envelope actually bounds the exposure.
+///
+/// When the camera has no [`AutoExposure`] component at all (auto white
+/// balance running alone), the default metering configuration is used with
+/// both adaptation speeds forced to zero: the histogram still runs (the white
+/// balance measurement reuses its metering range and total weight), but the
+/// exposure state never moves from its neutral initial value and the
+/// write-back adds an exact `0.0`.
 pub(super) fn build_uniform(
-    settings: &AutoExposure,
+    settings: Option<&AutoExposure>,
     reference: Option<&AutoExposureExternalReference>,
+    white_balance: Option<&AutoWhiteBalance>,
 ) -> AutoExposureUniform {
+    let neutral;
+    let settings = match settings {
+        Some(settings) => settings,
+        None => {
+            neutral = AutoExposure {
+                speed_brighten: 0.0,
+                speed_darken: 0.0,
+                ..Default::default()
+            };
+            &neutral
+        }
+    };
+
     let (min_log_lum, max_log_lum) = settings.range.clone().into_inner();
     let (low_percent, high_percent) = settings.filter.clone().into_inner();
 
@@ -145,6 +235,8 @@ pub(super) fn build_uniform(
         .map(PhysiologicalAdaptation::sanitized)
         .unwrap_or_default();
 
+    let white_balance = white_balance.map(AutoWhiteBalance::sanitized);
+
     AutoExposureUniform {
         min_log_lum,
         inv_log_lum_range: 1.0 / (max_log_lum - min_log_lum),
@@ -162,6 +254,10 @@ pub(super) fn build_uniform(
         long_term_bound_up: adaptation.bound_darken,
         long_term_bound_down: adaptation.bound_brighten,
         physiological: settings.physiological.is_some() as u32,
+        awb_speed: white_balance.map_or(0.0, |wb| wb.speed),
+        awb_anchor: white_balance.map_or(0.0, |wb| wb.virtual_light_anchor),
+        awb_enabled: white_balance.is_some() as u32,
+        awb_pad: 0,
     }
 }
 
@@ -170,14 +266,16 @@ pub(super) fn build_uniform(
 /// The short-term exposure starts at the neutral value the classic implementation used;
 /// the long-term envelope starts at
 /// [`PhysiologicalAdaptation::initial_long_term_ev`] if configured, and at the same
-/// neutral value otherwise.
-pub(super) fn initial_state(settings: &AutoExposure) -> AutoExposureState {
-    let (min_log_lum, max_log_lum) = settings.range.clone().into_inner();
+/// neutral value otherwise. The adapted white-balance chromaticity always
+/// starts at the neutral D65 white point.
+pub(super) fn initial_state(settings: Option<&AutoExposure>) -> AutoExposureState {
+    let (min_log_lum, max_log_lum) = settings
+        .map(|settings| settings.range.clone().into_inner())
+        .unwrap_or_else(|| AutoExposure::default().range.into_inner());
     let exposure = 0.0f32.clamp(min_log_lum, max_log_lum);
 
     let long_term = settings
-        .physiological
-        .as_ref()
+        .and_then(|settings| settings.physiological.as_ref())
         .map(PhysiologicalAdaptation::sanitized)
         .and_then(|adaptation| adaptation.initial_long_term_ev)
         .unwrap_or(exposure);
@@ -185,6 +283,8 @@ pub(super) fn initial_state(settings: &AutoExposure) -> AutoExposureState {
     AutoExposureState {
         exposure,
         long_term,
+        chroma_x: D65_XY.0,
+        chroma_y: D65_XY.1,
     }
 }
 

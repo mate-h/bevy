@@ -8,6 +8,7 @@ use bevy_render::{
     globals::GlobalsUniform,
     render_resource::{binding_types::*, *},
     view::ViewUniform,
+    working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
 };
 use bevy_shader::Shader;
 use bevy_utils::default;
@@ -17,6 +18,12 @@ use core::num::NonZero;
 pub struct AutoExposurePipeline {
     pub histogram_layout: BindGroupLayoutDescriptor,
     pub histogram_shader: Handle<Shader>,
+    /// The project-global working color space, captured at startup. When it
+    /// is Rec.2020, the `WORKING_COLOR_SPACE_REC2020` shader def is pushed so
+    /// the auto-white-balance chromaticity measurement uses the matching
+    /// RGB → XYZ matrix; in the default Rec.709 working space no def is
+    /// pushed and the composed shader source is unchanged.
+    pub working_color_space: WorkingColorSpace,
 }
 
 #[derive(Component)]
@@ -47,6 +54,18 @@ pub struct AutoExposureUniform {
     pub(super) long_term_bound_up: f32,
     pub(super) long_term_bound_down: f32,
     pub(super) physiological: u32,
+    /// Auto white balance chromaticity adaptation speed, per second.
+    pub(super) awb_speed: f32,
+    /// Auto white balance virtual-light anchor luminance, scene-linear units.
+    pub(super) awb_anchor: f32,
+    /// Non-zero when the camera has an `AutoWhiteBalance` component. All auto
+    /// white balance shader statements are gated on this flag, so the
+    /// auto-exposure-only configuration executes exactly the same arithmetic
+    /// as before the flag existed.
+    pub(super) awb_enabled: u32,
+    /// Padding so the struct size stays a multiple of 16 bytes, matching the
+    /// WGSL uniform address space struct size rounding.
+    pub(super) awb_pad: u32,
 }
 
 /// CPU mirror of the per-view `AutoExposureState` storage buffer in `auto_exposure.wgsl`.
@@ -57,6 +76,12 @@ pub struct AutoExposureState {
     pub(super) exposure: f32,
     /// The long-term physiological adaptation envelope, in EV.
     pub(super) long_term: f32,
+    /// The adapted white-point chromaticity (CIE 1931 *x*), used by auto
+    /// white balance. Initialized to (and meaningless at) the D65 *x* value.
+    pub(super) chroma_x: f32,
+    /// The adapted white-point chromaticity (CIE 1931 *y*); see
+    /// [`Self::chroma_x`].
+    pub(super) chroma_y: f32,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -67,7 +92,15 @@ pub enum AutoExposurePass {
 
 pub const HISTOGRAM_BIN_COUNT: u64 = 64;
 
-pub fn init_auto_exposure_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+/// Size in bytes of the global chroma accumulator storage buffer
+/// (three fixed-point `atomic<u32>` sums: `x·Y`, `y·Y`, and `Y`).
+pub const CHROMA_ACCUMULATOR_SIZE: u64 = 12;
+
+pub fn init_auto_exposure_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    working_color_space: Res<WorkingColorSpace>,
+) {
     commands.insert_resource(AutoExposurePipeline {
         histogram_layout: BindGroupLayoutDescriptor::new(
             "compute histogram bind group",
@@ -83,10 +116,12 @@ pub fn init_auto_exposure_pipeline(mut commands: Commands, asset_server: Res<Ass
                     storage_buffer_sized(false, NonZero::<u64>::new(HISTOGRAM_BIN_COUNT * 4)),
                     storage_buffer::<AutoExposureState>(false),
                     storage_buffer::<ViewUniform>(true),
+                    storage_buffer_sized(false, NonZero::<u64>::new(CHROMA_ACCUMULATOR_SIZE)),
                 ),
             ),
         ),
         histogram_shader: load_embedded_asset!(asset_server.as_ref(), "auto_exposure.wgsl"),
+        working_color_space: *working_color_space,
     });
 }
 
@@ -94,11 +129,20 @@ impl SpecializedComputePipeline for AutoExposurePipeline {
     type Key = AutoExposurePass;
 
     fn specialize(&self, pass: AutoExposurePass) -> ComputePipelineDescriptor {
+        let mut shader_defs = Vec::new();
+
+        // Project-global working-space axis: pushed for every specialization
+        // when (and only when) the app opted into the Rec.2020 working space,
+        // so default projects compose byte-identically.
+        if self.working_color_space.is_rec2020() {
+            shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+        }
+
         ComputePipelineDescriptor {
             label: Some("luminance compute pipeline".into()),
             layout: vec![self.histogram_layout.clone()],
             shader: self.histogram_shader.clone(),
-            shader_defs: vec![],
+            shader_defs,
             entry_point: Some(match pass {
                 AutoExposurePass::Histogram => "compute_histogram".into(),
                 AutoExposurePass::Average => "compute_average".into(),
