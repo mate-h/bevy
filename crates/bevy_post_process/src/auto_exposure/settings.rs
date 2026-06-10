@@ -266,8 +266,9 @@ impl PhysiologicalAdaptation {
 /// This component is the extensible seam for that multi-reference pattern. A system that can
 /// estimate the scene's brightness from non-frame-buffer data — for example from
 /// `DirectionalLight::illuminance`, an environment map's integrated luminance, or a
-/// procedural sky model — can write its estimate here (typically every frame), and the value
-/// is fused with the histogram measurement on the CPU side as a weighted average:
+/// procedural sky model — can write its estimate here (typically every frame). The
+/// `(ev, weight)` pair is uploaded with the auto exposure settings, and the metering compute
+/// shader fuses it with the histogram measurement as a weighted average:
 ///
 /// ```text
 /// metered_ev = (histogram_ev + ev * weight) / (1.0 + weight)

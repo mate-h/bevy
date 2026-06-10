@@ -48,7 +48,13 @@ pub(super) fn extract_buffers(
     >,
     mut removed: Extract<RemovedComponents<AutoExposure>>,
     mut removed_references: Extract<RemovedComponents<AutoExposureExternalReference>>,
-    cameras: Extract<Query<(RenderEntity, &AutoExposure)>>,
+    cameras: Extract<
+        Query<(
+            RenderEntity,
+            &AutoExposure,
+            Option<&AutoExposureExternalReference>,
+        )>,
+    >,
 ) {
     let mut changed: Vec<_> = changed
         .iter()
@@ -57,10 +63,13 @@ pub(super) fn extract_buffers(
 
     // Removing only the `AutoExposureExternalReference` component does not trigger the
     // `Changed` filters above, but the settings uniform must still be rebuilt without
-    // the reference.
+    // the reference. Read the live component state instead of assuming the reference is
+    // gone: a remove + re-insert within the same frame still buffers a removal event, and
+    // unconditionally pushing `None` here would override the freshly inserted reference
+    // (the `changed` entries above are processed first, in order).
     for entity in removed_references.read() {
-        if let Ok((render_entity, settings)) = cameras.get(entity) {
-            changed.push((render_entity, settings.clone(), None));
+        if let Ok((render_entity, settings, reference)) = cameras.get(entity) {
+            changed.push((render_entity, settings.clone(), reference.copied()));
         }
     }
 

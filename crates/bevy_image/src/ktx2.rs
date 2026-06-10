@@ -107,9 +107,9 @@ pub fn ktx2_buffer_to_image(
         levels = ktx2.levels().map(|level| level.data.to_vec()).collect();
     }
 
-    // Tracks whether sRGB-encoded data was decoded to linear on the CPU during
-    // transcoding; in that case a linear output format does not contradict an sRGB
-    // transfer function declared by the file.
+    // Tracks whether data assumed to be sRGB-encoded was decoded to linear on the CPU
+    // during transcoding; in that case a linear output format does not contradict an
+    // sRGB transfer function declared by the file, but it does override a linear one.
     let mut srgb_data_linearized_on_cpu = false;
 
     // Identify the format
@@ -282,8 +282,14 @@ pub fn ktx2_buffer_to_image(
             && !srgb_data_linearized_on_cpu
         {
             once!(warn!(
-                "KTX2 file declares an sRGB transfer function but is being loaded as linear \
-                (`is_srgb` is false); the loader setting wins and the data is used as-is",
+                "KTX2 file declares an sRGB transfer function but the resolved texture format \
+                is linear; the loader settings win and the data is used as-is",
+            ));
+        } else if transfer_function == ktx2::TransferFunction::Linear && srgb_data_linearized_on_cpu
+        {
+            once!(warn!(
+                "KTX2 file declares a linear transfer function but `is_srgb` is true; the \
+                loader setting wins and the data was sRGB-decoded to linear during transcoding",
             ));
         } else if transfer_function == ktx2::TransferFunction::Linear && texture_format.is_srgb() {
             once!(warn!(
@@ -1654,17 +1660,22 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// Builds a minimal valid KTX2 file: a 1x1 RGBA8 texture (`VkFormat` 37 =
-    /// `R8G8B8A8_UNORM`) with a single level and a basic data format descriptor
-    /// block carrying the given raw `colorPrimaries` and `transferFunction` bytes
-    /// (`0` = unspecified).
-    fn minimal_rgba8_ktx2(color_primaries: u8, transfer_function: u8) -> Vec<u8> {
+    /// Builds a minimal valid KTX2 file: a 1x1 texture in the given 8-bit-per-channel
+    /// `vkFormat` (with `pixel` carrying one texel) with a single level and a basic
+    /// data format descriptor block carrying the given raw `colorPrimaries` and
+    /// `transferFunction` bytes (`0` = unspecified).
+    fn minimal_ktx2(
+        vk_format: u32,
+        color_primaries: u8,
+        transfer_function: u8,
+        pixel: &[u8],
+    ) -> Vec<u8> {
         let mut buffer = Vec::new();
         // Identifier
         buffer.extend_from_slice(&[
             0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a,
         ]);
-        buffer.extend_from_slice(&37u32.to_le_bytes()); // vkFormat = R8G8B8A8_UNORM
+        buffer.extend_from_slice(&vk_format.to_le_bytes());
         buffer.extend_from_slice(&1u32.to_le_bytes()); // typeSize
         buffer.extend_from_slice(&1u32.to_le_bytes()); // pixelWidth
         buffer.extend_from_slice(&1u32.to_le_bytes()); // pixelHeight
@@ -1682,10 +1693,10 @@ mod tests {
         buffer.extend_from_slice(&0u32.to_le_bytes()); // kvdByteLength
         buffer.extend_from_slice(&0u64.to_le_bytes()); // sgdByteOffset
         buffer.extend_from_slice(&0u64.to_le_bytes()); // sgdByteLength
-                                                       // Level index (1 entry): the single 4-byte level directly after the DFD.
+                                                       // Level index (1 entry): the single one-texel level directly after the DFD.
         buffer.extend_from_slice(&132u64.to_le_bytes()); // byteOffset
-        buffer.extend_from_slice(&4u64.to_le_bytes()); // byteLength
-        buffer.extend_from_slice(&4u64.to_le_bytes()); // uncompressedByteLength
+        buffer.extend_from_slice(&(pixel.len() as u64).to_le_bytes()); // byteLength
+        buffer.extend_from_slice(&(pixel.len() as u64).to_le_bytes()); // uncompressedByteLength
         assert_eq!(buffer.len(), 104);
         // Data format descriptor
         buffer.extend_from_slice(&28u32.to_le_bytes()); // dfdTotalSize
@@ -1697,11 +1708,23 @@ mod tests {
         buffer.push(transfer_function);
         buffer.push(0); // flags
         buffer.extend_from_slice(&[0, 0, 0, 0]); // texelBlockDimension (stored as n - 1)
-        buffer.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]); // bytesPlanes
+        buffer.extend_from_slice(&[pixel.len() as u8, 0, 0, 0, 0, 0, 0, 0]); // bytesPlanes
         assert_eq!(buffer.len(), 132);
-        // Level data: one white RGBA8 pixel
-        buffer.extend_from_slice(&[255, 255, 255, 255]);
+        // Level data: one texel
+        buffer.extend_from_slice(pixel);
         buffer
+    }
+
+    /// Builds a minimal valid KTX2 file: a 1x1 white RGBA8 texture (`VkFormat` 37 =
+    /// `R8G8B8A8_UNORM`) with the given raw `colorPrimaries` and `transferFunction`
+    /// bytes.
+    fn minimal_rgba8_ktx2(color_primaries: u8, transfer_function: u8) -> Vec<u8> {
+        minimal_ktx2(
+            37,
+            color_primaries,
+            transfer_function,
+            &[255, 255, 255, 255],
+        )
     }
 
     #[test]
@@ -1741,5 +1764,26 @@ mod tests {
             wgpu_types::TextureFormat::Rgba8UnormSrgb,
         );
         assert_eq!(image.source_primaries, SourceColorPrimaries::Bt709);
+    }
+
+    #[test]
+    fn linear_declared_r8_with_caller_is_srgb_is_decoded_on_the_cpu() {
+        // The file declares a linear transfer function, but the caller requests sRGB.
+        // R8 has no sRGB texture format, so the loader sRGB-decodes the data on the
+        // CPU during transcoding (with a warning) and resolves to the non-sRGB format.
+        let buffer = minimal_ktx2(
+            /* R8_UNORM */ 9,
+            /* BT709 */ 1,
+            /* Linear */ 1,
+            &[128],
+        );
+        let image = ktx2_buffer_to_image(&buffer, CompressedImageFormats::empty(), true).unwrap();
+        assert_eq!(
+            image.texture_descriptor.format,
+            wgpu_types::TextureFormat::R8Unorm,
+        );
+        // sRGB-encoded byte 128 decodes to linear 55: the file's declared linear
+        // transfer really is overridden by the caller's `is_srgb`.
+        assert_eq!(image.data.as_deref(), Some(&[55u8][..]));
     }
 }
