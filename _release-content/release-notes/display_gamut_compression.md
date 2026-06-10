@@ -37,13 +37,17 @@ out-of-gamut colors), `Always` (force it on), or `Clip` (the hue-shifting
 per-channel clip, kept as a debug fallback for A/B comparison via the
 `DISPLAY_GAMUT_CLIP_DEBUG` shader def).
 
-Under `Auto` nothing changes today: the encoder's input is Rec.709
-display-linear in every configuration, so both reachable gamut stages
-(identity for scRGB, Rec.709 → Rec.2020 expansion for PQ) cannot produce
-out-of-gamut colors and the compression stays off. It becomes load-bearing
-when tone-mapping operators start emitting wide-gamut output for HDR targets
-(the Rec.2020-working → scRGB path). A CPU mirror of the shader algorithm,
-with constants, citations, and tests, lives in
+Under `Auto` the compression is active for exactly one configuration: a
+`Tonemapping::GranTurismo7` camera on an scRGB HDR target. GT7 emits its
+native Rec.2020 display-referred output on HDR targets, and scRGB signals are
+definitionally expressed in Rec.709 coordinates, so the encoder's gamut stage
+performs the Rec.2020 → Rec.709 contraction the limits above were derived
+for — wide-gamut colors compress gracefully into the signal instead of
+clipping per channel. Every other reachable stage (Rec.709 → scRGB identity,
+Rec.709 → Rec.2020 PQ expansion, GT7's Rec.2020 → PQ/Rec.2020 identity)
+cannot produce out-of-gamut colors and keeps the plain clip, which is a
+no-op there. A CPU mirror of the shader algorithm, with constants,
+citations, and tests, lives in
 `bevy_core_pipeline::display_encoding::gamut_compression`.
 
 SDR rendering is untouched: views on sRGB display targets never run the

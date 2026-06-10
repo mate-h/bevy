@@ -24,6 +24,7 @@ use bevy_render::{
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal};
+use bevy_window::DisplayGamut;
 use bitflags::bitflags;
 
 mod gt7;
@@ -208,10 +209,13 @@ pub enum Tonemapping {
     /// Blends a per-channel filmic curve ("camera-like" highlight skew) with a hue-preserving
     /// `ICtCp` branch (60% hue-preserving / 40% per-channel by default), with a luminance-driven
     /// chroma fade near peak white. Natively peak-luminance aware, designed to drive both SDR and
-    /// HDR displays; only the SDR path is wired up today.
+    /// HDR displays: on a view whose resolved `DisplayTarget` requests an HDR transfer the
+    /// operator runs in HDR mode (tone curve rebuilt around the display's peak luminance) and
+    /// emits its native linear Rec.2020 display-referred output straight into the
+    /// display-encoding pass.
     /// Algorithmic: does NOT require the `tonemapping_luts` cargo feature.
-    /// Tunable per camera via [`GranTurismo7Params`] (defaults are baked until the HDR
-    /// display-target uniform plumbing lands).
+    /// Tunable per camera via [`GranTurismo7Params`]; that component is also what enables the
+    /// HDR mode (it carries the prepared per-view parameters to the GPU).
     GranTurismo7,
 }
 
@@ -322,6 +326,19 @@ bitflags! {
         /// [`GranTurismo7Params`] component. Implies
         /// [`Self::DISPLAY_TARGET_UNIFORM`].
         const GT7_PARAMS_UNIFORM        = 0x10;
+        /// The tone-map operator emits its native linear Rec.2020
+        /// display-referred output (no Rec.709 back-conversion, no clamp) for
+        /// the display-encoding pass; pushes the `TONEMAP_OUTPUT_REC2020`
+        /// shader def.
+        ///
+        /// Set exactly when [`tonemap_output_gamut`] returns
+        /// [`DisplayGamut::Rec2020`]: the operator is
+        /// [`Tonemapping::GranTurismo7`] **and** the view's resolved display
+        /// target requests an HDR transfer. The display encoder derives its
+        /// input-gamut contract from the same function, so the two passes can
+        /// never disagree about the buffer's primaries. SDR views never set
+        /// this flag, keeping their pipelines byte-identical.
+        const TONEMAP_OUTPUT_REC2020    = 0x80;
         /// The view composites in gamma-encoded sRGB space
         /// ([`CompositingSpace::Srgb`](bevy_camera::CompositingSpace::Srgb)):
         /// main pass shaders write sRGB-encoded values, so this pass decodes
@@ -428,6 +445,16 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
                 "GT7_PARAMS_BINDING_INDEX".into(),
                 GT7_PARAMS_BINDING_INDEX,
             ));
+        }
+        // GT7 HDR-native output: the operator skips its Rec.2020 → Rec.709
+        // back-conversion (and the saturate) and the display encoder treats
+        // the pass output as Rec.2020 (same predicate; see
+        // `tonemap_output_gamut`). Never pushed for SDR views.
+        if key
+            .flags
+            .contains(TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020)
+        {
+            shader_defs.push("TONEMAP_OUTPUT_REC2020".into());
         }
 
         match key.tonemapping {
@@ -610,6 +637,47 @@ impl ViewTonemappingPipeline {
     }
 }
 
+/// The color primaries of the tonemapping pass's output for a view — and
+/// therefore the display-encoding pass's *input* gamut.
+///
+/// Returns [`DisplayGamut::Rec2020`] exactly when the view's operator is
+/// [`Tonemapping::GranTurismo7`] and its resolved display target requests an
+/// HDR transfer ([`ViewDisplayTarget::is_hdr_transfer`]): in that
+/// configuration the tonemapping pipeline is specialized with the
+/// `TONEMAP_OUTPUT_REC2020` shader def
+/// ([`TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020`]) and the GT7
+/// operator emits its native linear Rec.2020 display-referred output without
+/// the Rec.709 back-conversion (see `gt7.wgsl`). Every other configuration —
+/// every SDR view, and every other operator under any working color space —
+/// emits Rec.709 display-linear (Rec.709-fit operators receive a
+/// Rec.2020 → Rec.709 conversion at the pass entry under the Rec.2020
+/// working space; see `tonemapping_shared.wgsl`).
+///
+/// This function is the **single source of truth** for that predicate:
+/// `prepare_view_tonemapping_pipelines` (the def push) and the display
+/// encoder's `prepare_view_display_encoding_pipelines` (via
+/// `encoder_input_gamut`) both derive from it, reading the same extracted
+/// [`Tonemapping`] component and the same [`ViewDisplayTarget`] prepared in
+/// `PrepareViews`, so the two pipelines can never disagree about the
+/// post-tonemap buffer's primaries within a frame.
+///
+/// A missing [`ViewDisplayTarget`] is treated as the plain SDR default
+/// (matching the component's documented fallback), and a missing or
+/// [`Tonemapping::None`] operator emits Rec.709 (pass-through views never
+/// reach the GT7 wrapper).
+pub fn tonemap_output_gamut(
+    tonemapping: Option<&Tonemapping>,
+    view_display_target: Option<&ViewDisplayTarget>,
+) -> DisplayGamut {
+    if tonemapping == Some(&Tonemapping::GranTurismo7)
+        && view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer)
+    {
+        DisplayGamut::Rec2020
+    } else {
+        DisplayGamut::Rec709
+    }
+}
+
 pub fn prepare_view_tonemapping_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
@@ -728,6 +796,16 @@ pub fn prepare_view_tonemapping_pipelines(
         flags.set(
             TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM,
             gt7_uniform_active,
+        );
+        // GT7 on an HDR-transfer target emits its native Rec.2020 output for
+        // the display encoder. `tonemap_output_gamut` is the single source of
+        // truth shared with the encoder's input-gamut contract
+        // (`encoder_input_gamut` in display_encoding); both read the same
+        // extracted/prepared components, so def push and encoder key always
+        // agree.
+        flags.set(
+            TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020,
+            tonemap_output_gamut(Some(&tonemapping), view_display_target) == DisplayGamut::Rec2020,
         );
 
         let key = TonemappingPipelineKey {

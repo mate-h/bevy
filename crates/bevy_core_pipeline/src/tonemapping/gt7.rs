@@ -567,9 +567,10 @@ impl Gt7ToneMapping {
 
     /// Applies the operator to a Bevy scene-linear Rec.709 color, mirroring the
     /// WGSL `tone_mapping_gran_turismo_7` integration seam used for SDR output
-    /// today. This is the CPU parity reference for GPU readback tests.
+    /// (no `TONEMAP_OUTPUT_REC2020` shader def). This is the CPU parity
+    /// reference for GPU readback tests of the SDR path.
     ///
-    /// Seam contract (SDR, current in-tree integration):
+    /// Seam contract (SDR output):
     /// 1. Convert scene-linear Rec.709 → Rec.2020.
     /// 2. Multiply by `2.5`: Bevy's `1.0` (SDR paper white) maps to GT7's
     ///    250-nit paper white (`2.5` frame-buffer units).
@@ -579,8 +580,9 @@ impl Gt7ToneMapping {
     ///    existing sRGB output chain, clamping to `[0, 1]` (out-of-gamut
     ///    Rec.2020 results have no SDR Rec.709 representation).
     ///
-    /// The HDR path (operator output staying in Rec.2020 for the gamut /
-    /// transfer-encoding passes) lights up with the encoder workstream.
+    /// On HDR-transfer targets the pass instead emits the operator's native
+    /// Rec.2020 output for the display encoder — see
+    /// [`Self::apply_bevy_scene_linear_rec2020_output`].
     pub fn apply_bevy_scene_linear_sdr(&self, rgb: [f32; 3]) -> [f32; 3] {
         let rec2020 = mat3_mul_vec3(&REC_709_TO_REC_2020, rgb);
         let fb = [
@@ -606,10 +608,10 @@ impl Gt7ToneMapping {
     /// input is already native linear Rec.2020 (the working space), so the
     /// Rec.709 → Rec.2020 input expansion is skipped. The output
     /// back-conversion to Rec.709 (+ clamp) is unchanged: the tone mapping
-    /// pass's output contract is Rec.709 display-linear in every working
-    /// space (the sRGB chain hardware-encodes from it, and the display
-    /// encoder's input contract is Rec.709 until the GT7 HDR-native output
-    /// path lands).
+    /// pass's SDR output contract is Rec.709 display-linear in every working
+    /// space (the sRGB chain hardware-encodes from it). HDR-transfer targets
+    /// take the native-output seam instead — see
+    /// [`Self::apply_bevy_scene_linear_rec2020_native_rec2020_output`].
     pub fn apply_bevy_scene_linear_sdr_rec2020_native(&self, rgb: [f32; 3]) -> [f32; 3] {
         let fb = [
             rgb[0] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
@@ -623,6 +625,49 @@ impl Gt7ToneMapping {
             rec709[1].clamp(0.0, 1.0),
             rec709[2].clamp(0.0, 1.0),
         ]
+    }
+
+    /// CPU mirror of the `tone_mapping_gran_turismo_7` WGSL wrapper under the
+    /// `TONEMAP_OUTPUT_REC2020` shader def (the HDR-native output path,
+    /// Rec.709 working space): scene-linear Rec.709 in, the operator's native
+    /// linear Rec.2020 display-referred output out — **no** Rec.2020 →
+    /// Rec.709 back-conversion and **no** clamp. The display-encoding pass
+    /// consumes this output (its per-view input-gamut contract is keyed by
+    /// the same predicate that pushes the shader def; see
+    /// `tonemap_output_gamut` in `tonemapping/mod.rs`).
+    ///
+    /// With the D5 seam renormalization folded into
+    /// [`Self::sdr_correction_factor`] (`100 / paper_white_nits`, as prepared
+    /// by [`Gt7ParamsUniform::new`] for HDR targets), the output range is
+    /// `[0, peak_nits / paper_white_nits]` — paper-white-relative
+    /// display-linear, the D1/D5 convention the encoder expects.
+    ///
+    /// This is the CPU parity reference for GPU readback tests of the GT7
+    /// HDR path under the default Rec.709 working space.
+    pub fn apply_bevy_scene_linear_rec2020_output(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let rec2020 = mat3_mul_vec3(&REC_709_TO_REC_2020, rgb);
+        self.apply_bevy_scene_linear_rec2020_native_rec2020_output(rec2020)
+    }
+
+    /// CPU mirror of the `tone_mapping_gran_turismo_7` WGSL wrapper under
+    /// **both** the `WORKING_COLOR_SPACE_REC2020` and `TONEMAP_OUTPUT_REC2020`
+    /// shader defs: native linear Rec.2020 in (the wide working space, no
+    /// input expansion), native linear Rec.2020 display-referred out (no
+    /// back-conversion, no clamp). See
+    /// [`Self::apply_bevy_scene_linear_rec2020_output`] for the output
+    /// contract.
+    ///
+    /// Apart from the Bevy-side `× 2.5` input scaling (Bevy `1.0` → GT7's
+    /// 250-nit paper white), this **is** the reference operator: feeding it
+    /// `fb / 2.5` reproduces the C++ harness fixtures directly (locked by
+    /// the `hdr_native_rec2020_output_matches_cpp_fixtures_directly` test).
+    pub fn apply_bevy_scene_linear_rec2020_native_rec2020_output(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let fb = [
+            rgb[0] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
+            rgb[1] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
+            rgb[2] * (GRAN_TURISMO_SDR_PAPER_WHITE / REFERENCE_LUMINANCE),
+        ];
+        self.apply(fb)
     }
 }
 
@@ -722,9 +767,11 @@ impl Gt7ParamsUniform {
     ///   - [`Gt7ParamsUniform::sdr_correction_factor`] is set to
     ///     `100 / paper_white_nits`: the seam renormalization that scales the
     ///     operator's native output (`1.0` = 100 nits) so `1.0` = paper white.
-    ///     Until the display encoder lands, this output still flows through
-    ///     the existing Rec.2020 → Rec.709 + clamp SDR chain, so HDR-mode
-    ///     highlights above paper white are clipped on screen for now.
+    ///     On these views the tonemapping pipeline is specialized with the
+    ///     `TONEMAP_OUTPUT_REC2020` shader def (same HDR predicate), so the
+    ///     operator emits this paper-white-relative output in its native
+    ///     Rec.2020 primaries — unclamped, `[0, peak / paper_white]` — for
+    ///     the display-encoding pass.
     /// - Otherwise the operator is configured in **SDR mode**, identical to
     ///   the baked defaults except for the user parameters: peak 2.5
     ///   frame-buffer units (Gran Turismo's 250-nit paper white), output
@@ -1158,6 +1205,151 @@ mod tests {
                     "seam mismatch for input {rec709:?}: {legacy:?} vs {native:?}"
                 );
             }
+        }
+    }
+
+    /// The `TONEMAP_OUTPUT_REC2020` seam without the Rec.709 back-conversion
+    /// is the reference operator itself behind Bevy's `× 2.5` input scaling,
+    /// so feeding it `fb / 2.5` must reproduce the C++ harness's canonical 12
+    /// fixtures DIRECTLY — the cleanest possible parity statement for the
+    /// HDR-native output path (the Rec.2020 → Rec.709 wrapper was always
+    /// Bevy-side; the fixtures themselves are native Rec.2020 outputs).
+    #[test]
+    fn hdr_native_rec2020_output_matches_cpp_fixtures_directly() {
+        let sdr = Gt7ToneMapping::new_sdr();
+        let hdr1000 = Gt7ToneMapping::new_hdr(1000.0);
+        let hdr4000 = Gt7ToneMapping::new_hdr(4000.0);
+        let hdr10000 = Gt7ToneMapping::new_hdr(10000.0);
+
+        // The canonical fixture inputs are GT7 frame-buffer values; the seam
+        // multiplies Bevy scene-linear by 2.5, so divide first. The division
+        // round-trips within 1 ULP, far inside the 1e-4 fixture tolerance.
+        let scene = |fb: [f32; 3]| [fb[0] / 2.5, fb[1] / 2.5, fb[2] / 2.5];
+        let inputs: [[f32; 3]; 3] = [[0.5, 1.23, 0.75], [12.3, 34.3, 56.9], [1504.7, 64.51, 0.5]];
+
+        let native =
+            |tm: &Gt7ToneMapping, fb| tm.apply_bevy_scene_linear_rec2020_native_rec2020_output(fb);
+
+        // SDR mode (output [0, 1], still native Rec.2020 — no clamp needed).
+        assert_rgb_eq(
+            native(&sdr, scene(inputs[0])),
+            [1.996_225e-1, 4.907_029_6e-1, 2.995_677_6e-1],
+        );
+        assert_rgb_eq(native(&sdr, scene(inputs[1])), [1.0, 1.0, 1.0]);
+        assert_rgb_eq(native(&sdr, scene(inputs[2])), [1.0, 1.0, 7.387_512e-1]);
+
+        // HDR, 1000-nit peak.
+        assert_rgb_eq(
+            native(&hdr1000, scene(inputs[0])),
+            [4.998_231_8e-1, 1.230_000_7, 7.499_952_3e-1],
+        );
+        assert_rgb_eq(native(&hdr1000, scene(inputs[1])), [10.0, 10.0, 10.0]);
+        assert_rgb_eq(
+            native(&hdr1000, scene(inputs[2])),
+            [10.0, 10.0, 6.706_747_5],
+        );
+
+        // HDR, 4000-nit peak.
+        assert_rgb_eq(
+            native(&hdr4000, scene(inputs[0])),
+            [4.998_231_8e-1, 1.230_000_7, 7.499_952_3e-1],
+        );
+        assert_rgb_eq(
+            native(&hdr4000, scene(inputs[1])),
+            [11.354_192, 30.071_972, 40.0],
+        );
+        assert_rgb_eq(native(&hdr4000, scene(inputs[2])), [40.0, 40.0, 23.847_712]);
+
+        // HDR, 10000-nit peak.
+        assert_rgb_eq(
+            native(&hdr10000, scene(inputs[0])),
+            [4.998_231_8e-1, 1.230_000_7, 7.499_952_3e-1],
+        );
+        assert_rgb_eq(
+            native(&hdr10000, scene(inputs[1])),
+            [12.277_842, 34.240_51, 56.395_88],
+        );
+        assert_rgb_eq(
+            native(&hdr10000, scene(inputs[2])),
+            [91.726_71, 68.024_31, 42.575_134],
+        );
+    }
+
+    /// The `TONEMAP_OUTPUT_REC2020` seams differ from the SDR seams by
+    /// EXACTLY the dropped Rec.2020 → Rec.709 back-conversion + clamp:
+    /// re-applying it on the CPU reproduces the legacy output bit-for-bit,
+    /// for both working spaces and both operator modes (all four wrapper def
+    /// combinations are coherent).
+    #[test]
+    fn rec2020_output_back_conversion_is_the_only_difference() {
+        let back_convert = |out: [f32; 3]| {
+            let rec709 = mat3_mul_vec3(&REC_2020_TO_REC_709, out);
+            [
+                rec709[0].clamp(0.0, 1.0),
+                rec709[1].clamp(0.0, 1.0),
+                rec709[2].clamp(0.0, 1.0),
+            ]
+        };
+        let assert_bits_eq = |a: [f32; 3], b: [f32; 3], label: &str, input: [f32; 3]| {
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "{label} mismatch for input {input:?}: {a:?} vs {b:?}"
+                );
+            }
+        };
+
+        let mut hdr = Gt7ToneMapping::new_hdr(1000.0);
+        // The D5 seam renormalization, as the HDR prepare path folds it.
+        hdr.sdr_correction_factor = REFERENCE_LUMINANCE / 200.0;
+
+        let inputs: [[f32; 3]; 6] = [
+            [0.5, 1.23, 0.75],
+            [12.3, 4.56, 7.89],
+            [1504.7, 0.0, 0.001],
+            [1.0, 1.0, 1.0],
+            [-0.1, 0.2, 0.1],
+            [0.538, 1.11, 0.444],
+        ];
+        for tm in [Gt7ToneMapping::new_sdr(), hdr] {
+            for input in inputs {
+                assert_bits_eq(
+                    tm.apply_bevy_scene_linear_sdr(input),
+                    back_convert(tm.apply_bevy_scene_linear_rec2020_output(input)),
+                    "rec709-working",
+                    input,
+                );
+                assert_bits_eq(
+                    tm.apply_bevy_scene_linear_sdr_rec2020_native(input),
+                    back_convert(tm.apply_bevy_scene_linear_rec2020_native_rec2020_output(input)),
+                    "rec2020-working",
+                    input,
+                );
+            }
+        }
+    }
+
+    /// With the D5 renormalization prepared by `Gt7ParamsUniform::new` for an
+    /// HDR target, the native-output seam's ceiling is exactly
+    /// `peak / paper_white` — paper-white-relative display-linear, the
+    /// encoder's input convention.
+    #[test]
+    fn hdr_native_output_is_paper_white_relative() {
+        let params = GranTurismo7Params::default();
+        let uniform = Gt7ParamsUniform::new(
+            &hdr_target(1000.0, 200.0, DisplayTransfer::ScRgbLinear),
+            &params,
+        );
+        let mut tm = Gt7ToneMapping::new_hdr_with_params(1000.0, &params);
+        tm.sdr_correction_factor = uniform.sdr_correction_factor;
+
+        // A far-over-peak gray saturates every channel at the peak clamp
+        // (10 fb); the seam renormalization scales it to peak / paper_white
+        // = 1000 / 200 = 5.0 exactly.
+        let out = tm.apply_bevy_scene_linear_rec2020_native_rec2020_output([1e4; 3]);
+        for c in out {
+            assert_eq!(c, 1000.0 / 200.0);
         }
     }
 

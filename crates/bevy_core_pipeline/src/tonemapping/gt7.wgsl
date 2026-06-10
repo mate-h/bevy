@@ -234,10 +234,11 @@ fn gt7_tone_map(rgb: vec3<f32>, params: Gt7Params) -> vec3<f32> {
     return params.sdr_correction_factor * min(blended, vec3(params.peak));
 }
 
-// Integration seam for Bevy's current SDR output chain, dispatched as
+// Integration seam for Bevy's tone-mapping pass, dispatched as
 // `TONEMAP_METHOD_GRAN_TURISMO_7` from `tone_mapping()` in
-// tonemapping_shared.wgsl. Mirrored on the CPU by
-// `Gt7ToneMapping::apply_bevy_scene_linear_sdr` (gt7.rs).
+// tonemapping_shared.wgsl. Mirrored on the CPU by the four
+// `Gt7ToneMapping::apply_bevy_scene_linear_*` seam functions (gt7.rs), one
+// per def combination below.
 //
 // Contract:
 // 1. Input is Bevy's scene-linear working space (1.0 ≈ SDR paper white). The
@@ -248,28 +249,35 @@ fn gt7_tone_map(rgb: vec3<f32>, params: Gt7Params) -> vec3<f32> {
 //    gamut-clipping entry conversion — see tonemapping_shared.wgsl).
 // 2. Multiply by 2.5: Bevy's 1.0 maps to GT7's 250-nit paper white
 //    (2.5 frame-buffer units), matching GT's "SDR 1.0 == 250 nits" assumption.
-// 3. Run the operator in SDR mode; the 1/2.5 correction factor brings the
-//    display-referred result back to [0, 1].
-// 4. Convert Rec.2020 → Rec.709 for the existing sRGB output chain, clamped to
-//    [0, 1] (out-of-gamut Rec.2020 results have no SDR Rec.709 representation).
-//    This back-conversion is kept under WORKING_COLOR_SPACE_REC2020 too: the
-//    pass's output contract is Rec.709 display-linear in every configuration
-//    (the SDR chain hardware-encodes sRGB from it, and the display encoder's
-//    input contract is Rec.709 until the GT7 HDR-native output path lands).
-//
-// The HDR path — operator output staying in Rec.2020 at [0, peak/100] for the
-// gamut-mapping and transfer-encoding passes — lights up with the display
-// encoder workstream; this wrapper is only used while tone mapping feeds the
-// SDR sRGB chain directly.
+//    The input scaling is identical in SDR and HDR mode (paper-white strategy
+//    (a): the curve always sees Gran Turismo's 250-nit-calibrated scene).
+// 3. Run the operator. In SDR mode the 1/2.5 correction factor brings the
+//    display-referred result back to [0, 1]; in HDR mode (selected by the
+//    prepared params uniform) the factor is the D5 seam renormalization
+//    100 / paper_white_nits, so the output is paper-white-relative
+//    ([0, peak / paper_white]).
+// 4. Output gamut, selected by the TONEMAP_OUTPUT_REC2020 shader def — pushed
+//    exactly when the view's resolved display transfer is HDR (see
+//    `tonemap_output_gamut` in tonemapping/mod.rs, the single source of truth
+//    shared with the display encoder's input-gamut contract):
+//    - Without the def (every SDR view): convert Rec.2020 → Rec.709 for the
+//      sRGB output chain, clamped to [0, 1] (out-of-gamut Rec.2020 results
+//      have no SDR Rec.709 representation). This back-conversion is kept
+//      under WORKING_COLOR_SPACE_REC2020 too: the pass's SDR output contract
+//      is Rec.709 display-linear (the SDR chain hardware-encodes sRGB from
+//      it).
+//    - With the def (HDR-transfer views): the operator's native linear
+//      Rec.2020 display-referred output is emitted directly — no
+//      back-conversion and no clamp — for the display-encoding pass, whose
+//      gamut stage becomes a true Rec.2020 → display transform (identity for
+//      PQ/Rec.2020; the Rec.2020 → Rec.709 contraction + out-of-gamut
+//      compression for scRGB).
 //
 // Under GT7_PARAMS_UNIFORM the baked defaults are replaced by per-view
-// parameters prepared on the CPU (which may configure the operator in HDR
-// mode, with curve constants derived from the display target's peak and the
-// seam renormalization folded into sdr_correction_factor). The input scaling
-// is unchanged in both modes (paper-white strategy (a): the curve always sees
-// Gran Turismo's 250-nit-calibrated scene), and until the encoder lands the
-// output still goes through the Rec.2020 → Rec.709 + saturate SDR chain, so
-// HDR-mode highlights above paper white are clipped on screen for now.
+// parameters prepared on the CPU (which configure the operator in HDR mode on
+// HDR-transfer targets, with curve constants derived from the display
+// target's peak and the seam renormalization folded into
+// sdr_correction_factor; see `Gt7ParamsUniform::new` in gt7.rs).
 fn tone_mapping_gran_turismo_7(color: vec3<f32>) -> vec3<f32> {
 #ifdef GT7_PARAMS_UNIFORM
     let params = gt7_params_uniform;
@@ -286,5 +294,14 @@ fn tone_mapping_gran_turismo_7(color: vec3<f32>) -> vec3<f32> {
 #endif
     let fb = rec2020 * (GT7_SDR_PAPER_WHITE / GT7_REFERENCE_LUMINANCE);
     let mapped = gt7_tone_map(fb, params);
+#ifdef TONEMAP_OUTPUT_REC2020
+    // HDR-native output: linear Rec.2020 display-referred, paper-white
+    // relative; the display encoder consumes it (its input-gamut contract is
+    // keyed by the same predicate that pushed this def). Mirrored on the CPU
+    // by `Gt7ToneMapping::apply_bevy_scene_linear_rec2020_output` /
+    // `apply_bevy_scene_linear_rec2020_native_rec2020_output` (gt7.rs).
+    return mapped;
+#else
     return saturate(GT7_REC_2020_TO_REC_709 * mapped);
+#endif
 }

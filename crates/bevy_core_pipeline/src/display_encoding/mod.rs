@@ -2,11 +2,13 @@
 //! separated display pipeline (tone map → gamut transform → transfer
 //! encoding).
 //!
-//! The tone-mapping pass outputs *display-linear* color in the working
-//! primaries, scaled so `1.0` = paper white; UI then composites in that same
+//! The tone-mapping pass outputs *display-linear* color, scaled so `1.0` =
+//! paper white, in per-view source primaries (Rec.709 for every operator
+//! except `Tonemapping::GranTurismo7` on HDR targets, which emits its native
+//! Rec.2020 — see `tonemap_output_gamut`); UI then composites in that same
 //! space. This pass — scheduled after the UI pass and before the upscaling
 //! blit — converts that buffer into the display's signal: a 3×3 gamut
-//! transform from the working primaries to the display primaries, an
+//! transform from the source primaries to the display primaries, an
 //! out-of-gamut handling step (ACES-RGC-style chroma compression when the
 //! gamut transform can produce out-of-gamut colors — see
 //! [`DisplayGamutCompression`] and the [`gamut_compression`] module — plus an
@@ -57,7 +59,7 @@ use bevy_shader::Shader;
 use bevy_utils::default;
 use bevy_window::{DisplayGamut, DisplayTransfer};
 
-use crate::tonemapping::Tonemapping;
+use crate::tonemapping::{tonemap_output_gamut, Tonemapping};
 
 pub mod gamut_compression;
 mod node;
@@ -108,15 +110,18 @@ impl Plugin for DisplayEncodingPlugin {
 ///
 /// Out-of-gamut colors can only come out of the gamut stage when it
 /// *contracts* — when the pass's input primaries are wider than the resolved
-/// display primaries. The pass's input is currently Rec.709 display-linear
-/// under every [`WorkingColorSpace`] (the tone-mapping pass converts at its
-/// exit), and the reachable display gamuts are Rec.709 (scRGB, identity) and
-/// Rec.2020 (PQ, an expansion), so under [`DisplayGamutCompression::Auto`]
-/// the compression is currently never active — it lights up when the GT7
-/// HDR-native output path keeps operator output in the Rec.2020 working
-/// space and the gamut stage becomes a true working → display transform.
-/// [`DisplayGamutCompression::Always`] forces it on for HDR-transfer views
-/// today (e.g. to exercise or demonstrate the path).
+/// display primaries. The pass's input gamut is per-view (see
+/// `encoder_input_gamut`): Rec.2020 when the view's operator is
+/// `Tonemapping::GranTurismo7` on an HDR-transfer target (the operator emits
+/// its native Rec.2020 display-referred output), Rec.709 otherwise. Under
+/// [`DisplayGamutCompression::Auto`] the compression is therefore active for
+/// exactly one reachable configuration: GT7 HDR-native Rec.2020 input onto a
+/// Rec.709-coordinate scRGB signal (a contraction). Identity transforms
+/// (Rec.709 → scRGB, GT7's Rec.2020 → PQ/Rec.2020) and the
+/// Rec.709 → Rec.2020 PQ expansion keep the plain clip, which is a no-op for
+/// their in-gamut-by-construction inputs.
+/// [`DisplayGamutCompression::Always`] forces compression on for every
+/// HDR-transfer view (e.g. to exercise or demonstrate the path).
 #[derive(Resource, ExtractResource, Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
 #[reflect(Resource, Debug, Default, Clone, PartialEq, Hash)]
 pub enum DisplayGamutCompression {
@@ -160,19 +165,33 @@ pub enum OutOfGamutHandling {
 }
 
 /// The color primaries of the display-encoding pass's *input* (the main
-/// texture it reads).
+/// texture it reads) for a given view.
 ///
-/// The tone-mapping pass currently emits Rec.709 display-linear under every
-/// [`WorkingColorSpace`]: Rec.709-fit operators receive a Rec.2020 → Rec.709
-/// conversion at the pass entry and the GT7 operator keeps its own
-/// Rec.2020 → Rec.709 back-conversion (see `tonemapping_shared.wgsl` /
-/// `gt7.wgsl`). When the GT7 HDR-native output path lands and operator
-/// output stays in the working primaries for HDR targets, this becomes
-/// working-space-dependent — which is what makes
-/// [`DisplayGamutCompression::Auto`] light up for Rec.2020-working →
-/// Rec.709-display (scRGB) contractions.
-const fn encoder_input_gamut(_working_color_space: WorkingColorSpace) -> DisplayGamut {
-    DisplayGamut::Rec709
+/// Delegates to [`tonemap_output_gamut`], the single source of truth shared
+/// with the tonemapping pipeline's `TONEMAP_OUTPUT_REC2020` def push:
+/// Rec.2020 exactly when the view's operator is
+/// [`Tonemapping::GranTurismo7`] and its resolved transfer is HDR (the
+/// operator then emits its native linear Rec.2020 display-referred output
+/// with no Rec.709 back-conversion), Rec.709 in every other configuration
+/// (Rec.709-fit operators receive a Rec.2020 → Rec.709 conversion at the
+/// tone-mapping pass entry under the Rec.2020 working space, so their output
+/// is Rec.709 under every [`WorkingColorSpace`]; see
+/// `tonemapping_shared.wgsl` / `gt7.wgsl`). Both prepare systems read the
+/// same extracted `Tonemapping` and the same `ViewDisplayTarget`, so the def
+/// push and this contract always agree within a frame.
+///
+/// Known limitation (documented, see the release notes and
+/// `plans/ui-hdr-rfc.md`): the UI pass composites Rec.709-authored colors
+/// into the post-tonemap buffer unconverted, so on GT7-HDR views (Rec.2020
+/// buffer) saturated UI colors are reinterpreted in the wider primaries and
+/// oversaturate; grays and whites are unaffected (shared D65 white point).
+/// Converting UI colors per view needs a per-view key axis on the UI
+/// pipelines and is deferred to the UI HDR follow-up.
+fn encoder_input_gamut(
+    tonemapping: Option<&Tonemapping>,
+    view_display_target: &ViewDisplayTarget,
+) -> DisplayGamut {
+    tonemap_output_gamut(tonemapping, Some(view_display_target))
 }
 
 /// Whether transforming from `source` primaries to `display` primaries can
@@ -238,8 +257,16 @@ pub fn init_display_encoding_pipeline(
 /// PQ forces Rec.2020, scRGB forces Rec.709 — scRGB signals are by definition
 /// expressed in extended Rec.709/sRGB coordinates — and Display P3 currently
 /// falls back to Rec.709), so the pipeline hashes on what is actually
-/// encoded, not on what was requested. The only reachable gamut × transfer
-/// combinations are therefore `Rec709 × ScRgbLinear` and `Rec2020 × Pq`.
+/// encoded, not on what was requested. With the per-view
+/// [`source_gamut`](Self::source_gamut), the reachable
+/// source × display × transfer combinations are:
+///
+/// | source (tonemap output) | display gamut | transfer | gamut stage |
+/// |---|---|---|---|
+/// | Rec.709 | Rec.709 | scRGB | identity |
+/// | Rec.709 | Rec.2020 | PQ | expansion (`DISPLAY_GAMUT_REC2020`) |
+/// | Rec.2020 (GT7 HDR) | Rec.709 | scRGB | contraction (`GAMUT_REC2020_TO_REC709`, compression active under `Auto`) |
+/// | Rec.2020 (GT7 HDR) | Rec.2020 | PQ | identity |
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct DisplayEncodingPipelineKey {
     /// Format of the main texture the pass writes to (the
@@ -251,7 +278,12 @@ pub struct DisplayEncodingPipelineKey {
     /// before gamut/transfer encoding (the same decode the upscaling blit
     /// performs for non-encoded views, which this pass takes over).
     pub source_space: Option<CompositingSpace>,
-    /// The resolved display gamut the working-space color is transformed to.
+    /// The color primaries of the pass's input — the tonemapping pass's
+    /// output gamut for this view (see `encoder_input_gamut` /
+    /// [`tonemap_output_gamut`]): Rec.2020 for GT7 on HDR-transfer targets,
+    /// Rec.709 otherwise.
+    pub source_gamut: DisplayGamut,
+    /// The resolved display gamut the source color is transformed to.
     pub gamut: DisplayGamut,
     /// The resolved transfer function. Only HDR transfers occur here
     /// ([`DisplayTransfer::ScRgbLinear`] or [`DisplayTransfer::Pq`]);
@@ -259,10 +291,11 @@ pub struct DisplayEncodingPipelineKey {
     pub transfer: DisplayTransfer,
     /// The resolved out-of-gamut handling of the gamut stage (see
     /// [`DisplayGamutCompression`]). Under the default
-    /// [`DisplayGamutCompression::Auto`] this is currently always
-    /// [`OutOfGamutHandling::Clip`]: the pass's Rec.709 input makes both
-    /// reachable gamut stages (identity for scRGB, an expansion for PQ)
-    /// unable to produce out-of-gamut colors.
+    /// [`DisplayGamutCompression::Auto`] this is
+    /// [`OutOfGamutHandling::Compress`] exactly when the gamut stage is a
+    /// contraction (Rec.2020 source onto a Rec.709 scRGB signal) and
+    /// [`OutOfGamutHandling::Clip`] otherwise (identity and expanding stages
+    /// cannot produce out-of-gamut colors).
     pub out_of_gamut: OutOfGamutHandling,
 }
 
@@ -280,16 +313,29 @@ impl SpecializedRenderPipeline for DisplayEncodingPipeline {
             Some(CompositingSpace::Linear) | None => {}
         }
 
-        match key.gamut {
-            // Identity: the working space is currently linear Rec.709.
-            DisplayGamut::Rec709 => {}
-            // Only reachable with the PQ transfer: scRGB coerces its
-            // encoding gamut to Rec.709 at prepare time (scRGB signals are
-            // definitionally Rec.709-coordinate).
-            DisplayGamut::Rec2020 => shader_defs.push("DISPLAY_GAMUT_REC2020".into()),
-            // Coerced away at prepare time; unreachable here.
-            DisplayGamut::DisplayP3 => unreachable!(
-                "DisplayP3 is coerced to Rec709 in prepare_view_display_encoding_pipelines"
+        match (key.source_gamut, key.gamut) {
+            // Identity transforms: a Rec.709 tonemap output onto the
+            // Rec.709-coordinate scRGB signal, and GT7's HDR-native Rec.2020
+            // output onto a PQ/Rec.2020 signal.
+            (DisplayGamut::Rec709, DisplayGamut::Rec709)
+            | (DisplayGamut::Rec2020, DisplayGamut::Rec2020) => {}
+            // Expansion (in-gamut by construction): Rec.709 tonemap output
+            // onto a PQ/Rec.2020 signal.
+            (DisplayGamut::Rec709, DisplayGamut::Rec2020) => {
+                shader_defs.push("DISPLAY_GAMUT_REC2020".into());
+            }
+            // Contraction: GT7's HDR-native Rec.2020 output onto the
+            // Rec.709-coordinate scRGB signal — the one reachable stage that
+            // can produce out-of-gamut colors, for which `Auto` keys in the
+            // compression below.
+            (DisplayGamut::Rec2020, DisplayGamut::Rec709) => {
+                shader_defs.push("GAMUT_REC2020_TO_REC709".into());
+            }
+            // Coerced away at prepare time (display side); never emitted by
+            // the tonemapping pass (source side).
+            (DisplayGamut::DisplayP3, _) | (_, DisplayGamut::DisplayP3) => unreachable!(
+                "DisplayP3 is coerced to Rec709 in prepare_view_display_encoding_pipelines \
+                 and the tonemapping pass never emits DisplayP3"
             ),
         }
 
@@ -366,11 +412,15 @@ pub struct ViewDisplayEncodingPipeline {
 /// * PQ with a non-Rec.2020 gamut → [`DisplayGamut::Rec2020`]: PQ is
 ///   canonically Rec.2020. `warn_once!`.
 ///
+/// The pass's input gamut is resolved per view through `encoder_input_gamut`
+/// (the [`tonemap_output_gamut`] single source shared with the tonemapping
+/// pipeline's `TONEMAP_OUTPUT_REC2020` def push): Rec.2020 for
+/// [`Tonemapping::GranTurismo7`] on HDR-transfer targets, Rec.709 otherwise.
 /// It also resolves the gamut stage's out-of-gamut handling from
 /// [`DisplayGamutCompression`]: compression is keyed in exactly when the
-/// gamut stage is a contraction (its input primaries are wider than the
-/// resolved display primaries — see `encoder_input_gamut`) or when forced
-/// with [`DisplayGamutCompression::Always`].
+/// gamut stage is a contraction (the input primaries are wider than the
+/// resolved display primaries — today only GT7's Rec.2020 output onto an
+/// scRGB signal) or when forced with [`DisplayGamutCompression::Always`].
 pub fn prepare_view_display_encoding_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
@@ -467,9 +517,14 @@ pub fn prepare_view_display_encoding_pipelines(
             gamut = DisplayGamut::Rec2020;
         }
 
+        // The tonemapping pass's output gamut for this view — per-view, from
+        // the same single-sourced predicate that pushes the
+        // `TONEMAP_OUTPUT_REC2020` shader def on the tonemapping pipeline.
+        let source_gamut = encoder_input_gamut(tonemapping, view_display_target);
+
         let out_of_gamut = match *gamut_compression {
             DisplayGamutCompression::Auto => {
-                if is_gamut_contraction(encoder_input_gamut(*working_color_space), gamut) {
+                if is_gamut_contraction(source_gamut, gamut) {
                     OutOfGamutHandling::Compress
                 } else {
                     OutOfGamutHandling::Clip
@@ -482,6 +537,7 @@ pub fn prepare_view_display_encoding_pipelines(
         let key = DisplayEncodingPipelineKey {
             target_format: view.target_format,
             source_space: camera.compositing_space,
+            source_gamut,
             gamut,
             transfer,
             out_of_gamut,

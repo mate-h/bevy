@@ -7,12 +7,20 @@
 //      (`SRGB_TO_LINEAR` / `OKLAB_TO_LINEAR`, normally done by the upscaling
 //      blit — which passes encoded output through untouched instead when this
 //      pass ran),
-//   2. gamut transform from the working primaries (linear Rec.709 today) to
-//      the display *signal* primaries (`DISPLAY_GAMUT_REC2020`, identity for
-//      Rec.709) — only reachable together with `DISPLAY_TRANSFER_PQ`: scRGB
-//      signals are definitionally expressed in (extended) Rec.709 coordinates
-//      whatever the panel's physical gamut, so prepare coerces the scRGB
-//      encoding gamut to Rec.709 (the compositor maps to the panel itself),
+//   2. gamut transform from the per-view source primaries (the tonemapping
+//      pass's output: Rec.709, or GT7's native Rec.2020 on HDR targets) to
+//      the display *signal* primaries:
+//        - `DISPLAY_GAMUT_REC2020`: Rec.709 source → PQ/Rec.2020 signal
+//          (an expansion, in-gamut by construction),
+//        - `GAMUT_REC2020_TO_REC709`: GT7's Rec.2020 source → scRGB signal
+//          (a contraction; the out-of-gamut compression below keys in for it
+//          under `DisplayGamutCompression::Auto`) — scRGB signals are
+//          definitionally expressed in (extended) Rec.709 coordinates
+//          whatever the panel's physical gamut, so prepare coerces the scRGB
+//          encoding gamut to Rec.709 (the compositor maps to the panel
+//          itself),
+//        - no def: identity (Rec.709 → scRGB, or GT7's Rec.2020 →
+//          PQ/Rec.2020),
 //   3. out-of-gamut handling: ACES-RGC-style hue-approximate chroma
 //      compression toward the achromatic axis (`DISPLAY_GAMUT_COMPRESSION`),
 //      with the plain hue-shifting per-channel clip as the debug fallback
@@ -56,6 +64,20 @@ const REC_709_TO_REC_2020 = mat3x3<f32>(
     0.627403895934699, 0.06909728935823199, 0.016391438875150228,   // column 0
     0.32928303837788375, 0.919540395075459, 0.08801330787722578,    // column 1
     0.043313065687417246, 0.011362315566309154, 0.895595253247624,  // column 2
+);
+#endif
+
+#ifdef GAMUT_REC2020_TO_REC709
+// Full-precision linear Rec.2020 → Rec.709 matrix (D65, per ITU-R BT.2087;
+// inverse of the matrix above). Identical literals to
+// `GT7_REC_2020_TO_REC_709` in gt7.wgsl / `REC_2020_TO_REC_709` in gt7.rs /
+// `REC2020_TO_REC709` in bevy_render::working_color_space.
+// TODO: deduplicate with shared color-space constants once they land in
+// `bevy_render::color_operations` (HDR workstream follow-up).
+const REC_2020_TO_REC_709 = mat3x3<f32>(
+    1.6604910021084347, -0.12455047452159052, -0.01815076335490522, // column 0
+    -0.5876411387885496, 1.1328998971259598, -0.10057889800800739,  // column 1
+    -0.07284986331988484, -0.008349422604369487, 1.1187296613629125, // column 2
 );
 #endif
 
@@ -138,22 +160,25 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // 2. Gamut transform: tone-map-output primaries → display primaries.
     //
-    // Input-contract note for the working-space axis (T2.5): the tone
-    // mapping pass emits Rec.709 display-linear under EVERY
-    // `WorkingColorSpace` — Rec.709-fit operators receive a Rec.2020 →
-    // Rec.709 conversion at the pass entry, and the GT7 operator keeps its
-    // own Rec.2020 → Rec.709 back-conversion. So this stage's input is
-    // Rec.709 regardless of the working space, and the defs below are
-    // unchanged by `WorkingColorSpace::Rec2020`. When the GT7 HDR-native
-    // output path lands (operator output staying Rec.2020 for HDR targets),
-    // this stage becomes a true working → display transform: Rec.2020 input
-    // + PQ/Rec.2020 display = identity, Rec.2020 input + scRGB (Rec.709
-    // coordinates) = the inverse REC_2020_TO_REC_709 matrix — a gamut
-    // *contraction*, for which prepare keys in the out-of-gamut compression
-    // below (`DISPLAY_GAMUT_COMPRESSION`; see `DisplayGamutCompression` and
-    // `encoder_input_gamut` in mod.rs).
+    // Input contract: the tone-mapping pass emits Rec.709 display-linear for
+    // every operator under every `WorkingColorSpace` (Rec.709-fit operators
+    // receive a Rec.2020 → Rec.709 conversion at the pass entry), EXCEPT
+    // `Tonemapping::GranTurismo7` on an HDR-transfer target, which emits its
+    // native linear Rec.2020 (the `TONEMAP_OUTPUT_REC2020` path in
+    // gt7.wgsl). The prepare system resolves the per-view source gamut from
+    // the same predicate (`encoder_input_gamut` / `tonemap_output_gamut`)
+    // and keys exactly one of the defs below — or none for the identity
+    // stages (Rec.709 → scRGB, Rec.2020 → PQ/Rec.2020).
 #ifdef DISPLAY_GAMUT_REC2020
     rgb = REC_709_TO_REC_2020 * rgb;
+#endif
+#ifdef GAMUT_REC2020_TO_REC709
+    // A gamut *contraction* (GT7's Rec.2020 output onto the
+    // Rec.709-coordinate scRGB signal): can produce out-of-gamut (negative)
+    // components, for which prepare keys in the out-of-gamut compression
+    // below (`DISPLAY_GAMUT_COMPRESSION`; see `DisplayGamutCompression` and
+    // `encoder_input_gamut` in mod.rs).
+    rgb = REC_2020_TO_REC_709 * rgb;
 #endif
 
     // 3. Out-of-gamut handling (DECISIONS.md D3: perceptual compression,

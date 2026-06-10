@@ -396,16 +396,23 @@ fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     // grading, saturation) is fit to Rec.709 primaries and cannot be rebaked
     // (the AgX / Tony McMapface / Blender Filmic LUTs have no algorithmic
     // source). Convert to Rec.709 at the pass entry; the output contract of
-    // this pass (Rec.709 display-linear, 1.0 = paper white) is unchanged, so
-    // the UI pass, FXAA/SMAA luma weights, the display encoder, and the sRGB
-    // blit chain all see exactly what they saw before. Working-space colors
-    // outside the Rec.709 gamut are clipped here (documented limitation of
-    // Rec.709-fit operators under the wide working space).
+    // this pass for these operators (Rec.709 display-linear, 1.0 = paper
+    // white) is unchanged, so the UI pass, FXAA/SMAA luma weights, the
+    // display encoder, and the sRGB blit chain all see exactly what they saw
+    // before. Working-space colors outside the Rec.709 gamut are clipped
+    // here (documented limitation of Rec.709-fit operators under the wide
+    // working space).
     //
     // The Gran Turismo 7 operator is Rec.2020-native and instead skips its
     // own Rec.709 → Rec.2020 input expansion (see gt7.wgsl); for GT7 the
     // grading stack above the operator runs on Rec.2020 values with its
-    // Rec.709-fit constants (documented caveat).
+    // Rec.709-fit constants (documented caveat). GT7 is also the one
+    // operator whose OUTPUT can be Rec.2020: under TONEMAP_OUTPUT_REC2020
+    // (HDR-transfer targets only) it emits native Rec.2020 for the display
+    // encoder, and the post-tonemapping `saturation()` below, the deband
+    // dither, and FXAA/SMAA luma weights run on Rec.2020 values with
+    // Rec.709-fit constants on those views (documented caveat; SDR views are
+    // unaffected).
     color = max(rec2020_to_rec709(color), vec3(0.0));
 #endif
 #endif

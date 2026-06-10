@@ -26,9 +26,9 @@ Unlike the LUT-based operators (AgX, TonyMcMapface, BlenderFilmic), GranTurismo7
 algorithmic and does not require the `tonemapping_luts` cargo feature.
 
 The operator is natively peak-luminance aware and designed to drive both SDR and HDR
-displays; today Bevy wires up its SDR mode (tone-mapping against Gran Turismo's 250-nit
-paper-white calibration and rescaling into the sRGB range), with the full HDR output path
-arriving together with Bevy's broader HDR display support.
+displays, and Bevy wires up both modes end to end: on SDR targets it tone-maps against
+Gran Turismo's 250-nit paper-white calibration and rescales into the sRGB range; on HDR
+targets it runs in HDR mode and feeds the display-encoding pass directly (see below).
 
 A new `GranTurismo7Params` component exposes the operator's artistic dials (`blend_ratio`,
 the chroma fade band, and the curve shape parameters). Adding it to a camera that uses
@@ -46,11 +46,29 @@ commands.spawn((
 ));
 ```
 
-When the camera renders to a target whose `DisplayTarget` requests an HDR transfer
-(scRGB-linear, PQ, or HLG), the operator is additionally configured in its HDR mode: the
-tone curve is rebuilt around the display's `peak_luminance_nits` (clamped to the operator's
-supported 250–10000 nit range, and to at least `paper_white_nits`), and the output is
-rescaled so `1.0` equals the display's paper white. Note that until the HDR display encoder
-lands, this HDR-mode output is still converted back to Rec.709 and clamped for the existing
-sRGB output chain, so highlights above paper white are clipped on screen for now. Cameras
-without the component (or on plain SDR targets without it) are completely unaffected.
+When the camera renders to a target whose resolved `DisplayTarget` requests an HDR transfer
+(scRGB-linear, or PQ once wgpu can negotiate it), the operator is additionally configured in
+its HDR mode: the tone curve is rebuilt around the display's `peak_luminance_nits` (clamped
+to the operator's supported 250–10000 nit range, and to at least `paper_white_nits`), and
+the output is rescaled so `1.0` equals the display's paper white.
+
+On those HDR views the full end-to-end pipeline is now active: the operator emits its
+**native linear Rec.2020 display-referred output** — unclamped, `[0, peak / paper_white]` —
+straight into the display-encoding pass (no intermediate Rec.709 conversion and no clamp, so
+no highlight or wide-gamut information is lost between the operator and the display signal).
+The encoder's gamut stage then becomes a true source → display transform:
+
+- **PQ / Rec.2020 targets**: identity — GT7's output is already in the signal's primaries.
+- **scRGB targets** (Rec.709-coordinate by definition): a full-precision Rec.2020 → Rec.709
+  conversion, with the ACES-RGC-style perceptual out-of-gamut compression now active by
+  default (`DisplayGamutCompression::Auto`) so wide-gamut colors compress gracefully instead
+  of clipping per channel.
+
+One documented limitation of the Rec.2020-native path: Bevy UI composites its
+Rec.709-authored colors into the post-tonemap buffer unconverted, so on a GT7-HDR view
+saturated UI colors are reinterpreted in the wider primaries and oversaturate slightly
+(grays and whites are unaffected — the white point is shared). Per-view UI gamut conversion
+is planned as part of the UI HDR follow-up (see `plans/ui-hdr-rfc.md` in the working notes).
+
+Cameras without the component (or on plain SDR targets) are completely unaffected, and SDR
+output remains byte-identical.

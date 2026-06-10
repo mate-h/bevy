@@ -24,14 +24,30 @@ guides for the visual implications on previously-SDR cameras.
 
 The pass reads the per-view `DisplayTarget` calibration and performs:
 
-- a full-precision Rec.709 → Rec.2020 gamut transform when the target gamut is
-  `DisplayGamut::Rec2020` (identity for Rec.709),
+- a full-precision gamut transform from the view's *source* primaries — the
+  tone-map operator's output gamut, resolved per view: Rec.2020 for
+  `Tonemapping::GranTurismo7` on HDR targets (the operator emits its native
+  Rec.2020 output directly, with no intermediate Rec.709 conversion or
+  clamp), Rec.709 for every other operator — to the display signal's
+  primaries: a Rec.709 → Rec.2020 expansion for PQ, the Rec.2020 → Rec.709
+  contraction for GT7-on-scRGB, identity otherwise,
 - out-of-gamut handling: ACES-RGC-style perceptual gamut compression when the
-  gamut transform can produce out-of-gamut colors, with a per-channel-clip
-  debug fallback (see the display gamut compression release note),
+  gamut transform can produce out-of-gamut colors (exactly the GT7
+  Rec.2020 → scRGB contraction under the default setting), with a
+  per-channel-clip debug fallback (see the display gamut compression release
+  note),
 - the display transfer function: scRGB-linear (`× paper_white_nits / 80`) or
   PQ/ST-2084 (absolute nits normalized to 10000), selected by
   `DisplayTransfer`.
+
+The tonemapping pipeline and the encoder derive the per-view source gamut
+from a single shared predicate (`tonemap_output_gamut`), so the two passes
+can never disagree about the buffer's primaries. One documented limitation
+of the Rec.2020-native path: UI composites Rec.709-authored colors into the
+post-tonemap buffer unconverted, so on GT7-HDR views (a Rec.2020 buffer)
+saturated UI colors oversaturate slightly; grays and whites are unaffected
+(shared D65 white point). Per-view UI gamut conversion is deferred to the UI
+HDR follow-up.
 
 The shader-side transfer functions themselves — exact piecewise sRGB
 OETF/EOTF, scRGB scaling, PQ inverse-EOTF/EOTF, and the HLG OETF — live in a
