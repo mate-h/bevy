@@ -43,19 +43,28 @@ pub const GRAN_TURISMO_SDR_PAPER_WHITE: f32 = 250.0;
 /// Used by the in-tree SDR integration seam: Bevy's working space is currently
 /// scene-linear Rec.709, while the GT7 operator natively works in linear
 /// Rec.2020.
+///
+/// Each literal is the shortest round-trip representation of the correctly
+/// rounded `f32` of the corresponding f64 literal in `gt7.wgsl`
+/// (`GT7_REC_709_TO_REC_2020`, note: column-major there); the two must stay
+/// bit-identical so this module remains an exact parity reference for the
+/// shader.
 // TODO: deduplicate with shared color-space matrix constants once they land in
 // `bevy_color` / `bevy_render::color_operations` (HDR workstream T2.x).
 pub const REC_709_TO_REC_2020: [[f32; 3]; 3] = [
-    [0.627_403_9, 0.329_283_03, 0.043_313_065],
+    [0.627_403_9, 0.329_283_03, 0.043_313_067],
     [0.069_097_29, 0.919_540_4, 0.011_362_315],
-    [0.016_391_44, 0.088_013_31, 0.895_595_3],
+    [0.016_391_44, 0.088_013_306, 0.895_595_25],
 ];
 
 /// Full-precision (f64-derived) linear Rec.2020 → Rec.709 conversion matrix
 /// (row-major, D65 white point). Inverse of [`REC_709_TO_REC_2020`].
+///
+/// Bit-identical to `GT7_REC_2020_TO_REC_709` in `gt7.wgsl` (see
+/// [`REC_709_TO_REC_2020`] for the sync contract).
 pub const REC_2020_TO_REC_709: [[f32; 3]; 3] = [
     [1.660_491, -0.587_641_1, -0.072_849_86],
-    [-0.124_550_48, 1.132_9, -0.008_349_423],
+    [-0.124_550_48, 1.132_899_9, -0.008_349_422],
     [-0.018_150_763, -0.100_578_9, 1.118_729_7],
 ];
 

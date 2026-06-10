@@ -23,10 +23,17 @@ behavior **only for SDR inputs**, and pass HDR / out-of-range values through:
   longer clamps each channel to `[0, 1]` when the input color or the target
   luminance is outside the SDR range. Inputs with all channels in `[0, 1]` and an
   SDR target luminance behave exactly as before.
-- `Luminance::lighter` for `LinearRgba`, `LinearRec2020`, `Xyza`, `Laba`, `Lcha`,
-  `Oklaba`, `Oklcha`, `Hsla`, and `Okhsla` still clamps to white for colors whose
-  luminance/lightness is at most `1.0`, but colors that are already brighter than
-  standard white keep getting brighter instead of being pulled down to `1.0`.
+- `Luminance::lighter` for `LinearRgba` and `LinearRec2020` still clamps to white
+  for SDR colors (luminance and every color channel at most `1.0`), but HDR colors
+  — whose luminance *or* any individual channel exceeds `1.0`, the same predicate
+  `with_luminance` uses — keep getting brighter instead of being pulled down to
+  `1.0`, scaling so that their chromaticity is preserved. For example, a saturated
+  emissive red like `LinearRgba::new(4.0, 0.0, 0.0, 1.0)` (luminance ≈ 0.85) is no
+  longer desaturated towards white.
+- `Luminance::lighter` for `Xyza`, `Laba`, `Lcha`, `Oklaba`, `Oklcha`, `Hsla`, and
+  `Okhsla` still clamps to white for colors whose luminance/lightness is at most
+  `1.0`, but colors whose luminance/lightness already exceeds `1.0` keep getting
+  brighter instead of being pulled down to `1.0`.
 - `Luminance::darker` for `Xyza`, `Hsla`, and `Okhsla` no longer clamps the result
   to an upper bound of `1.0` (it still clamps to black). This only affects inputs
   that were already brighter than white, or negative `amount` values outside the

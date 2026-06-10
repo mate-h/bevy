@@ -13,7 +13,9 @@ use bevy_reflect::prelude::*;
 /// Rec. 2020 covers roughly 76% of the CIE 1931 chromaticity diagram (compared to
 /// roughly 36% for the Rec. 709 / sRGB primaries used by [`LinearRgba`]), making it
 /// the standard container gamut for HDR and wide-color-gamut content. All Rec. 709
-/// and Display P3 colors fit inside it with non-negative components.
+/// colors and almost all Display P3 colors fit inside it with non-negative
+/// components (the extreme edge of P3's red corner lies marginally outside
+/// Rec. 2020 and yields a tiny negative blue component).
 ///
 /// Component values are linear (no transfer function is applied). `(1.0, 1.0, 1.0)`
 /// is the D65 reference white at SDR paper-white intensity, matching
@@ -153,10 +155,18 @@ impl LinearRec2020 {
     /// Make the color lighter or darker by some amount.
     ///
     /// See [`LinearRgba::darker`] / [`LinearRgba::lighter`] for the semantics; this
-    /// is the same operation using the Rec. 2020 luminance weights.
+    /// is the same operation using the Rec. 2020 luminance weights. Colors within
+    /// the standard SDR range (luminance and every color channel at most `1.0`)
+    /// keep the documented clamp-to-black / clamp-to-white behavior; HDR colors
+    /// (luminance *or* any individual channel above `1.0`) are adjusted without an
+    /// upper clamp, scaling the color and preserving its chromaticity.
     fn adjust_lightness(&mut self, amount: f32) {
         let luminance = self.luminance();
-        let target_luminance = if luminance <= 1.0 {
+        // A color is SDR only if neither its luminance nor any channel exceeds
+        // standard white; a saturated color can have channels above 1.0 while its
+        // luminance stays below 1.0.
+        let is_sdr = luminance <= 1.0 && self.red <= 1.0 && self.green <= 1.0 && self.blue <= 1.0;
+        let target_luminance = if is_sdr {
             // SDR contract: luminance stays within [0, 1].
             (luminance + amount).clamp(0.0, 1.0)
         } else {
@@ -167,7 +177,7 @@ impl LinearRec2020 {
             let adjustment = (luminance - target_luminance) / luminance;
             self.mix_assign(Self::new(0.0, 0.0, 0.0, self.alpha), adjustment);
         } else if target_luminance > luminance {
-            if luminance < 1.0 {
+            if is_sdr {
                 let adjustment = (target_luminance - luminance) / (1. - luminance);
                 self.mix_assign(Self::new(1.0, 1.0, 1.0, self.alpha), adjustment);
             } else {
@@ -615,5 +625,20 @@ mod tests {
         assert_approx_eq!(lighter.luminance(), 2.5, 1e-4);
         let darker = hdr.darker(0.5);
         assert_approx_eq!(darker.luminance(), 1.5, 1e-4);
+
+        // A saturated HDR color (channel above 1.0, luminance below 1.0) is treated
+        // as HDR, consistently with `with_luminance`: `lighter` scales it while
+        // preserving its chromaticity instead of crushing it to SDR white.
+        let saturated_hdr = LinearRec2020::rgb(3.0, 0.0, 0.0);
+        let luminance = saturated_hdr.luminance();
+        assert!(luminance < 1.0);
+        let lighter = saturated_hdr.lighter(0.3);
+        assert_approx_eq!(lighter.luminance(), luminance + 0.3, 1e-4);
+        assert!(lighter.red > 3.0);
+        assert_approx_eq!(lighter.green, 0.0, 1e-6);
+        assert_approx_eq!(lighter.blue, 0.0, 1e-6);
+        // ... and it matches `with_luminance` for the same target.
+        let via_with_luminance = saturated_hdr.with_luminance(luminance + 0.3);
+        assert_approx_eq!(lighter.red, via_with_luminance.red, 1e-4);
     }
 }

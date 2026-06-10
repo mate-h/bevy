@@ -30,10 +30,13 @@ pub trait Luminance: Sized {
     /// The amount represents an absolute increase in luminance, and is distributive:
     /// `color.lighter(a).lighter(b) == color.lighter(a + b)`.
     ///
-    /// Colors with luminance within the standard SDR range (`[0.0, 1.0]`) are clamped
-    /// to white if the amount would cause them to go above white. Colors that are
-    /// already brighter than standard white (HDR) are lightened without an upper
-    /// clamp.
+    /// Colors within the standard SDR range are clamped to white if the amount would
+    /// cause them to go above white. Colors that are already brighter than standard
+    /// white (HDR) are lightened without an upper clamp. In component-based RGB
+    /// spaces ([`LinearRgba`](crate::LinearRgba), [`LinearRec2020`](crate::LinearRec2020))
+    /// a color counts as HDR when its luminance *or* any color channel exceeds `1.0`
+    /// (the same predicate as [`Luminance::with_luminance`]); in
+    /// luminance/lightness-based spaces, when its luminance/lightness exceeds `1.0`.
     ///
     /// For a relative increase in luminance, you can simply `mix()` with white.
     fn lighter(&self, amount: f32) -> Self;
