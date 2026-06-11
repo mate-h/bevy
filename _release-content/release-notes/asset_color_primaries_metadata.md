@@ -1,6 +1,6 @@
 ---
 title: Color-primaries metadata for image assets
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

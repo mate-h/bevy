@@ -1,6 +1,6 @@
 ---
 title: "`DisplayTarget`: per-display calibration for windows"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

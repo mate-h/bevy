@@ -1,6 +1,6 @@
 ---
 title: "Perceptual out-of-gamut compression in the display-encoding pass"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

@@ -1,6 +1,6 @@
 ---
 title: Physically based veiling glare (GT7-style) as a bloom scatter model
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

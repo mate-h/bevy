@@ -1,6 +1,6 @@
 ---
 title: "Anti-aliasing and bloom are now correct on HDR display targets"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

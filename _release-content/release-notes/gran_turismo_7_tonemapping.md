@@ -1,6 +1,6 @@
 ---
 title: Gran Turismo 7 tonemapping
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

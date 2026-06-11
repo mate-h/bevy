@@ -1,6 +1,6 @@
 ---
 title: "Wide working color space (Rec.2020, opt-in)"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

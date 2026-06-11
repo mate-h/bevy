@@ -1,6 +1,6 @@
 ---
 title: "HDR display output (scRGB-linear and HDR10/PQ)"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

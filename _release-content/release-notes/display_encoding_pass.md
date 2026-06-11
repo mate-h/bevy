@@ -1,6 +1,6 @@
 ---
 title: "Display-encoding pass: gamut transform and HDR transfer functions"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

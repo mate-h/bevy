@@ -1,6 +1,6 @@
 ---
 title: Automatic white balance
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

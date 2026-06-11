@@ -1,6 +1,6 @@
 ---
 title: Wide-gamut Rec. 2020 color support in `bevy_color`
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

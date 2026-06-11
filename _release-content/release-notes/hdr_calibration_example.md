@@ -1,6 +1,6 @@
 ---
 title: "HDR calibration example"
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 

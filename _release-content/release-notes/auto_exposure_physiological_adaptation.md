@@ -1,6 +1,6 @@
 ---
 title: Physiological two-stage auto exposure
-authors: ["@pavlov"]
+authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 
