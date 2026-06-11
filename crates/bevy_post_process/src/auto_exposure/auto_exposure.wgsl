@@ -285,7 +285,7 @@ fn compute_histogram(
 ) {
     // Clear the workgroup shared histogram
     if local_invocation_index < 64 {
-        histogram_shared[local_invocation_index] = 0u;
+        atomicStore(&histogram_shared[local_invocation_index], 0u);
     }
 
     // Clear the workgroup shared chroma accumulators (auto white balance).
@@ -293,7 +293,7 @@ fn compute_histogram(
     // white balance branches below are uniform control flow and the shared
     // barriers stay valid.
     if settings.awb_enabled != 0u && local_invocation_index < 3u {
-        chroma_shared[local_invocation_index] = 0u;
+        atomicStore(&chroma_shared[local_invocation_index], 0u);
     }
 
     // Wait for all workgroup threads to clear the shared histogram
@@ -358,14 +358,17 @@ fn compute_histogram(
     // Accumulate the workgroup histogram into the global histogram.
     // Note that the global histogram was not cleared at the beginning,
     // as it will be cleared in compute_average.
-    atomicAdd(&histogram[local_invocation_index], histogram_shared[local_invocation_index]);
+    atomicAdd(
+        &histogram[local_invocation_index],
+        atomicLoad(&histogram_shared[local_invocation_index]),
+    );
 
     // Accumulate the workgroup chroma sums into the global accumulators,
     // converting from the workgroup fixed-point scale to the global one and
     // normalizing by the total pixel count for headroom (the normalization
     // cancels out exactly in compute_average).
     if settings.awb_enabled != 0u && local_invocation_index < 3u {
-        let workgroup_sum = f32(chroma_shared[local_invocation_index]) / CHROMA_WORKGROUP_SCALE;
+        let workgroup_sum = f32(atomicLoad(&chroma_shared[local_invocation_index])) / CHROMA_WORKGROUP_SCALE;
         let normalized = workgroup_sum / (f32(dim.x) * f32(dim.y));
         atomicAdd(&chroma[local_invocation_index], u32(normalized * CHROMA_GLOBAL_SCALE + 0.5));
     }
@@ -380,11 +383,11 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
     // This way we can quickly exclude the portion of lowest and highest samples as required by
     // the low_percent and high_percent settings.
     for (var i=0u; i<64u; i+=1u) {
-        histogram_sum += histogram[i];
-        histogram_shared[i] = histogram_sum;
+        histogram_sum += atomicLoad(&histogram[i]);
+        atomicStore(&histogram_shared[i], histogram_sum);
 
         // Clear the histogram bin for the next frame
-        histogram[i] = 0u;
+        atomicStore(&histogram[i], 0u);
     }
 
     let first_index = u32(f32(histogram_sum) * settings.low_percent);
@@ -396,8 +399,8 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
         // The number of pixels in the bin. The histogram values are clamped to
         // first_index and last_index to exclude the lowest and highest samples.
         let bin_count =
-            clamp(histogram_shared[i], first_index, last_index) -
-            clamp(histogram_shared[i - 1u], first_index, last_index);
+            clamp(atomicLoad(&histogram_shared[i]), first_index, last_index) -
+            clamp(atomicLoad(&histogram_shared[i - 1u]), first_index, last_index);
 
         sum += f32(bin_count) * f32(i);
         count += bin_count;
@@ -491,12 +494,12 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
     if settings.awb_enabled != 0u {
         // Drain and clear the fixed-point chroma accumulators (see
         // compute_histogram for the encoding).
-        let sum_yx = f32(chroma[0]) / CHROMA_GLOBAL_SCALE;
-        let sum_yy = f32(chroma[1]) / CHROMA_GLOBAL_SCALE;
-        let sum_y = f32(chroma[2]) / CHROMA_GLOBAL_SCALE;
-        chroma[0] = 0u;
-        chroma[1] = 0u;
-        chroma[2] = 0u;
+        let sum_yx = f32(atomicLoad(&chroma[0])) / CHROMA_GLOBAL_SCALE;
+        let sum_yy = f32(atomicLoad(&chroma[1])) / CHROMA_GLOBAL_SCALE;
+        let sum_y = f32(atomicLoad(&chroma[2])) / CHROMA_GLOBAL_SCALE;
+        atomicStore(&chroma[0], 0u);
+        atomicStore(&chroma[1], 0u);
+        atomicStore(&chroma[2], 0u);
 
         // The mean metered scene luminance in scene-linear units. The sums
         // were normalized by the total pixel count (for fixed-point headroom)

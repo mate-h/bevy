@@ -24,18 +24,23 @@
 //! the GPU. The shader-side transfer functions (scRGB / PQ) activate only for
 //! HDR transfers.
 //!
-//! Surface selection (`create_surfaces` in `bevy_render::view::window`)
-//! negotiates an `Rgba16Float` scRGB-linear swapchain when a window's
-//! [`DisplayTarget`](bevy_window::DisplayTarget) requests
-//! [`DisplayTransfer::ScRgbLinear`] and the backend offers it (macOS/iOS
-//! Metal, Windows Vulkan, Wayland Vulkan); the encoded output of this pass is
-//! then blitted to the surface unchanged (no hardware sRGB encode — float
-//! surfaces have no sRGB view). When the backend cannot fulfil the requested
-//! transfer, the view's **resolved** display target degrades to plain SDR and
-//! this pass never runs, so the predicate below always reflects what the
-//! surface can actually show. PQ/HLG surfaces remain unreachable until wgpu
-//! gains color-space control (<https://github.com/gfx-rs/wgpu/issues/2920>);
-//! the pass itself is transfer-agnostic and ready.
+//! Surface negotiation (`create_surfaces` in `bevy_render::view::window`)
+//! configures the swapchain this pass's output is presented through, using
+//! wgpu's surface color-space API (currently Bevy's wgpu fork, pending
+//! upstream under <https://github.com/gfx-rs/wgpu/issues/2920>): an
+//! `Rgba16Float` extended-sRGB-linear swapchain for
+//! [`DisplayTransfer::ScRgbLinear`] (macOS/iOS Metal, Windows Vulkan/DX12,
+//! Wayland Vulkan), or an HDR10 swapchain (typically `Rgb10a2Unorm`) for
+//! [`DisplayTransfer::Pq`] where the backend and OS advertise it. In both
+//! cases the encoded output of this pass is blitted to the surface unchanged
+//! (no hardware sRGB encode — these formats have no sRGB view). When the
+//! backend cannot fulfil the requested transfer, the view's **resolved**
+//! display target degrades (PQ → scRGB → plain SDR, with warnings), so the
+//! predicate below always reflects what the surface can actually show.
+//! [`DisplayTransfer::Hlg`] requests are fulfilled as PQ/HDR10 at
+//! negotiation (HLG is scene-referred; see the coercion notes on
+//! [`prepare_view_display_encoding_pipelines`]), so a resolved HLG transfer
+//! can only reach this pass through manual (non-window) targets.
 
 use crate::FullscreenShader;
 use bevy_app::{App, Plugin};
@@ -400,11 +405,16 @@ pub struct ViewDisplayEncodingPipeline {
 /// HDR-transfer display targets, removed otherwise).
 ///
 /// Applies the D6 prepare-time coercions before keying the pipeline:
-/// * [`DisplayTransfer::Hlg`] → [`DisplayTransfer::Pq`]: no wgpu surface can
-///   negotiate HLG, and HLG is scene-referred (encoding tone-mapped output
-///   with the HLG OETF would double-tone-map). `warn_once!`.
+/// * [`DisplayTransfer::Hlg`] → [`DisplayTransfer::Pq`]: HLG is
+///   scene-referred — encoding tone-mapped (display-referred) output with
+///   the HLG OETF would double-tone-map. Window surfaces fulfil HLG requests
+///   as PQ/HDR10 at negotiation for the same reason, so this arm is only
+///   reachable through manual (non-window) targets. `warn_once!`.
 /// * [`DisplayGamut::DisplayP3`] → [`DisplayGamut::Rec709`]: no P3 gamut
-///   matrix ships yet (P3 surfaces are unreachable through wgpu). `warn_once!`.
+///   matrix ships yet. (wgpu's surface color-space API can advertise
+///   Display P3 surfaces, but Bevy does not negotiate them until this pass
+///   grows a P3 encode path — see `negotiate_surface_format` in
+///   `bevy_render::view::window`.) `warn_once!`.
 /// * scRGB-linear with a non-Rec.709 gamut → [`DisplayGamut::Rec709`]: scRGB
 ///   (IEC 61966-2-2) is definitionally encoded against Rec.709/sRGB
 ///   primaries — every backend declares the `Rgba16Float` surface as
@@ -487,7 +497,8 @@ pub fn prepare_view_display_encoding_pipelines(
 
         if transfer == DisplayTransfer::Hlg {
             warn_once!(
-                "`DisplayTransfer::Hlg` is not reachable through wgpu surfaces and HLG is \
+                "A resolved `DisplayTransfer::Hlg` reached the display encoder (a manual \
+                render target; window surfaces fulfil HLG as PQ at negotiation). HLG is \
                 scene-referred (encoding tone-mapped output with the HLG OETF would \
                 double-tone-map); encoding with PQ instead."
             );
@@ -495,8 +506,9 @@ pub fn prepare_view_display_encoding_pipelines(
         }
         if gamut == DisplayGamut::DisplayP3 {
             warn_once!(
-                "`DisplayGamut::DisplayP3` output is not supported yet (no wgpu backend \
-                exposes P3 surfaces); leaving colors in Rec.709 primaries."
+                "`DisplayGamut::DisplayP3` output is not supported yet (the display \
+                encoder ships no P3 gamut matrices, so P3 surfaces are not negotiated); \
+                leaving colors in Rec.709 primaries."
             );
             gamut = DisplayGamut::Rec709;
         }

@@ -5589,3 +5589,15 @@ name = "Light Probe Blending"
 description = "Demonstrates blending between multiple reflection probes"
 category = "3D Rendering"
 wasm = false
+
+# HDR surface color-space wgpu fork (https://github.com/stuartparmenter/wgpu, branch
+# hdr-surface-color-space, based on wgpu trunk at version 29.0.0). Provides
+# `SurfaceColorSpace` / `SurfaceCapabilities::format_capabilities` for HDR output.
+# In-tree requirements on these crates are relaxed to "29" so the 29.0.0 git
+# versions satisfy them. wgpu-core / wgpu-hal are not listed: nothing in the tree
+# depends on them from crates.io; the patched git `wgpu` pulls them as path deps.
+[patch.crates-io]
+wgpu = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
+wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
+wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
+naga = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }

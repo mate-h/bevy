@@ -166,9 +166,10 @@ fn pq_eotf(signal: vec3<f32>) -> vec3<f32> {
 // HLG (ITU-R BT.2100-2, Table 5)
 // ---------------------------------------------------------------------------
 //
-// UNREACHABLE FROM SURFACES: no wgpu backend can negotiate an HLG swapchain
-// today, and the display-encoding pass never selects HLG (it is coerced to PQ
-// at prepare time). The OETF is implemented and parity-tested anyway so the
+// UNREACHABLE FROM SURFACES: window surface negotiation fulfils HLG requests
+// as PQ/HDR10 (even where the backend advertises an HLG color space), and the
+// display-encoding pass never selects HLG (it is coerced to PQ at prepare
+// time). The OETF is implemented and parity-tested anyway so the
 // transfer-function set is complete for transfer-agnostic code paths.
 //
 // HLG is SCENE-referred: the display applies the OOTF (gamma tuned to its

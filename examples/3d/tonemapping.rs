@@ -341,21 +341,24 @@ fn toggle_tonemapping_method(
     .clone();
 }
 
-/// Toggles scRGB-linear HDR output on the primary window (and switches the
-/// operator to GranTurismo7, currently the only HDR-aware one, when turning
-/// HDR on).
+/// Cycles the primary window's HDR output: SDR sRGB → scRGB-linear →
+/// PQ (HDR10) → back to SDR (and switches the operator to GranTurismo7,
+/// currently the only HDR-aware one, when leaving SDR).
 ///
 /// GT7 only engages its HDR mode (peak-luminance-aware output above paper
 /// white) when the camera also has a [`GranTurismo7Params`] component — the
 /// prepared params uniform is where the operator reads the display target's
 /// peak luminance. Without it the operator silently stays in SDR mode, so the
 /// component is inserted alongside the HDR display target (and removed again
-/// when toggling back to SDR, restoring the operator's baked SDR defaults).
+/// when cycling back to SDR, restoring the operator's baked SDR defaults).
 ///
 /// NOTE: seeing actual HDR output requires an HDR-capable display and a
-/// backend where wgpu exposes an `Rgba16Float` surface: macOS/iOS (Metal),
-/// Windows (Vulkan), or Wayland (Vulkan). Elsewhere Bevy logs a warning and
-/// stays in SDR.
+/// backend advertising the matching surface color space: scRGB-linear on
+/// macOS/iOS (Metal), Windows (Vulkan/DX12), or Wayland (Vulkan); PQ (HDR10)
+/// on Vulkan/DX12/Metal with the OS HDR setting enabled. The UI shows the
+/// *requested* transfer; if the surface cannot carry it, Bevy logs a warning
+/// and degrades (PQ falls back to scRGB, then to plain SDR) — the main world
+/// cannot read the resolved outcome back yet.
 fn toggle_hdr_output(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -364,24 +367,33 @@ fn toggle_hdr_output(
 ) {
     if keys.just_pressed(KeyCode::KeyO) {
         let (camera_entity, mut tonemapping) = camera.into_inner();
-        if display_target.transfer == DisplayTransfer::ScRgbLinear {
-            **display_target = DisplayTarget::SDR_SRGB;
-            commands
-                .entity(camera_entity)
-                .remove::<GranTurismo7Params>();
-        } else {
-            **display_target = DisplayTarget {
-                paper_white_nits: 200.0,
-                peak_luminance_nits: 1000.0,
-                transfer: DisplayTransfer::ScRgbLinear,
-                ..DisplayTarget::SDR_SRGB
-            };
-            *tonemapping = Tonemapping::GranTurismo7;
-            // Required for GT7's HDR mode: this is what plumbs the display
-            // target's peak luminance into the operator.
-            commands
-                .entity(camera_entity)
-                .insert(GranTurismo7Params::default());
+        match display_target.transfer {
+            DisplayTransfer::Srgb => {
+                **display_target = DisplayTarget {
+                    paper_white_nits: 200.0,
+                    peak_luminance_nits: 1000.0,
+                    transfer: DisplayTransfer::ScRgbLinear,
+                    ..DisplayTarget::SDR_SRGB
+                };
+                *tonemapping = Tonemapping::GranTurismo7;
+                // Required for GT7's HDR mode: this is what plumbs the
+                // display target's peak luminance into the operator.
+                commands
+                    .entity(camera_entity)
+                    .insert(GranTurismo7Params::default());
+            }
+            DisplayTransfer::ScRgbLinear => {
+                // PQ is canonically Rec.2020; set the gamut to match (the
+                // encoder coerces PQ targets to a Rec.2020 encode anyway).
+                display_target.transfer = DisplayTransfer::Pq;
+                display_target.gamut = DisplayGamut::Rec2020;
+            }
+            _ => {
+                **display_target = DisplayTarget::SDR_SRGB;
+                commands
+                    .entity(camera_entity)
+                    .remove::<GranTurismo7Params>();
+            }
         }
     }
 }
@@ -459,6 +471,7 @@ fn update_color_grading_settings(
 fn update_ui(
     mut text_query: Single<&mut Text, Without<SceneNumber>>,
     settings: Single<(&Tonemapping, &ColorGrading)>,
+    display_target: Single<&DisplayTarget, With<PrimaryWindow>>,
     current_scene: Res<CurrentScene>,
     selected_parameter: Res<SelectedParameter>,
     mut hide_ui: Local<bool>,
@@ -484,7 +497,11 @@ fn update_ui(
 
     let scn = current_scene.0;
     text.push_str("(H) Hide UI\n");
-    text.push_str("(O) Toggle scRGB HDR output (requires an HDR-capable display)\n\n");
+    text.push_str(&format!(
+        "(O) Cycle HDR output: sRGB -> scRGB -> PQ/HDR10 (requested: {:?}; requires an \
+        HDR-capable display, falls back with a log warning)\n\n",
+        display_target.transfer
+    ));
     text.push_str("Test Scene: \n");
     text.push_str(&format!(
         "(Q) {} Basic Scene\n",

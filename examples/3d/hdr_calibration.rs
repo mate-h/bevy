@@ -5,11 +5,14 @@
 //! window's [`DisplayTarget`] live while looking at them, exactly the flow an
 //! in-game "HDR settings" screen would implement.
 //!
-//! **An HDR display is required to calibrate anything real.** HDR output is
-//! currently reachable on macOS/iOS (Metal), Windows (Vulkan), and Linux
-//! (Wayland + Vulkan, Mesa 25.1+). On SDR displays (or unsupported backends)
-//! the scRGB request is downgraded to plain SDR with a warning in the log —
-//! the example still runs, but everything brighter than paper white clips.
+//! **An HDR display is required to calibrate anything real.** scRGB-linear
+//! output is currently reachable on macOS/iOS (Metal), Windows (Vulkan/DX12),
+//! and Linux (Wayland + Vulkan, Mesa 25.1+); PQ (HDR10) output on
+//! Vulkan/DX12/Metal when the OS has HDR output enabled (press `T` to cycle
+//! the requested transfer). On SDR displays (or unsupported backends) the
+//! HDR request is downgraded — PQ falls back to scRGB, then to plain SDR —
+//! with a warning in the log; the example still runs, but everything
+//! brighter than paper white clips on the SDR fallback.
 //!
 //! The calibration camera uses [`Tonemapping::None`] so the patterns reach
 //! the display encoder at their exact authored values: a tone-mapping
@@ -342,18 +345,19 @@ fn adjust_display_target(
     }
 }
 
-/// Toggles the requested transfer between sRGB and scRGB-linear. The surface
-/// is renegotiated the same frame; if the backend cannot provide an
-/// `Rgba16Float` swapchain the request resolves back to plain SDR with a
-/// one-time warning in the log.
+/// Cycles the requested transfer: sRGB → scRGB-linear → PQ (HDR10) → sRGB.
+/// The surface is renegotiated the same frame; if the backend cannot provide
+/// the matching color space the request degrades (PQ → scRGB → plain SDR)
+/// with a one-time warning in the log for each step.
 fn toggle_transfer(
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
 ) {
     if keys.just_pressed(KeyCode::KeyT) {
         display_target.transfer = match display_target.transfer {
-            DisplayTransfer::ScRgbLinear => DisplayTransfer::Srgb,
-            _ => DisplayTransfer::ScRgbLinear,
+            DisplayTransfer::Srgb => DisplayTransfer::ScRgbLinear,
+            DisplayTransfer::ScRgbLinear => DisplayTransfer::Pq,
+            _ => DisplayTransfer::Srgb,
         };
     }
 }
@@ -482,7 +486,7 @@ fn update_ui(
         display_target.min_luminance_nits
     ));
     ui.push_str(&format!(
-        "  transfer (requested): {:?}  (T toggles, R resets)\n",
+        "  transfer (requested): {:?}  (T cycles sRGB -> scRGB -> PQ, R resets)\n",
         display_target.transfer
     ));
     // The *resolved* transfer (post surface negotiation) currently lives only

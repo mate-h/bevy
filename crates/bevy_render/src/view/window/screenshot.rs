@@ -33,7 +33,7 @@ use bevy_reflect::Reflect;
 use bevy_shader::Shader;
 use bevy_tasks::AsyncComputeTaskPool;
 use bevy_utils::default;
-use bevy_window::{PrimaryWindow, WindowRef};
+use bevy_window::{DisplayTransfer, PrimaryWindow, WindowRef};
 use core::ops::Deref;
 use std::{
     path::Path,
@@ -116,6 +116,12 @@ struct ScreenshotPreparedState {
     pub bind_group: BindGroup,
     pub pipeline_id: CachedRenderPipelineId,
     pub size: Extent3d,
+    /// True when the captured texture holds a PQ-encoded (SMPTE ST 2084)
+    /// signal — a window surface negotiated in the HDR10 color space. The
+    /// readback is then decoded through the PQ EOTF to display-linear values
+    /// before the image is handed to the main world (see
+    /// [`decode_pq_screenshot`]).
+    pub pq_encoded: bool,
 }
 
 #[derive(Resource, Deref, DerefMut)]
@@ -132,14 +138,18 @@ struct RenderScreenshotsSender(Sender<(Entity, Image)>);
 
 /// Saves the captured screenshot to disk at the provided path.
 ///
-/// Screenshots of HDR surfaces (e.g. the `Rgba16Float` scRGB-linear swapchain
-/// negotiated for `DisplayTransfer::ScRgbLinear`) decode to floating-point
-/// images. They are written losslessly when the path's container supports
-/// floating point (`OpenEXR` `.exr`, Radiance `.hdr` — note these require the
-/// corresponding `image` crate codec to be enabled, e.g. Bevy's `exr`
-/// feature); for 8-bit containers such as PNG the display-linear signal is
-/// clamped to `[0, 1]` (clipping everything above the 80-nit scRGB reference
-/// white), sRGB-encoded, and quantized, with a warning.
+/// Screenshots of HDR surfaces decode to floating-point images holding
+/// display-linear values at the scRGB scale (`1.0` = 80 nits): `Rgba16Float`
+/// scRGB-linear swapchains (`DisplayTransfer::ScRgbLinear`) are read back
+/// as-is (their signal is already linear at that scale), and HDR10 swapchains
+/// (`DisplayTransfer::Pq`) are decoded from the PQ signal through the PQ EOTF
+/// to the same scale (see `decode_pq_screenshot`). They are written
+/// losslessly when the path's container supports floating point (`OpenEXR`
+/// `.exr`, Radiance `.hdr` — note these require the corresponding `image`
+/// crate codec to be enabled, e.g. Bevy's `exr` feature); for 8-bit
+/// containers such as PNG the display-linear signal is clamped to `[0, 1]`
+/// (clipping everything above the 80-nit scRGB reference white),
+/// sRGB-encoded, and quantized, with a warning.
 pub fn save_to_disk(path: impl AsRef<Path>) -> impl FnMut(On<ScreenshotCaptured>) {
     let path = path.as_ref().to_owned();
     move |screenshot_captured| {
@@ -339,7 +349,7 @@ fn prepare_screenshots(
                     height: surface_data.configuration.height,
                     ..default()
                 };
-                let (texture_view, state) = prepare_screenshot_state(
+                let (texture_view, mut state) = prepare_screenshot_state(
                     size,
                     view_format,
                     &render_device,
@@ -347,6 +357,10 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
+                // HDR10 surfaces hold a PQ-encoded signal (the display
+                // encoder's PQ OETF output); flag it so the readback is
+                // decoded back to display-linear values.
+                state.pq_encoded = surface_data.resolved_transfer == DisplayTransfer::Pq;
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
@@ -446,6 +460,7 @@ fn prepare_screenshot_state(
             bind_group,
             pipeline_id,
             size,
+            pq_encoded: false,
         },
     )
 }
@@ -691,6 +706,7 @@ pub(crate) fn collect_screenshots(world: &mut World) {
         let Ok(pixel_size) = texture_format.pixel_size() else {
             continue;
         };
+        let pq_encoded = prepared.pq_encoded;
         let buffer = prepared.buffer.clone();
 
         let finish = async move {
@@ -704,7 +720,9 @@ pub(crate) fn collect_screenshots(world: &mut World) {
                 tx.try_send(()).unwrap();
             });
             rx.recv().await.unwrap();
-            let data = buffer_slice.get_mapped_range();
+            let data = buffer_slice
+                .get_mapped_range()
+                .expect("screenshot buffer should be mapped");
             // we immediately move the data to CPU memory to avoid holding the mapped view for long
             let mut result = Vec::from(&*data);
             drop(data);
@@ -726,6 +744,12 @@ pub(crate) fn collect_screenshots(world: &mut World) {
                 result.truncate(initial_row_bytes * height as usize);
             }
 
+            let (result, texture_format) = if pq_encoded {
+                decode_pq_screenshot(result, texture_format)
+            } else {
+                (result, texture_format)
+            };
+
             if let Err(e) = sender.send((
                 entity,
                 Image::new(
@@ -745,5 +769,179 @@ pub(crate) fn collect_screenshots(world: &mut World) {
         };
 
         AsyncComputeTaskPool::get().spawn(finish).detach();
+    }
+}
+
+/// Decodes a PQ-encoded (HDR10) screenshot readback into display-linear
+/// `Rgba32Float` data.
+///
+/// HDR10 swapchains hold the PQ *signal* (the display encoder's SMPTE ST 2084
+/// OETF output, `1.0` = 10000 nits); saved as-is, the values would be
+/// mislabeled as linear. Each color channel is decoded through the PQ EOTF
+/// ([`crate::transfer_functions::pq_eotf`]) to absolute luminance and stored
+/// linearly at the **same scale scRGB screenshots use: `1.0` = 80 nits** (the
+/// scRGB reference white), so `.exr` output keeps the full range with one
+/// consistent scale across both HDR surface kinds, and [`save_to_disk`]'s
+/// 8-bit fallback clips at the same reference white for both. Alpha is
+/// decoded to its plain normalized value.
+///
+/// Handles the two formats HDR10 surfaces negotiate: `Rgb10a2Unorm` (10-bit
+/// PQ channels + 2-bit alpha) and `Rgba16Float` (PQ signal in half floats).
+/// Any other format is passed through unchanged with a warning.
+fn decode_pq_screenshot(data: Vec<u8>, format: TextureFormat) -> (Vec<u8>, TextureFormat) {
+    use crate::transfer_functions::pq_eotf;
+    /// `PQ_MAX_LUMINANCE_NITS` (10000, what PQ signal 1.0 decodes to) over
+    /// the 80-nit scRGB reference white (what stored value 1.0 represents).
+    const NITS_SCALE: f32 = 10000.0 / 80.0;
+
+    let decoded: Vec<f32> = match format {
+        TextureFormat::Rgb10a2Unorm => data
+            .chunks_exact(4)
+            .flat_map(|texel| {
+                let packed = u32::from_le_bytes(texel.try_into().unwrap());
+                // WebGPU packing: red in the least significant bits.
+                let channel =
+                    |shift: u32| pq_eotf(((packed >> shift) & 0x3ff) as f32 / 1023.0) * NITS_SCALE;
+                [
+                    channel(0),
+                    channel(10),
+                    channel(20),
+                    (packed >> 30) as f32 / 3.0,
+                ]
+            })
+            .collect(),
+        TextureFormat::Rgba16Float => data
+            .chunks_exact(8)
+            .flat_map(|texel| {
+                let channel = |i: usize| {
+                    f16_bits_to_f32(u16::from_le_bytes([texel[2 * i], texel[2 * i + 1]]))
+                };
+                [
+                    pq_eotf(channel(0)) * NITS_SCALE,
+                    pq_eotf(channel(1)) * NITS_SCALE,
+                    pq_eotf(channel(2)) * NITS_SCALE,
+                    channel(3),
+                ]
+            })
+            .collect(),
+        other => {
+            warn!(
+                "PQ-encoded screenshot readback in unexpected format {other:?}; \
+                saving the raw encoded signal values."
+            );
+            return (data, format);
+        }
+    };
+    (
+        decoded
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
+        TextureFormat::Rgba32Float,
+    )
+}
+
+/// Converts IEEE 754 binary16 bits to an `f32`.
+///
+/// `bevy_render` has no `half` dependency, and the PQ screenshot decode is
+/// the only place it would be needed, so this is a minimal local conversion
+/// (handles normals, subnormals, zeros, infinities, and NaN).
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = u32::from(bits >> 15) << 31;
+    let exponent = u32::from(bits >> 10) & 0x1f;
+    let mantissa = u32::from(bits) & 0x3ff;
+    let bits32 = match (exponent, mantissa) {
+        // Signed zero.
+        (0, 0) => sign,
+        // Subnormal (value = mantissa × 2⁻²⁴): renormalize into the f32
+        // exponent range around the mantissa's highest set bit `p`.
+        (0, _) => {
+            let p = 31 - mantissa.leading_zeros();
+            let exponent = 103 + p; // 127 + p - 24
+            let mantissa = (mantissa << (23 - p)) & 0x007f_ffff;
+            sign | (exponent << 23) | mantissa
+        }
+        // Infinity / NaN.
+        (0x1f, _) => sign | 0x7f80_0000 | (mantissa << 13),
+        // Normal.
+        _ => sign | ((exponent + 127 - 15) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(bits32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transfer_functions::{pq_eotf, pq_inverse_eotf_from_nits};
+
+    #[test]
+    fn f16_conversion_matches_known_values() {
+        assert_eq!(f16_bits_to_f32(0x0000), 0.0);
+        assert!(f16_bits_to_f32(0x8000) == 0.0 && f16_bits_to_f32(0x8000).is_sign_negative());
+        assert_eq!(f16_bits_to_f32(0x3c00), 1.0);
+        assert_eq!(f16_bits_to_f32(0xbc00), -1.0);
+        assert_eq!(f16_bits_to_f32(0x3800), 0.5);
+        assert_eq!(f16_bits_to_f32(0x3555), 0.333_251_95); // closest f16 to 1/3
+        assert_eq!(f16_bits_to_f32(0x7bff), 65504.0); // f16::MAX
+        assert_eq!(f16_bits_to_f32(0x0001), 5.960_464_5e-8); // smallest subnormal
+        assert_eq!(f16_bits_to_f32(0x03ff), 6.097_555e-5); // largest subnormal
+        assert_eq!(f16_bits_to_f32(0x7c00), f32::INFINITY);
+        assert_eq!(f16_bits_to_f32(0xfc00), f32::NEG_INFINITY);
+        assert!(f16_bits_to_f32(0x7e00).is_nan());
+    }
+
+    #[test]
+    fn pq_decode_rgb10a2() {
+        // A 100-nit gray texel: PQ signal for 100 nits, quantized to 10 bits,
+        // with opaque alpha.
+        let signal = pq_inverse_eotf_from_nits(100.0);
+        let quantized = (signal * 1023.0).round() as u32;
+        let packed: u32 = quantized | (quantized << 10) | (quantized << 20) | (3 << 30);
+        let (decoded, format) =
+            decode_pq_screenshot(packed.to_le_bytes().to_vec(), TextureFormat::Rgb10a2Unorm);
+        assert_eq!(format, TextureFormat::Rgba32Float);
+        let values: Vec<f32> = decoded
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // Stored scale: 1.0 = 80 nits, so 100 nits ≈ 1.25 (within 10-bit
+        // quantization error).
+        for channel in &values[0..3] {
+            assert!(
+                (channel - 1.25).abs() < 0.01,
+                "expected ≈1.25, got {channel}"
+            );
+        }
+        assert_eq!(values[3], 1.0);
+        // Exactness: the decode must be exactly the EOTF of the quantized
+        // signal, no extra processing.
+        assert_eq!(values[0], pq_eotf(quantized as f32 / 1023.0) * 125.0);
+    }
+
+    #[test]
+    fn pq_decode_rgba16float() {
+        // PQ signal 0.5079… (f16 0x3810 ≈ 0.5078) decodes to ≈ 92 nits; use
+        // exact f16 values to keep the assertion strict.
+        let half_one = 0x3c00u16; // 1.0 → 10000 nits → 125.0 at 80-nit scale
+        let half_zero = 0x0000u16;
+        let texel: Vec<u8> = [half_one, half_zero, half_one, half_one]
+            .iter()
+            .flat_map(|bits| bits.to_le_bytes())
+            .collect();
+        let (decoded, format) = decode_pq_screenshot(texel, TextureFormat::Rgba16Float);
+        assert_eq!(format, TextureFormat::Rgba32Float);
+        let values: Vec<f32> = decoded
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![125.0, 0.0, 125.0, 1.0]);
+    }
+
+    #[test]
+    fn pq_decode_passes_unexpected_formats_through() {
+        let data = vec![0u8, 1, 2, 3];
+        let (out, format) = decode_pq_screenshot(data.clone(), TextureFormat::Rgba8Unorm);
+        assert_eq!(out, data);
+        assert_eq!(format, TextureFormat::Rgba8Unorm);
     }
 }

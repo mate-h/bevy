@@ -83,9 +83,13 @@ pub struct ViewDisplayTarget {
     /// Equal to [`requested`](Self::requested) when the surface fulfils the
     /// requested transfer (or the target is not a window surface, where the
     /// user owns the texture format). When the requested transfer had to be
-    /// downgraded (see `select_surface_format` in `view::window`), this is
-    /// [`DisplayTarget::SDR_SRGB`], so the downgraded view takes the plain
-    /// SDR path bit-for-bit.
+    /// downgraded (see `negotiate_surface_format` in `view::window`), this
+    /// is [`DisplayTarget::SDR_SRGB`] for a full SDR downgrade (so the
+    /// downgraded view takes the plain SDR path bit-for-bit), or the
+    /// requested target with only the transfer replaced when the surface
+    /// carries a *different HDR* transfer (PQ downgraded to scRGB-linear, or
+    /// HLG fulfilled as PQ/HDR10) — the user's calibration still applies.
+    /// See `resolve_window_display_target` in this module.
     pub resolved: DisplayTarget,
 }
 
@@ -258,6 +262,46 @@ pub struct ViewDisplayTargetUniformOffset {
     pub offset: u32,
 }
 
+/// Resolves a window view's display target from the transfer the configured
+/// surface actually carries
+/// ([`ExtractedWindow::resolved_transfer`](super::window::ExtractedWindow::resolved_transfer)).
+///
+/// - `Some(`[`DisplayTransfer::Srgb`]`)` while an HDR transfer was requested
+///   (a full SDR downgrade): the **whole** target degrades to
+///   [`DisplayTarget::SDR_SRGB`], not just the transfer field, so the view
+///   takes the plain SDR path bit-for-bit (D6: warn + degrade; the warning
+///   is emitted at negotiation time in `create_surfaces`).
+/// - `Some(transfer)` differing from the requested transfer while both are
+///   HDR (the negotiation fulfilled the request with a different HDR
+///   encoding: PQ downgraded to scRGB-linear when HDR10 is unavailable, or
+///   HLG fulfilled as PQ/HDR10): the user's calibration (paper white, peak,
+///   gamut) is kept and only the transfer is replaced, so the encoder keys
+///   on what the surface actually carries.
+/// - Equal transfers, `None` (surface not configured yet — transient), or a
+///   non-window target (`surface_transfer` = `None`): resolved == requested.
+pub(crate) fn resolve_window_display_target(
+    requested: DisplayTarget,
+    surface_transfer: Option<DisplayTransfer>,
+) -> DisplayTarget {
+    match surface_transfer {
+        // The surface negotiation downgraded the request all the way to SDR:
+        // degrade the whole target to the plain SDR default so the view
+        // takes the SDR path bit-for-bit.
+        Some(DisplayTransfer::Srgb) if requested.transfer != DisplayTransfer::Srgb => {
+            DisplayTarget::SDR_SRGB
+        }
+        // The surface carries a different transfer than requested: keep the
+        // calibration, swap the transfer.
+        Some(transfer) if transfer != requested.transfer => DisplayTarget {
+            transfer,
+            ..requested
+        },
+        // Surface fulfils the request, the target is not a window, or the
+        // surface is not configured yet (transient): no change.
+        _ => requested,
+    }
+}
+
 /// Resolves and inserts a [`ViewDisplayTarget`] on every extracted view that
 /// has an [`ExtractedCamera`].
 ///
@@ -267,13 +311,9 @@ pub struct ViewDisplayTargetUniformOffset {
 /// preparation) can rely on the component being present.
 ///
 /// Resolution policy:
-/// - **Window targets** go through surface negotiation: when the surface
-///   reports it cannot carry the requested transfer
-///   ([`ExtractedWindow::resolved_transfer`](super::window::ExtractedWindow::resolved_transfer)
-///   is [`DisplayTransfer::Srgb`] while an HDR transfer was requested), the
-///   resolved target degrades to [`DisplayTarget::SDR_SRGB`] (D6: warn +
-///   degrade; the warning is emitted at format-selection time in
-///   `create_surfaces`). Otherwise resolved == requested.
+/// - **Window targets** go through surface negotiation; see
+///   `resolve_window_display_target` (this module) for how the surface's
+///   resolved transfer maps onto the requested target.
 /// - **Image / manual-texture-view targets** resolve to the requested value
 ///   unchanged: there is no surface negotiation, the user owns the texture
 ///   and its format.
@@ -296,17 +336,7 @@ pub fn prepare_view_display_targets(
                 .and_then(|window| window.resolved_transfer),
             _ => None,
         };
-        let resolved = match surface_transfer {
-            // The surface negotiation downgraded the requested transfer:
-            // degrade the whole target to the plain SDR default so the view
-            // takes the SDR path bit-for-bit.
-            Some(DisplayTransfer::Srgb) if requested.transfer != DisplayTransfer::Srgb => {
-                DisplayTarget::SDR_SRGB
-            }
-            // Surface fulfils the request, the target is not a window, or
-            // the surface is not configured yet (transient): no downgrade.
-            _ => requested,
-        };
+        let resolved = resolve_window_display_target(requested, surface_transfer);
 
         commands.entity(entity).insert(ViewDisplayTarget {
             requested,
@@ -439,6 +469,67 @@ mod tests {
             assert!(!hdr.is_plain_sdr_srgb());
             assert!(hdr.is_hdr_transfer());
         }
+    }
+
+    #[test]
+    fn window_target_resolution_policy() {
+        let requested = DisplayTarget {
+            paper_white_nits: 200.0,
+            peak_luminance_nits: 1000.0,
+            gamut: DisplayGamut::Rec2020,
+            transfer: DisplayTransfer::Pq,
+            ..DisplayTarget::SDR_SRGB
+        };
+
+        // Fulfilled, unconfigured (transient), and non-window targets: the
+        // requested value passes through unchanged.
+        assert_eq!(
+            resolve_window_display_target(requested, Some(DisplayTransfer::Pq)),
+            requested
+        );
+        assert_eq!(resolve_window_display_target(requested, None), requested);
+
+        // Full SDR downgrade: the WHOLE target degrades to SDR_SRGB.
+        assert_eq!(
+            resolve_window_display_target(requested, Some(DisplayTransfer::Srgb)),
+            DisplayTarget::SDR_SRGB
+        );
+
+        // Cross-HDR downgrade (PQ fell back to scRGB-linear): the user's
+        // calibration is kept and only the transfer is replaced.
+        assert_eq!(
+            resolve_window_display_target(requested, Some(DisplayTransfer::ScRgbLinear)),
+            DisplayTarget {
+                transfer: DisplayTransfer::ScRgbLinear,
+                ..requested
+            }
+        );
+
+        // HLG fulfilled as PQ/HDR10.
+        let hlg_requested = DisplayTarget {
+            transfer: DisplayTransfer::Hlg,
+            ..requested
+        };
+        assert_eq!(
+            resolve_window_display_target(hlg_requested, Some(DisplayTransfer::Pq)),
+            DisplayTarget {
+                transfer: DisplayTransfer::Pq,
+                ..hlg_requested
+            }
+        );
+
+        // An SDR request is never "upgraded" silently except by the
+        // defensive empty-capability arm of the negotiation, in which case
+        // the resolved transfer must still flow through so the encoder
+        // matches the surface.
+        let sdr = DisplayTarget::SDR_SRGB;
+        assert_eq!(
+            resolve_window_display_target(sdr, Some(DisplayTransfer::Pq)),
+            DisplayTarget {
+                transfer: DisplayTransfer::Pq,
+                ..sdr
+            }
+        );
     }
 
     #[test]

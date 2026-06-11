@@ -108,11 +108,13 @@ pub fn pq_eotf(signal: f32) -> f32 {
 /// The HLG OETF (ITU-R BT.2100-2 Table 5): scene-linear `E ∈ [0, 1]` →
 /// signal in `[0, 1]`. Negative inputs are clamped to zero.
 ///
-/// HLG is **scene-referred** (the display applies the OOTF) and no wgpu
-/// surface can negotiate HLG today: the function is implemented and tested
-/// for completeness but is unreachable from the display-encoding pass, which
-/// coerces [`DisplayTransfer::Hlg`](bevy_window::DisplayTransfer::Hlg)
-/// targets to PQ.
+/// HLG is **scene-referred** (the display applies the OOTF), so Bevy never
+/// encodes its display-referred tone-mapped output with it: surface
+/// negotiation fulfils [`DisplayTransfer::Hlg`](bevy_window::DisplayTransfer::Hlg)
+/// requests as PQ/HDR10, and the display-encoding pass coerces any remaining
+/// resolved HLG target (manual render targets) to PQ. The function is
+/// implemented and tested for completeness but is unreachable from the
+/// display-encoding pass.
 pub fn hlg_oetf(e: f32) -> f32 {
     let e = e.max(0.0);
     if e <= 1.0 / 12.0 {

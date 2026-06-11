@@ -17,15 +17,37 @@ enable wgpu_ray_query;
 var<workgroup> w1: array<u32, 1024u>;
 var<workgroup> w2: array<u32, 1024u>;
 
+// `world_cache_life` is bound as a plain `array<u32>` in the pipelines that
+// set WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER and as `array<atomic<u32>>`
+// otherwise. naga no longer permits direct (non-built-in) access to atomics,
+// so these helpers pick the correct access form for either binding type;
+// without them the module fails to parse for pipelines that leave the def
+// unset (the unused entry points still get parsed).
+fn load_life(index: u32) -> u32 {
+#ifdef WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER
+    return world_cache_life[index];
+#else
+    return atomicLoad(&world_cache_life[index]);
+#endif
+}
+
+fn store_life(index: u32, life: u32) {
+#ifdef WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER
+    world_cache_life[index] = life;
+#else
+    atomicStore(&world_cache_life[index], life);
+#endif
+}
+
 @compute @workgroup_size(1024, 1, 1)
 fn decay_world_cache(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    var life = world_cache_life[global_id.x];
+    var life = load_life(global_id.x);
     if life > 0u {
         life -= 1u;
-        world_cache_life[global_id.x] = life;
+        store_life(global_id.x, life);
 
         if life == 0u {
-            world_cache_checksums[global_id.x] = WORLD_CACHE_EMPTY_CELL;
+            atomicStore(&world_cache_checksums[global_id.x], WORLD_CACHE_EMPTY_CELL);
             world_cache_radiance[global_id.x] = vec4(0.0);
             world_cache_luminance_deltas[global_id.x] = 0.0;
         }
@@ -37,7 +59,7 @@ fn compact_world_cache_single_block(
     @builtin(global_invocation_id) cell_id: vec3<u32>,
     @builtin(local_invocation_index) t: u32,
 ) {
-    if t == 0u { w1[0u] = 0u; } else { w1[t] = u32(world_cache_life[cell_id.x - 1u] != 0u); }; workgroupBarrier();
+    if t == 0u { w1[0u] = 0u; } else { w1[t] = u32(load_life(cell_id.x - 1u) != 0u); }; workgroupBarrier();
     if t < 1u { w2[t] = w1[t]; } else { w2[t] = w1[t] + w1[t - 1u]; } workgroupBarrier();
     if t < 2u { w1[t] = w2[t]; } else { w1[t] = w2[t] + w2[t - 2u]; } workgroupBarrier();
     if t < 4u { w2[t] = w1[t]; } else { w2[t] = w1[t] + w1[t - 4u]; } workgroupBarrier();
@@ -72,7 +94,7 @@ fn compact_world_cache_write_active_cells(
     @builtin(local_invocation_index) thread_index: u32,
 ) {
     let compacted_index = world_cache_a[cell_id.x] + world_cache_b[workgroup_id.x];
-    let cell_active = world_cache_life[cell_id.x] != 0u;
+    let cell_active = load_life(cell_id.x) != 0u;
 
     if cell_active {
         world_cache_active_cell_indices[compacted_index] = cell_id.x;

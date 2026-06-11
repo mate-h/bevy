@@ -9,7 +9,7 @@
 //! `DisplayTarget` is plain data: it carries no renderer types and changing it
 //! never directly mutates GPU state. The renderer reads it during extraction to
 //! parameterize tone mapping, gamut mapping, transfer-function encoding, and
-//! (eventually) surface format selection. The default value,
+//! surface (format, color space) selection. The default value,
 //! [`DisplayTarget::SDR_SRGB`], reproduces Bevy's current SDR behavior exactly.
 
 use bevy_ecs::prelude::Component;
@@ -110,9 +110,10 @@ pub struct DisplayTarget {
     /// The transfer function the signal should be encoded with.
     ///
     /// This is the *requested* transfer. The renderer may be unable to fulfil
-    /// it on the current backend/OS (for example PQ is currently not
-    /// reachable through wgpu); in that case it degrades and warns rather
-    /// than failing. See [`DisplayTransfer`] for per-variant details.
+    /// it on the current backend/OS (for example PQ requires the OS to have
+    /// HDR output enabled and the surface to advertise the HDR10 color
+    /// space); in that case it degrades and warns rather than failing. See
+    /// [`DisplayTransfer`] for per-variant details.
     pub transfer: DisplayTransfer,
 }
 
@@ -264,11 +265,14 @@ pub enum DisplayGamut {
 /// color (already tone-mapped and gamut-mapped) into the non-linear (or
 /// scaled linear) signal values the display expects.
 ///
-/// Note that backend support varies: as of wgpu 29, only [`Srgb`] (all
-/// platforms) and [`ScRgbLinear`] (macOS Metal, Windows Vulkan, Wayland
-/// Vulkan) are reachable through surface formats. [`Pq`] and [`Hlg`] are
-/// defined so APIs and shaders can be written transfer-agnostically, and will
-/// light up when the corresponding wgpu surface support lands.
+/// Note that backend support varies. Through wgpu's surface color-space API
+/// (currently Bevy's wgpu fork, pending upstream under
+/// [wgpu#2920](https://github.com/gfx-rs/wgpu/issues/2920)): [`Srgb`] is
+/// available everywhere; [`ScRgbLinear`] on macOS/iOS (Metal), Windows
+/// (Vulkan/DX12), Wayland (Vulkan), and browser WebGPU on HDR-capable
+/// displays; [`Pq`] (HDR10) on Vulkan, DX12, and Metal when the OS has HDR
+/// output enabled. [`Hlg`] requests are fulfilled as PQ (see the variant
+/// docs). Unfulfillable requests degrade with a warning.
 ///
 /// [`Srgb`]: DisplayTransfer::Srgb
 /// [`ScRgbLinear`]: DisplayTransfer::ScRgbLinear
@@ -307,14 +311,24 @@ pub enum DisplayTransfer {
     ScRgbLinear,
     /// The Perceptual Quantizer (SMPTE ST 2084, ITU-R BT.2100), the absolute
     /// transfer function used by HDR10. Encodes absolute luminance normalized
-    /// to 10000 nits. Canonically paired with [`DisplayGamut::Rec2020`].
+    /// to 10000 nits. Canonically paired with [`DisplayGamut::Rec2020`] (the
+    /// renderer coerces the encode to Rec.2020 — HDR10 *is* Rec.2020).
     ///
-    /// Not currently reachable through wgpu surfaces on any backend.
+    /// Negotiated as an HDR10 swapchain (typically `Rgb10a2Unorm`) where the
+    /// backend and OS advertise it: Vulkan, DX12, and Metal with HDR output
+    /// enabled. When unavailable, the request downgrades to
+    /// [`ScRgbLinear`](Self::ScRgbLinear) if possible, else to SDR sRGB,
+    /// with a warning each step.
     Pq,
     /// Hybrid Log-Gamma (ITU-R BT.2100), the scene-referred HDR transfer
     /// function used in broadcast.
     ///
-    /// Not currently reachable through wgpu surfaces on any backend.
+    /// Requesting HLG is **fulfilled as [`Pq`](Self::Pq) (HDR10)**, never as
+    /// an HLG swapchain: HLG is scene-referred (the display applies the
+    /// OOTF), and the display pipeline's tone-mapped output is
+    /// display-referred — encoding it with the HLG OETF would
+    /// double-tone-map. A correct HLG output path would need a
+    /// scene-referred encoder input, which Bevy does not have.
     Hlg,
 }
 
@@ -326,8 +340,9 @@ impl DisplayTransfer {
     /// This is the single-sourced predicate the display pipeline uses to
     /// decide whether a target takes the HDR path (shader-side transfer
     /// encoding, HDR operator modes) or the plain SDR path (hardware sRGB
-    /// encode). HLG is included for completeness even though it is not
-    /// currently reachable through wgpu surfaces.
+    /// encode). HLG is included even though HLG requests are fulfilled as PQ
+    /// at surface negotiation (see [`Hlg`](Self::Hlg)): an HLG *request* is
+    /// an HDR request.
     pub const fn is_hdr(&self) -> bool {
         matches!(self, Self::ScRgbLinear | Self::Pq | Self::Hlg)
     }
