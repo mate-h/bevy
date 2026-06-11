@@ -6,7 +6,7 @@ use std::f32::consts::PI;
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, Hdr},
-    color::palettes::css::BLACK,
+    color::{palettes::css::BLACK, Hue, LinearRec2020, Oklcha},
     core_pipeline::tonemapping::{GranTurismo7Params, Tonemapping},
     image::{
         ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
@@ -287,12 +287,46 @@ fn setup_terrain_scene(
         Transform::from_scale(Vec3::splat(1000.0)),
     ));
 
+    spawn_hue_sphere_row(&mut commands, &mut meshes, &mut materials);
+
     // spawn_water(
     //     &mut commands,
     //     &asset_server,
     //     &mut meshes,
     //     &mut water_materials,
     // );
+}
+
+/// A row of spheres spanning the hue wheel in front of the car.
+fn spawn_hue_sphere_row(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    const SPHERE_COUNT: usize = 24;
+    const SPHERE_RADIUS: f32 = 0.2;
+    const SPHERE_SPACING: f32 = 0.45;
+
+    let vivid = Hsva::hsv(0.0, 1.0, 1.0);
+    let sphere_mesh = meshes.add(Sphere::new(SPHERE_RADIUS));
+    let row_center = Vec3::new(0.0, SPHERE_RADIUS, 2.5);
+    let row_half_width = (SPHERE_COUNT as f32 - 1.0) * SPHERE_SPACING * 0.5;
+
+    for i in 0..SPHERE_COUNT {
+        let hue = i as f32 * 360.0 / SPHERE_COUNT as f32;
+        let oklcha = vivid.with_hue(hue);
+        commands.spawn((
+            Mesh3d(sphere_mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::from(LinearRec2020::from(oklcha)),
+                perceptual_roughness: 0.3,
+                ..default()
+            })),
+            Transform::from_translation(
+                row_center + Vec3::X * (i as f32 * SPHERE_SPACING - row_half_width),
+            ),
+        ));
+    }
 }
 
 // Spawns the water plane.
