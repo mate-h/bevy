@@ -5596,8 +5596,10 @@ wasm = false
 # In-tree requirements on these crates are relaxed to "29" so the 29.0.0 git
 # versions satisfy them. wgpu-core / wgpu-hal are not listed: nothing in the tree
 # depends on them from crates.io; the patched git `wgpu` pulls them as path deps.
+# Pinned to a rev (Cargo.lock is gitignored, so the resolved commit lives here);
+# bump the rev when the fork branch advances.
 [patch.crates-io]
-wgpu = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
-wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
-wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
-naga = { git = "https://github.com/stuartparmenter/wgpu", branch = "hdr-surface-color-space" }
+wgpu = { git = "https://github.com/stuartparmenter/wgpu", rev = "1fd8b2663b70d37bdbfcb48a50489fae9d437c78" }
+wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", rev = "1fd8b2663b70d37bdbfcb48a50489fae9d437c78" }
+wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", rev = "1fd8b2663b70d37bdbfcb48a50489fae9d437c78" }
+naga = { git = "https://github.com/stuartparmenter/wgpu", rev = "1fd8b2663b70d37bdbfcb48a50489fae9d437c78" }
