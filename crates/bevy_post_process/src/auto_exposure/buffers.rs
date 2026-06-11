@@ -179,6 +179,27 @@ pub(super) fn prepare_buffers(
                 let value = entry.get_mut();
                 value.settings.set(uniform);
                 value.settings.write_buffer(&device, &queue);
+
+                // Without an `AutoExposure` component both adaptation speeds
+                // are zero, so the shader can never move the exposure off
+                // whatever value a previously present `AutoExposure` had
+                // adapted to — applying that stale correction forever. Reset
+                // the exposure (and the long-term envelope) to the neutral
+                // initial value with a partial write that leaves the adapted
+                // white-balance chromaticity untouched, keeping auto white
+                // balance continuous.
+                if settings.is_none() {
+                    let neutral = initial_state(None);
+                    let state = value.state.get_mut();
+                    state.exposure = neutral.exposure;
+                    state.long_term = neutral.long_term;
+                    if let Some(buffer) = value.state.buffer() {
+                        let mut bytes = [0u8; 8];
+                        bytes[..4].copy_from_slice(&neutral.exposure.to_le_bytes());
+                        bytes[4..].copy_from_slice(&neutral.long_term.to_le_bytes());
+                        queue.write_buffer(buffer, 0, &bytes);
+                    }
+                }
             }
             Entry::Vacant(entry) => {
                 let value = entry.insert(AutoExposureBuffer {
