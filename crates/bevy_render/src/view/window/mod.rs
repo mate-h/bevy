@@ -4,7 +4,7 @@ use crate::renderer::WgpuWrapper;
 use crate::{
     render_resource::{SurfaceTexture, TextureView},
     renderer::{RenderAdapter, RenderDevice, RenderInstance},
-    Extract, ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
+    Extract, ExtractSchedule, GpuResourceAppExt, MainWorld, Render, RenderApp, RenderSystems,
 };
 use bevy_app::{App, Plugin};
 use bevy_ecs::entity::EntityHashSet;
@@ -13,7 +13,7 @@ use bevy_log::{debug, info, warn, warn_once};
 use bevy_utils::default;
 use bevy_window::{
     CompositeAlphaMode, DisplayTarget, DisplayTransfer, PresentMode, PrimaryWindow,
-    RawHandleWrapper, Window, WindowClosing,
+    RawHandleWrapper, Window, WindowClosing, WindowResolvedTransfer,
 };
 use core::{
     num::NonZero,
@@ -45,7 +45,13 @@ impl Plugin for WindowRenderPlugin {
                 .init_resource::<ManualDisplayTargets>()
                 .init_gpu_resource::<ExtractedWindows>()
                 .init_gpu_resource::<WindowSurfaces>()
-                .add_systems(ExtractSchedule, extract_windows.before(extract_cameras))
+                .add_systems(
+                    ExtractSchedule,
+                    (
+                        extract_windows.before(extract_cameras),
+                        write_back_resolved_transfers.after(extract_windows),
+                    ),
+                )
                 .add_systems(
                     Render,
                     create_surfaces
@@ -286,6 +292,31 @@ fn extract_windows(
     for removed_window in removed.read() {
         extracted_windows.remove(&removed_window);
         window_surfaces.remove(&removed_window);
+    }
+}
+
+/// Mirrors each window surface's negotiated transfer back to the main world
+/// as a [`WindowResolvedTransfer`] component, so apps can detect downgraded
+/// (or later-renegotiated) HDR requests. Runs during extraction — the render
+/// world's only window into the main world — so the value lags the
+/// negotiation it reports by one frame.
+fn write_back_resolved_transfers(
+    mut main_world: ResMut<MainWorld>,
+    window_surfaces: Res<WindowSurfaces>,
+) {
+    for (&entity, surface_data) in window_surfaces.surfaces.iter() {
+        let Ok(mut window) = main_world.get_entity_mut(entity) else {
+            continue;
+        };
+        // Insert only on change, so `Changed<WindowResolvedTransfer>` stays
+        // a usable signal.
+        if window
+            .get::<WindowResolvedTransfer>()
+            .map(|resolved| resolved.0)
+            != Some(surface_data.resolved_transfer)
+        {
+            window.insert(WindowResolvedTransfer(surface_data.resolved_transfer));
+        }
     }
 }
 

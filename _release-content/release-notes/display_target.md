@@ -23,7 +23,10 @@ display output (scRGB-linear)" release note for the end-to-end path).
 In the render world, every camera view resolves its target's calibration into
 a `ViewDisplayTarget` component (carrying both the `requested` calibration
 and the `resolved` one after surface negotiation — see the scRGB HDR output
-release note), and a per-view `DisplayTargetUniform`
+release note). The negotiated transfer is also mirrored back to the main
+world as a read-only `WindowResolvedTransfer` component on the window, so
+apps can detect a downgraded HDR request (it lags negotiation by one frame).
+A per-view `DisplayTargetUniform`
 (luminance values plus gamut/transfer indices, importable in WGSL as
 `bevy_render::display_target`) is prepared each frame. The tonemapping pass
 binds it only for views whose display target differs from the SDR default (or

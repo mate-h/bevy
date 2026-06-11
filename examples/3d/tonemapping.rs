@@ -355,8 +355,8 @@ fn toggle_tonemapping_method(
 /// macOS/iOS (Metal), Windows (Vulkan/DX12), or Wayland (Vulkan); PQ (HDR10)
 /// on Vulkan/DX12/Metal with the OS HDR setting enabled. The UI shows the
 /// *requested* transfer; if the surface cannot carry it, Bevy logs a warning
-/// and degrades (PQ falls back to scRGB, then to plain SDR) — the main world
-/// cannot read the resolved outcome back yet.
+/// and degrades (PQ falls back to scRGB, then to plain SDR) — read the
+/// `WindowResolvedTransfer` component on the window to see the outcome.
 fn toggle_hdr_output(
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,

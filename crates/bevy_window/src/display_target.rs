@@ -348,6 +348,34 @@ impl DisplayTransfer {
     }
 }
 
+/// The [`DisplayTransfer`] a window's surface actually negotiated, written
+/// back by the renderer.
+///
+/// [`DisplayTarget::transfer`] is the *request*; surface negotiation can
+/// downgrade it (PQ → scRGB → plain sRGB, with a warning) when the backend
+/// or OS cannot fulfil it. This component reflects the outcome, so apps can
+/// adapt to the actual output mode — for example, skip an HDR calibration
+/// flow or switch UI assets when an HDR request resolved to SDR.
+///
+/// The renderer inserts and updates this on window entities once their
+/// surface is configured; the value lags the negotiation by one frame, and
+/// updates again if the surface is later renegotiated. Treat it as
+/// read-only: writing it has no effect on the surface. It is absent until
+/// the window's first surface configuration (and on windows that never get
+/// a surface, e.g. headless).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "bevy_reflect",
+    derive(Reflect),
+    reflect(Component, Debug, PartialEq, Clone)
+)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(feature = "serialize", feature = "bevy_reflect"),
+    reflect(Serialize, Deserialize)
+)]
+pub struct WindowResolvedTransfer(pub DisplayTransfer);
+
 #[cfg(test)]
 mod tests {
     use super::*;
