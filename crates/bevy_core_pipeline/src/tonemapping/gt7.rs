@@ -107,16 +107,18 @@ pub const REC_2020_TO_REC_709: [[f32; 3]; 3] = [
 /// for the unit contract).
 ///
 /// Add this component to a camera that uses [`Tonemapping::GranTurismo7`] to
-/// customize the operator. When this component is present (and the camera's
-/// tonemapping is `GranTurismo7`), [`prepare_gt7_params_uniforms`] validates
-/// the values with [`Self::sanitized`] each frame and uploads a
-/// [`Gt7ParamsUniform`] that replaces the shader's baked defaults. Cameras
-/// **without** this component keep using the baked SDR defaults, exactly as
-/// before.
+/// customize the operator. Whenever the view's tonemapping pipeline binds the
+/// prepared parameters (`gt7_params_uniform_active` in the parent module:
+/// when this component is present, and always on HDR-transfer targets),
+/// [`prepare_gt7_params_uniforms`] validates the values with
+/// [`Self::sanitized`] each frame and uploads a [`Gt7ParamsUniform`] that
+/// replaces the shader's baked defaults — falling back to [`Self::default`]
+/// for cameras without the component. Cameras **without** this component on
+/// SDR targets keep using the baked SDR defaults, exactly as before.
 ///
-/// The component also selects the operator's mode: on a view whose resolved
-/// [`DisplayTarget`] requests an HDR transfer, the uniform is computed in HDR
-/// mode (peak taken from
+/// The operator's mode follows the view's resolved [`DisplayTarget`], with
+/// or without this component: on a target that requests an HDR transfer, the
+/// uniform is computed in HDR mode (peak taken from
 /// [`DisplayTarget::peak_luminance_nits`]); otherwise in
 /// SDR mode. See [`Gt7ParamsUniform::new`] for the exact rules.
 ///
@@ -865,9 +867,10 @@ impl Default for Gt7ParamsUniforms {
 /// *effective* operator (after the D6 SDR-only-operator substitution, see
 /// `effective_tonemapping` in the parent module) is
 /// [`Tonemapping::GranTurismo7`] and that either has an extracted
-/// [`GranTurismo7Params`] or was substituted — exactly the views whose
-/// tonemapping pipeline is specialized with the `GT7_PARAMS_UNIFORM` shader
-/// def (`gt7_params_uniform_active` is the shared predicate).
+/// [`GranTurismo7Params`] or renders to an HDR-transfer target — exactly the
+/// views whose tonemapping pipeline is specialized with the
+/// `GT7_PARAMS_UNIFORM` shader def (`gt7_params_uniform_active` is the
+/// shared predicate).
 #[derive(Component)]
 pub struct ViewGt7ParamsUniformOffset {
     /// The dynamic offset to pass to `set_bind_group`.
@@ -882,15 +885,16 @@ pub struct ViewGt7ParamsUniformOffset {
 ///   [`GranTurismo7Params`] component — validating the parameters and
 ///   selecting SDR/HDR mode from the view's resolved [`ViewDisplayTarget`]
 ///   (see [`Gt7ParamsUniform::new`]);
-/// * views whose SDR-only operator was substituted with GT7 by the D6 table
+/// * views on an HDR-transfer target whose effective operator is GT7 —
+///   authored GT7 as well as SDR-only operators substituted by the D6 table
 ///   (`effective_tonemapping`) — using the camera's [`GranTurismo7Params`]
-///   if present and [`GranTurismo7Params::default`] otherwise, so the
-///   substitute runs in HDR mode driven by the display target's peak
-///   luminance instead of the shader's baked SDR defaults.
+///   if present and [`GranTurismo7Params::default`] otherwise, so GT7 always
+///   runs in HDR mode driven by the display target's peak luminance instead
+///   of the shader's baked SDR defaults.
 ///
 /// Runs in `RenderSystems::PrepareResources`. Views authored with
-/// `GranTurismo7` but without the component are skipped and keep the
-/// shader's baked SDR defaults (with the existing warn on HDR targets).
+/// `GranTurismo7` but without the component on SDR targets are skipped and
+/// keep the shader's baked SDR defaults.
 pub fn prepare_gt7_params_uniforms(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -911,9 +915,9 @@ pub fn prepare_gt7_params_uniforms(
          params: Option<&GranTurismo7Params>,
          view_display_target: Option<&ViewDisplayTarget>| {
             gt7_params_uniform_active(
-                *tonemapping,
                 effective_tonemapping(Some(tonemapping), view_display_target),
                 params.is_some(),
+                view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
             )
         };
     let view_count = views

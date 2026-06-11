@@ -3,7 +3,7 @@
 use bevy::{
     asset::UnapprovedPathMode,
     camera::Hdr,
-    core_pipeline::tonemapping::{GranTurismo7Params, Tonemapping},
+    core_pipeline::tonemapping::Tonemapping,
     light::CascadeShadowConfigBuilder,
     platform::collections::HashMap,
     prelude::*,
@@ -345,12 +345,10 @@ fn toggle_tonemapping_method(
 /// PQ (HDR10) → back to SDR (and switches the operator to GranTurismo7,
 /// currently the only HDR-aware one, when leaving SDR).
 ///
-/// GT7 only engages its HDR mode (peak-luminance-aware output above paper
-/// white) when the camera also has a [`GranTurismo7Params`] component — the
-/// prepared params uniform is where the operator reads the display target's
-/// peak luminance. Without it the operator silently stays in SDR mode, so the
-/// component is inserted alongside the HDR display target (and removed again
-/// when cycling back to SDR, restoring the operator's baked SDR defaults).
+/// On HDR display targets GT7 engages its HDR mode (peak-luminance-aware
+/// output above paper white) automatically, reading the display target's
+/// peak luminance with default `GranTurismo7Params`; add the component to
+/// tune the operator's artistic dials.
 ///
 /// NOTE: seeing actual HDR output requires an HDR-capable display and a
 /// backend advertising the matching surface color space: scRGB-linear on
@@ -360,13 +358,11 @@ fn toggle_tonemapping_method(
 /// and degrades (PQ falls back to scRGB, then to plain SDR) — the main world
 /// cannot read the resolved outcome back yet.
 fn toggle_hdr_output(
-    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
-    camera: Single<(Entity, &mut Tonemapping)>,
+    mut tonemapping: Single<&mut Tonemapping>,
 ) {
     if keys.just_pressed(KeyCode::KeyO) {
-        let (camera_entity, mut tonemapping) = camera.into_inner();
         match display_target.transfer {
             DisplayTransfer::Srgb => {
                 **display_target = DisplayTarget {
@@ -375,12 +371,7 @@ fn toggle_hdr_output(
                     transfer: DisplayTransfer::ScRgbLinear,
                     ..DisplayTarget::SDR_SRGB
                 };
-                *tonemapping = Tonemapping::GranTurismo7;
-                // Required for GT7's HDR mode: this is what plumbs the
-                // display target's peak luminance into the operator.
-                commands
-                    .entity(camera_entity)
-                    .insert(GranTurismo7Params::default());
+                **tonemapping = Tonemapping::GranTurismo7;
             }
             DisplayTransfer::ScRgbLinear => {
                 // PQ is canonically Rec.2020; set the gamut to match (the
@@ -390,9 +381,6 @@ fn toggle_hdr_output(
             }
             _ => {
                 **display_target = DisplayTarget::SDR_SRGB;
-                commands
-                    .entity(camera_entity)
-                    .remove::<GranTurismo7Params>();
             }
         }
     }

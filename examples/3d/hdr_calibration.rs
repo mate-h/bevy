@@ -25,7 +25,7 @@
 
 use bevy::{
     camera::{Hdr, ScalingMode},
-    core_pipeline::tonemapping::{GranTurismo7Params, Tonemapping},
+    core_pipeline::tonemapping::Tonemapping,
     platform::collections::HashSet,
     prelude::*,
     window::{DisplayTarget, DisplayTransfer, Monitor, PrimaryWindow, WindowMonitorChanged},
@@ -362,29 +362,21 @@ fn toggle_transfer(
     }
 }
 
-/// Toggles a Gran Turismo 7 tone-mapping preview. [`GranTurismo7Params`] is
-/// what switches the operator into its HDR mode and plumbs the display
-/// target's peak luminance into it, so this exercises the full HDR
-/// tone-mapping path end to end. While the preview is on, the patterns are
-/// *not* exact — calibrate with it off.
+/// Toggles a Gran Turismo 7 tone-mapping preview. On an HDR display target
+/// the operator automatically runs in its HDR mode, plumbing the target's
+/// peak luminance into the tone curve, so this exercises the full HDR
+/// tone-mapping path end to end (add `GranTurismo7Params` to tune it). While
+/// the preview is on, the patterns are *not* exact — calibrate with it off.
 fn toggle_gt7_preview(
-    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    camera: Single<(Entity, &mut Tonemapping), With<Camera3d>>,
+    mut tonemapping: Single<&mut Tonemapping, With<Camera3d>>,
 ) {
     if keys.just_pressed(KeyCode::KeyG) {
-        let (camera_entity, mut tonemapping) = camera.into_inner();
-        if *tonemapping == Tonemapping::GranTurismo7 {
-            *tonemapping = Tonemapping::None;
-            commands
-                .entity(camera_entity)
-                .remove::<GranTurismo7Params>();
+        **tonemapping = if **tonemapping == Tonemapping::GranTurismo7 {
+            Tonemapping::None
         } else {
-            *tonemapping = Tonemapping::GranTurismo7;
-            commands
-                .entity(camera_entity)
-                .insert(GranTurismo7Params::default());
-        }
+            Tonemapping::GranTurismo7
+        };
     }
 }
 

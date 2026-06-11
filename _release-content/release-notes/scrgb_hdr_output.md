@@ -6,7 +6,7 @@ pull_requests: []
 
 Bevy can now present real high-dynamic-range output. Set the window's
 `DisplayTarget` to request an HDR transfer, and give the camera an HDR-aware
-tone-mapping operator plus its params component:
+tone-mapping operator:
 
 ```rust
 fn enable_hdr_output(
@@ -21,13 +21,10 @@ fn enable_hdr_output(
         transfer: DisplayTransfer::ScRgbLinear,
         ..DisplayTarget::SDR_SRGB
     };
-    commands.entity(*camera).insert((
-        Tonemapping::GranTurismo7,
-        // Required for GT7's HDR mode: the prepared params uniform is what
-        // plumbs the display target's peak luminance into the operator.
-        // Without it, GT7 stays in SDR mode and warns.
-        GranTurismo7Params::default(),
-    ));
+    // On HDR targets GT7 runs in its HDR mode automatically, driven by the
+    // display target's peak luminance. Add a `GranTurismo7Params` component
+    // to customize the operator's artistic dials.
+    commands.entity(*camera).insert(Tonemapping::GranTurismo7);
 }
 ```
 
@@ -54,9 +51,8 @@ wgpu's surface color-space API:
 The display-encoding pass writes the encoded signal (scRGB scaled by
 `paper_white_nits / 80`; PQ from absolute nits) and the final blit hands it to
 the surface unchanged — these formats have no hardware sRGB encode. With the
-GT7 operator running in its HDR mode (`Tonemapping::GranTurismo7` +
-`GranTurismo7Params`), highlights above paper white finally make it to the
-panel. Press `O` in the `tonemapping` example (cycles sRGB → scRGB → PQ) or
+GT7 operator running in its HDR mode, highlights above paper white finally
+make it to the panel. Press `O` in the `tonemapping` example (cycles sRGB → scRGB → PQ) or
 `T` in the `hdr_calibration` example to try it on an HDR-capable display.
 
 SDR-only tone-mapping operators — everything except `GranTurismo7` and `None`,

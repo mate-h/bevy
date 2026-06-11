@@ -47,8 +47,10 @@ commands.spawn((
 ```
 
 When the camera renders to a target whose resolved `DisplayTarget` requests an HDR transfer
-(scRGB-linear, or PQ once wgpu can negotiate it), the operator is additionally configured in
-its HDR mode: the tone curve is rebuilt around the display's `peak_luminance_nits` (clamped
+(scRGB-linear, or PQ once wgpu can negotiate it), the operator is configured in its HDR mode
+— with or without the `GranTurismo7Params` component (the defaults are used if it is
+absent), matching the source implementation, which initializes HDR mode directly from the
+target's peak: the tone curve is rebuilt around the display's `peak_luminance_nits` (clamped
 to the operator's supported 250–10000 nit range, and to at least `paper_white_nits`), and
 the output is rescaled so `1.0` equals the display's paper white.
 
@@ -70,5 +72,5 @@ saturated UI colors are reinterpreted in the wider primaries and oversaturate sl
 (grays and whites are unaffected — the white point is shared). Per-view UI gamut conversion
 is planned as part of the UI HDR follow-up (see `plans/ui-hdr-rfc.md` in the working notes).
 
-Cameras without the component (or on plain SDR targets) are completely unaffected, and SDR
+On plain SDR targets, cameras without the component are completely unaffected, and SDR
 output remains byte-identical.

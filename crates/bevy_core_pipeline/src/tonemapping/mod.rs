@@ -214,8 +214,9 @@ pub enum Tonemapping {
     /// emits its native linear Rec.2020 display-referred output straight into the
     /// display-encoding pass.
     /// Algorithmic: does NOT require the `tonemapping_luts` cargo feature.
-    /// Tunable per camera via [`GranTurismo7Params`]; that component is also what enables the
-    /// HDR mode (it carries the prepared per-view parameters to the GPU).
+    /// Tunable per camera via [`GranTurismo7Params`]. On a view whose resolved display
+    /// target requests an HDR transfer, the operator automatically runs in its HDR mode,
+    /// driven by the target's peak luminance.
     GranTurismo7,
 }
 
@@ -711,22 +712,30 @@ pub fn effective_tonemapping(
 /// Single source shared by [`prepare_view_tonemapping_pipelines`] (the
 /// shader-def push and layout selection) and [`prepare_gt7_params_uniforms`]
 /// (the uniform write and dynamic-offset insertion), so the pipeline layout
-/// and the bound buffer can never disagree:
+/// and the bound buffer can never disagree. A view binds the uniform iff its
+/// **effective** operator ([`effective_tonemapping`]) is
+/// [`Tonemapping::GranTurismo7`] and either:
 ///
-/// * a view whose **authored** operator is [`Tonemapping::GranTurismo7`]
-///   binds it iff the camera opted in with a [`GranTurismo7Params`]
-///   component (cameras without one keep the shader's baked SDR defaults,
-///   exactly as before — with the existing warn on HDR targets);
-/// * a D6-substituted view ([`effective_tonemapping`]) **always** binds it:
-///   the substitute must run in GT7's HDR mode (the baked defaults are SDR),
-///   using the camera's [`GranTurismo7Params`] if present and the defaults
-///   otherwise.
+/// * the camera opted in with a [`GranTurismo7Params`] component, or
+/// * the view's resolved display target requests an HDR transfer
+///   ([`ViewDisplayTarget::is_hdr_transfer`]): GT7's HDR mode is selected
+///   inside the prepared uniform (peak taken from the display target, see
+///   [`Gt7ParamsUniform::new`]), so every GT7 view on an HDR target gets
+///   one — with the camera's [`GranTurismo7Params`] if present and the
+///   defaults otherwise. This matches the source implementation, which
+///   initializes HDR mode directly from the target's peak luminance, and
+///   covers both authored GT7 and D6-substituted views
+///   ([`effective_tonemapping`] only ever substitutes on HDR-transfer
+///   targets).
+///
+/// A GT7 view on an SDR target without the component binds nothing and keeps
+/// the shader's baked SDR defaults, exactly as before the component existed.
 pub fn gt7_params_uniform_active(
-    requested: Tonemapping,
     effective: Tonemapping,
     has_params: bool,
+    is_hdr_transfer: bool,
 ) -> bool {
-    effective == Tonemapping::GranTurismo7 && (has_params || requested != Tonemapping::GranTurismo7)
+    effective == Tonemapping::GranTurismo7 && (has_params || is_hdr_transfer)
 }
 
 /// The color primaries of the tonemapping pass's output for a view — and
@@ -873,28 +882,15 @@ pub fn prepare_view_tonemapping_pipelines(
 
         // The GT7 params uniform is active exactly when the effective
         // operator is GT7 and either the camera opted in with a
-        // `GranTurismo7Params` component or the operator was D6-substituted
-        // (`prepare_gt7_params_uniforms` uses the same shared predicate).
-        let gt7_uniform_active =
-            gt7_params_uniform_active(requested_tonemapping, tonemapping, gt7_params.is_some());
-
-        // D6 diagnostic: GT7's HDR mode is selected inside the prepared
-        // params uniform, so without the component the shader keeps its baked
-        // SDR defaults — on an HDR surface the image silently stays clamped
-        // to paper white. Warn instead of degrading silently. (Keyed on the
-        // *authored* operator: D6-substituted views always get a prepared
-        // uniform, so this does not apply to them.)
-        if requested_tonemapping == Tonemapping::GranTurismo7
-            && gt7_params.is_none()
-            && view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer)
-        {
-            warn_once!(
-                "A camera using `Tonemapping::GranTurismo7` is rendering to an HDR display \
-                target but has no `GranTurismo7Params` component; the operator will run in \
-                SDR mode and highlights will not exceed paper white. Insert \
-                `GranTurismo7Params::default()` on the camera to enable GT7's HDR mode."
-            );
-        }
+        // `GranTurismo7Params` component or the view renders to an
+        // HDR-transfer target — GT7's HDR mode is selected inside the
+        // prepared uniform (`prepare_gt7_params_uniforms` uses the same
+        // shared predicate).
+        let gt7_uniform_active = gt7_params_uniform_active(
+            tonemapping,
+            gt7_params.is_some(),
+            view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
+        );
         // The display-target uniform is bound for views whose resolved
         // display target is not the plain SDR default, and whenever an
         // operator needs it (currently: the GT7 params uniform path, which
@@ -1254,20 +1250,26 @@ mod tests {
         let hdr = hdr_view_display_target();
         let gt7 = Tonemapping::GranTurismo7;
 
-        // Authored GT7 binds the uniform iff the camera opted in with params.
-        assert!(gt7_params_uniform_active(gt7, gt7, true));
-        assert!(!gt7_params_uniform_active(gt7, gt7, false));
+        // On an SDR target, GT7 binds the uniform iff the camera opted in
+        // with params (no-component cameras keep the baked SDR defaults).
+        assert!(gt7_params_uniform_active(gt7, true, false));
+        assert!(!gt7_params_uniform_active(gt7, false, false));
 
-        // D6-substituted views always bind it (the substitute must run in
-        // HDR mode, which only the prepared uniform can select) — with the
-        // camera's params if present, defaults otherwise.
+        // On an HDR-transfer target, GT7 always binds it (HDR mode is
+        // selected inside the prepared uniform; the baked defaults are SDR)
+        // — with the camera's params if present, defaults otherwise.
+        assert!(gt7_params_uniform_active(gt7, false, true));
+        assert!(gt7_params_uniform_active(gt7, true, true));
+
+        // D6-substituted views resolve to GT7 on an HDR target, so they are
+        // covered by the HDR-transfer arm above.
         for operator in ALL_OPERATORS {
             if !operator.is_sdr_only() {
                 continue;
             }
             let effective = effective_tonemapping(Some(&operator), Some(&hdr));
-            assert!(gt7_params_uniform_active(operator, effective, false));
-            assert!(gt7_params_uniform_active(operator, effective, true));
+            assert!(gt7_params_uniform_active(effective, false, true));
+            assert!(gt7_params_uniform_active(effective, true, true));
         }
 
         // Non-GT7 effective operators never bind it, params or not.
@@ -1275,8 +1277,8 @@ mod tests {
             if operator == gt7 {
                 continue;
             }
-            assert!(!gt7_params_uniform_active(operator, operator, false));
-            assert!(!gt7_params_uniform_active(operator, operator, true));
+            assert!(!gt7_params_uniform_active(operator, false, false));
+            assert!(!gt7_params_uniform_active(operator, true, true));
         }
     }
 }
