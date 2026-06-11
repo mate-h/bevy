@@ -37,8 +37,9 @@ otherwise):
   the mesh/2D/sprite/tonemapping pipelines when Rec.2020 is active).
 - Every camera needs an active `Tonemapping` operator: the Rec.2020 → display
   conversion runs in the tonemapping pass, so `Tonemapping::None` cameras
-  (the `Camera2d` default) render reinterpreted, oversaturated colors (a
-  `warn_once` diagnoses this).
+  (the `Camera2d` default) render reinterpreted, desaturated colors (a
+  `warn_once` diagnoses this). Use `Tonemapping::Linear` for the conversion
+  with no tone curve — the usual choice for 2D and UI cameras.
 - Tone mapping operators other than `Tonemapping::GranTurismo7` are
   Rec.709-fit and clip working-space colors outside the Rec.709 gamut at the
   tone mapping pass entry.

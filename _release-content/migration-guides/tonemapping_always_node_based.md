@@ -40,8 +40,9 @@ default):
   to apply `ColorGrading` exposure and post-saturation even with
   `Tonemapping::None`; now no color grading at all is applied without an
   active operator. If you used `ColorGrading` (or `AutoExposure`) with
-  `Tonemapping::None`, pick an operator (`Tonemapping::Reinhard` is the
-  cheapest) — grading is part of the tonemapping pass.
+  `Tonemapping::None`, switch to `Tonemapping::Linear`, which applies
+  grading and dither with no tone curve — grading is part of the
+  tonemapping pass.
 - **Screen-space transmission is more accurate.** The transmission pass
   snapshots the main texture before tone mapping, which is now scene-linear
   for every camera, so the crude `approximate_inverse_tone_mapping()`

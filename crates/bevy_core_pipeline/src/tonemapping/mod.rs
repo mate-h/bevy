@@ -166,6 +166,20 @@ pub struct TonemappingPipeline {
 pub enum Tonemapping {
     /// Bypass tonemapping.
     None,
+    /// Runs the tonemapping pass with no tone curve: scene values pass
+    /// through unchanged, so output is unbounded display-linear.
+    ///
+    /// Unlike [`Tonemapping::None`] — a true opt-out that skips the pass
+    /// entirely — `Linear` still applies [`ColorGrading`] and exposure,
+    /// [`DebandDither`], and (under `WorkingColorSpace::Rec2020`) the
+    /// working-space → display conversion. It is the zero-curve choice for
+    /// cameras that need correct output under the wide working space
+    /// without an artistic operator — typically 2D / UI cameras, whose
+    /// `Tonemapping::None` default skips the conversion and renders
+    /// desaturated there.
+    ///
+    /// [`ColorGrading`]: bevy_render::view::ColorGrading
+    Linear,
     /// Suffers from lots hue shifting, brights don't desaturate naturally.
     /// Bright primaries and secondaries don't desaturate at all.
     Reinhard,
@@ -237,17 +251,20 @@ impl Tonemapping {
 
     /// Whether this operator's output is inherently capped at `[0, 1]`
     /// paper-white-relative range (an "SDR-only" operator): every operator
-    /// except [`Tonemapping::GranTurismo7`] (natively peak-luminance aware)
-    /// and [`Tonemapping::None`] (a true pass-through with unbounded output,
-    /// not an operator).
+    /// except [`Tonemapping::GranTurismo7`] (natively peak-luminance aware),
+    /// [`Tonemapping::Linear`] (no curve, unbounded output), and
+    /// [`Tonemapping::None`] (a true pass-through, not an operator).
     ///
     /// On a view whose resolved display target requests an HDR transfer, an
     /// SDR-only operator would silently cap the image at paper white, leaving
-    /// the display's HDR headroom permanently unused. The D6 substitution
+    /// the display's HDR headroom permanently unused. The substitution
     /// table ([`effective_tonemapping`]) degrades such views to an
     /// HDR-capable substitute (with a `warn_once!`) instead.
     pub fn is_sdr_only(&self) -> bool {
-        !matches!(self, Tonemapping::None | Tonemapping::GranTurismo7)
+        !matches!(
+            self,
+            Tonemapping::None | Tonemapping::Linear | Tonemapping::GranTurismo7
+        )
     }
 }
 
@@ -490,6 +507,7 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
 
         match key.tonemapping {
             Tonemapping::None => shader_defs.push("TONEMAP_METHOD_NONE".into()),
+            Tonemapping::Linear => shader_defs.push("TONEMAP_METHOD_LINEAR".into()),
             Tonemapping::Reinhard => shader_defs.push("TONEMAP_METHOD_REINHARD".into()),
             Tonemapping::ReinhardLuminance => {
                 shader_defs.push("TONEMAP_METHOD_REINHARD_LUMINANCE".into());
@@ -882,16 +900,16 @@ pub fn prepare_view_tonemapping_pipelines(
         // Working-space diagnostic: the Rec.2020 → display-primaries
         // conversion happens in the tonemapping pass, which
         // `Tonemapping::None` cameras skip entirely (true passthrough). Such
-        // cameras present raw Rec.2020 values on a Rec.709-encoded chain,
-        // which reads as oversaturated. Warn instead of degrading silently.
+        // cameras present raw Rec.2020 coordinates on a Rec.709-encoded
+        // chain, which reads as desaturated. Warn instead of degrading
+        // silently.
         if working_color_space.is_rec2020() && tonemapping == Tonemapping::None {
             warn_once!(
                 "`WorkingColorSpace::Rec2020` is enabled but a camera uses \
                 `Tonemapping::None` (the default for `Camera2d`). The Rec.2020 → Rec.709 \
                 conversion runs in the tonemapping pass, so this camera's output will be \
-                reinterpreted (oversaturated). Give the camera an active `Tonemapping` \
-                operator (e.g. `Tonemapping::ReinhardLuminance` or \
-                `Tonemapping::GranTurismo7`)."
+                reinterpreted (desaturated). Use `Tonemapping::Linear` for the conversion \
+                with no tone curve, or an operator like `Tonemapping::GranTurismo7`."
             );
         }
 
@@ -1014,6 +1032,7 @@ pub fn get_lut_bindings<'a>(
     let image = match tonemapping {
         // AgX lut texture used when tonemapping doesn't need a texture since it's very small (32x32x32)
         Tonemapping::None
+        | Tonemapping::Linear
         | Tonemapping::Reinhard
         | Tonemapping::ReinhardLuminance
         | Tonemapping::AcesFitted

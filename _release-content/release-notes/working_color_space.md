@@ -73,6 +73,8 @@ What happens under `Rec2020`:
   limitation).
 
 Known caveats under `Rec2020`: `Tonemapping::None` cameras (the `Camera2d`
-default) skip the conversion and render oversaturated (a `warn_once` fires);
-`CompositingSpace::Oklab` and bloom luminance weights remain Rec.709-fit;
-gizmos, UI and atmosphere-generated sky values are not converted.
+default) skip the conversion and render desaturated (a `warn_once` fires) —
+give them the new `Tonemapping::Linear`, which runs the conversion, grading
+and dither with no tone curve; `CompositingSpace::Oklab` and bloom luminance
+weights remain Rec.709-fit; gizmos, UI and atmosphere-generated sky values
+are not converted.

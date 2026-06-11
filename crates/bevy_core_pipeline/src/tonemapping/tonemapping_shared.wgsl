@@ -445,6 +445,10 @@ fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     // tone_mapping
 #ifdef TONEMAP_METHOD_NONE
     color = color;
+#else ifdef TONEMAP_METHOD_LINEAR
+    // No tone curve: grading, dither, and the working-space conversion at
+    // the pass entry still apply; output stays unbounded display-linear.
+    color = color;
 #else ifdef TONEMAP_METHOD_REINHARD
     color = tonemapping_reinhard(color.rgb);
 #else ifdef TONEMAP_METHOD_REINHARD_LUMINANCE
