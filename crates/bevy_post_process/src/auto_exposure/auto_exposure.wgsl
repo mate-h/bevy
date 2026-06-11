@@ -316,28 +316,26 @@ fn compute_histogram(
 
         // Increment the shared histogram bin by the weight obtained from the metering mask
         atomicAdd(&histogram_shared[index], weight);
-    }
 
-    // Accumulate the auto white balance chromaticity measurement, sharing the
-    // metering-mask weights (and the barriers) with the histogram path.
-    if settings.awb_enabled != 0u {
-        if global_invocation_id.x < dim.x && global_invocation_id.y < dim.y {
-            let col = max(
-                textureLoad(tex_color, vec2<i32>(global_invocation_id.xy), 0).rgb,
-                vec3(0.0),
-            );
+        // Accumulate the auto white balance chromaticity measurement, reusing
+        // the texel and metering-mask weight already loaded for the histogram.
+        // No barriers run inside this block, so nesting the non-uniform flag
+        // check here keeps the workgroup barriers below in uniform control
+        // flow.
+        if settings.awb_enabled != 0u {
+            let awb_col = max(col, vec3(0.0));
 
             // The CIE 1931 XYZ of the working-space color (linear Rec.709 by
             // default, linear Rec.2020 when the project opted into the wide
             // working space).
 #ifdef WORKING_COLOR_SPACE_REC2020
-            let big_x = dot(col, AWB_REC2020_TO_X);
-            let big_y = dot(col, AWB_REC2020_TO_Y);
-            let big_z = dot(col, AWB_REC2020_TO_Z);
+            let big_x = dot(awb_col, AWB_REC2020_TO_X);
+            let big_y = dot(awb_col, AWB_REC2020_TO_Y);
+            let big_z = dot(awb_col, AWB_REC2020_TO_Z);
 #else
-            let big_x = dot(col, AWB_REC709_TO_X);
-            let big_y = dot(col, AWB_REC709_TO_Y);
-            let big_z = dot(col, AWB_REC709_TO_Z);
+            let big_x = dot(awb_col, AWB_REC709_TO_X);
+            let big_y = dot(awb_col, AWB_REC709_TO_Y);
+            let big_z = dot(awb_col, AWB_REC709_TO_Z);
 #endif
 
             let xyz_sum = big_x + big_y + big_z;
@@ -348,7 +346,7 @@ fn compute_histogram(
                 // the metering range so the fixed-point sums cannot overflow.
                 let y_cap = exp2(settings.min_log_lum + settings.log_lum_range);
                 let y_norm = clamp(big_y / y_cap, 0.0, 1.0);
-                let lum_weight = y_norm * f32(metering_weight(uv));
+                let lum_weight = y_norm * f32(weight);
                 let contribution = vec3(big_x / xyz_sum, big_y / xyz_sum, 1.0) * lum_weight;
 
                 let fixed_point = contribution * CHROMA_WORKGROUP_SCALE + vec3(0.5);
