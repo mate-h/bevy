@@ -523,6 +523,26 @@ impl Gt7ToneMapping {
         Self::new(physical_target_luminance, params, false)
     }
 
+    /// Whether every precomputed constant the operator evaluates with is
+    /// finite.
+    ///
+    /// [`GranTurismo7Params::sanitized`] bounds each parameter individually,
+    /// but combinations can still overflow the closed-form shoulder and toe
+    /// math — e.g. a `linear_section` close to 1 sends
+    /// `exp(linear_section / k)` past `f32::MAX`, and a non-finite shoulder
+    /// constant turns every highlight into NaN. The toe is probed at the
+    /// shoulder seam, its largest input.
+    pub fn has_finite_curve(&self) -> bool {
+        let curve = &self.curve;
+        let seam = curve.linear_section * curve.peak_intensity;
+        let toe_probe = curve.mid_point * ops::powf(seam / curve.mid_point, curve.toe_strength);
+        curve.k_a.is_finite()
+            && curve.k_b.is_finite()
+            && curve.k_c.is_finite()
+            && toe_probe.is_finite()
+            && self.framebuffer_luminance_target_ucs.is_finite()
+    }
+
     /// Applies the tone-mapping pipeline to a linear Rec.2020 frame-buffer
     /// color (native GT7 units, `1.0` = 100 nits).
     ///
@@ -786,7 +806,16 @@ impl Gt7ParamsUniform {
         // display target, so a downgraded HDR request configures plain SDR
         // mode here too.
         if !display_target.transfer.is_hdr() {
-            return Self::from(&Gt7ToneMapping::new_sdr_with_params(&params));
+            let mut tone_mapping = Gt7ToneMapping::new_sdr_with_params(&params);
+            if !tone_mapping.has_finite_curve() {
+                warn_once!(
+                    "GranTurismo7Params produce tone-mapping curve constants that overflow \
+                     f32 (the closed-form shoulder/toe math is not finite for this \
+                     combination); falling back to the default parameters"
+                );
+                tone_mapping = Gt7ToneMapping::new_sdr();
+            }
+            return Self::from(&tone_mapping);
         }
 
         // Single-sourced with the display pipeline's uniform writer
@@ -833,6 +862,14 @@ impl Gt7ParamsUniform {
         }
 
         let mut tone_mapping = Gt7ToneMapping::new_hdr_with_params(peak, &params);
+        if !tone_mapping.has_finite_curve() {
+            warn_once!(
+                "GranTurismo7Params produce tone-mapping curve constants that overflow \
+                 f32 (the closed-form shoulder/toe math is not finite for this \
+                 combination); falling back to the default parameters"
+            );
+            tone_mapping = Gt7ToneMapping::new_hdr(peak);
+        }
         // D5 seam renormalization: rescale the operator's native output
         // (1.0 = 100 nits) so that 1.0 = paper white. `apply` multiplies by
         // this factor after the peak clamp, so the CPU struct stays a valid
@@ -1618,6 +1655,40 @@ mod tests {
         };
         let uniform = Gt7ParamsUniform::new(&DisplayTarget::SDR_SRGB, &nan_params);
         assert_eq!(uniform.mid_point, GranTurismo7Params::default().mid_point);
+    }
+
+    /// Parameter combinations whose individual values pass sanitization can
+    /// still overflow the closed-form curve constants (`linear_section`
+    /// close to 1 sends `exp(linear_section / k)` past `f32::MAX`); the
+    /// uniform must fall back to the defaults instead of uploading
+    /// non-finite constants that turn highlights into NaN.
+    #[test]
+    fn uniform_falls_back_when_curve_constants_overflow() {
+        let overflowing = GranTurismo7Params {
+            linear_section: 0.999,
+            ..Default::default()
+        };
+
+        let sdr = Gt7ParamsUniform::new(&DisplayTarget::SDR_SRGB, &overflowing);
+        let hdr = Gt7ParamsUniform::new(
+            &DisplayTarget {
+                transfer: DisplayTransfer::ScRgbLinear,
+                peak_luminance_nits: 1000.0,
+                ..DisplayTarget::SDR_SRGB
+            },
+            &overflowing,
+        );
+        for uniform in [&sdr, &hdr] {
+            assert!(uniform.k_a.is_finite(), "k_a must stay finite");
+            assert!(uniform.k_b.is_finite(), "k_b must stay finite");
+            assert!(uniform.k_c.is_finite(), "k_c must stay finite");
+            assert!(uniform.peak_ucs.is_finite(), "peak_ucs must stay finite");
+        }
+        // The fallback recomputes from the default parameters.
+        assert_eq!(
+            sdr.linear_section,
+            GranTurismo7Params::default().linear_section
+        );
     }
 
     /// The uniform round-trips `Gt7ToneMapping` exactly, so the CPU struct
