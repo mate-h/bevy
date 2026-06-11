@@ -203,26 +203,26 @@ fn setup_camera_fog(
     // Spawn earth atmosphere
     commands.spawn((
         Atmosphere::earth(earth_medium),
-        // Add a volumetric cloud layer using 3D FBM noise
-        // Physically realistic parameters (units: m^-1 per unit density):
+        // Add a volumetric cloud layer.
+        // Physically plausible parameters (units: m^-1 per unit density):
         // - Density is normalized to [0, 1] in the shader
-        // - cloud_scattering: 0.0008 m^-1 per unit density (physically correct for water droplets)
-        //   At max density (1.0): scattering_coeff = 0.0008
-        //   After phase amplification (~6.5x at forward angles): 0.0008 * 6.5 ≈ 0.005
-        //   This matches atmospheric scattering magnitudes (~0.001-0.01 range)
-        // - cloud_absorption: 0.00005 m^-1 per unit density (realistic for water clouds)
-        //   Single-scattering albedo ≈ 0.94 (typical water clouds have albedo 0.95-0.99)
+        // - cloud_scattering: ~0.02 m^-1 at full density, realistic for cumulus
+        //   (real clouds range ~0.01-0.1 m^-1)
+        // - cloud_absorption: ~0.0002 m^-1, single-scattering albedo ≈ 0.99
+        //   (typical water clouds have albedo 0.95-0.99)
         CloudLayer {
             cloud_layer_start: 6_362_000.0, // 2km above Earth's surface
-            cloud_layer_end: 6_364_000.0,   // 4km above Earth's surface (7km thick layer)
+            cloud_layer_end: 6_364_000.0,   // 4km above Earth's surface (2km thick layer)
             cloud_density: 1.0, // Used for enabling/disabling, actual density comes from noise (normalized [0, 1])
-            cloud_absorption: 0.00005, // Physically correct: ~0.00005 m^-1 per unit density
-            cloud_scattering: 0.0008, // Physically correct: ~0.0008 m^-1 per unit density
+            cloud_absorption: 0.0002,
+            cloud_scattering: 0.02,
             // Larger scale = larger cloud features (more “big cumulus”, less “small puffs”)
             noise_scale: 64_000.0,
-            noise_offset: Vec3::ZERO,
-            detail_noise_scale: 16_000.0, // Smaller scale = higher-frequency breakup
-            detail_strength: 1.0,
+            // Partly cloudy sky.
+            coverage: 0.65,
+            // A light breeze to keep the cloudscape alive.
+            wind_velocity: Vec3::new(8.0, 0.0, 2.0),
+            ..default()
         },
     ));
 

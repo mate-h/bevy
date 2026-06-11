@@ -29,8 +29,8 @@ use bevy_render::{
 use bevy_utils::default;
 use tracing::warn;
 
-use crate::fbm_noise::FbmNoiseTexture;
-use crate::perlin_worley_noise::PerlinWorleyNoiseTexture;
+use crate::fbm_noise::{CurlNoiseTexture, FbmNoiseTexture};
+use crate::perlin_worley_noise::{CloudDetailNoiseTexture, PerlinWorleyNoiseTexture};
 use crate::GpuScatteringMedium;
 
 // Render world representation of an environment map light for the atmosphere
@@ -143,6 +143,14 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
                     19,
                     texture_2d_array(TextureSampleType::Float { filterable: true }),
                 ), // STBN
+                (
+                    20,
+                    texture_3d(TextureSampleType::Float { filterable: true }),
+                ), // worley detail/erosion
+                (
+                    21,
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                ), // curl noise
                 // output 2D array texture
                 (
                     13,
@@ -175,7 +183,9 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
         settings_uniforms,
         cloud_layer_uniforms,
         fbm_noise_texture,
+        curl_noise_texture,
         perlin_worley_noise_texture,
+        cloud_detail_noise_texture,
         cloud_noise_sampler,
         (bluenoise, render_images, fallback_image),
         gpu_media,
@@ -190,7 +200,9 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
         Res<ComponentUniforms<GpuAtmosphereSettings>>,
         Res<ComponentUniforms<CloudLayer>>,
         Res<FbmNoiseTexture>,
+        Res<CurlNoiseTexture>,
         Res<PerlinWorleyNoiseTexture>,
+        Res<CloudDetailNoiseTexture>,
         Res<crate::resources::CloudNoiseSampler>,
         (
             Res<crate::Bluenoise>,
@@ -279,6 +291,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
                     (17, &textures.cloud_shadow_map.default_view),
                     (18, &perlin_worley_noise_texture.texture.default_view),
                     (19, stbn_view.as_ref()),
+                    (20, &cloud_detail_noise_texture.texture.default_view),
+                    (21, &curl_noise_texture.texture.default_view),
                     // output
                     (13, &textures.environment),
                 )),

@@ -1,7 +1,8 @@
 use crate::{
-    fbm_noise::FbmNoiseTexture, perlin_worley_noise::PerlinWorleyNoiseTexture, Bluenoise,
-    CloudLayer, ExtractedAtmosphere, ExtractedDirectionalLight, GpuLights, GpuScatteringMedium,
-    LightMeta, ScatteringMediumSampler,
+    fbm_noise::{CurlNoiseTexture, FbmNoiseTexture},
+    perlin_worley_noise::{CloudDetailNoiseTexture, PerlinWorleyNoiseTexture},
+    Bluenoise, CloudLayer, ExtractedAtmosphere, ExtractedDirectionalLight, GpuLights,
+    GpuScatteringMedium, LightMeta, ScatteringMediumSampler,
 };
 use bevy_asset::{load_embedded_asset, AssetId, Handle};
 use bevy_camera::{Camera, Camera3d};
@@ -193,6 +194,16 @@ impl AtmosphereBindGroupLayouts {
                         19,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ),
+                    // 3D Worley detail/erosion noise texture
+                    (
+                        20,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    // 2D curl noise texture for detail distortion
+                    (
+                        21,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
                     (
                         13,
                         texture_storage_2d(
@@ -346,6 +357,16 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                         19,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
                     ),
+                    // 3D Worley detail/erosion noise texture
+                    (
+                        20,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    // 2D curl noise texture for detail distortion
+                    (
+                        21,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
                 ),
             ),
         );
@@ -393,6 +414,16 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (
                         19,
                         texture_2d_array(TextureSampleType::Float { filterable: true }),
+                    ),
+                    // 3D Worley detail/erosion noise texture
+                    (
+                        20,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    // 2D curl noise texture for detail distortion
+                    (
+                        21,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
                     ),
                 ),
             ),
@@ -1112,10 +1143,19 @@ pub(super) fn prepare_atmosphere_bind_groups(
     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
     medium_sampler: Res<ScatteringMediumSampler>,
     pipeline_cache: Res<PipelineCache>,
-    (cloud_layer_uniforms, fbm_noise_texture, perlin_worley_noise_texture, temporal_params): (
+    (
+        cloud_layer_uniforms,
+        fbm_noise_texture,
+        curl_noise_texture,
+        perlin_worley_noise_texture,
+        cloud_detail_noise_texture,
+        temporal_params,
+    ): (
         Res<ComponentUniforms<CloudLayer>>,
         Res<FbmNoiseTexture>,
+        Res<CurlNoiseTexture>,
         Res<PerlinWorleyNoiseTexture>,
+        Res<CloudDetailNoiseTexture>,
         Res<CloudShadowTemporalParamsBuffer>,
     ),
     mut commands: Commands,
@@ -1291,6 +1331,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     (16, &**cloud_noise_sampler),
                     (18, &perlin_worley_noise_texture.texture.default_view),
                     (19, stbn_view.as_ref()),
+                    (20, &cloud_detail_noise_texture.texture.default_view),
+                    (21, &curl_noise_texture.texture.default_view),
                     (13, trace_storage),
                 )),
             )
@@ -1413,6 +1455,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (17, &textures.cloud_shadow_map.default_view),
                         (18, &perlin_worley_noise_texture.texture.default_view),
                         (19, stbn_view.as_ref()),
+                        (20, &cloud_detail_noise_texture.texture.default_view),
+                        (21, &curl_noise_texture.texture.default_view),
                     )),
                 )
             });

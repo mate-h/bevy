@@ -55,7 +55,7 @@ use bevy_ecs::{
     entity::Entity,
     query::{Changed, With},
     schedule::IntoScheduleConfigs,
-    system::{Commands, Query},
+    system::{Commands, Query, Res},
 };
 use bevy_light::{atmosphere::ScatteringMedium, Atmosphere};
 use bevy_math::{Mat4, UVec2, UVec3, Vec3};
@@ -73,6 +73,7 @@ use bevy_render::{
     renderer::RenderAdapter,
     Render, RenderApp, RenderSystems,
 };
+use bevy_time::Time;
 use bevy_transform::components::GlobalTransform;
 
 use bevy_shader::load_shader_library;
@@ -250,12 +251,13 @@ impl Plugin for AtmospherePlugin {
 }
 
 /// For each camera with [`AtmosphereSettings`], picks the nearest [`Atmosphere`] by world-space
-/// distance to its origin, copies it as [`ExtractedAtmosphere`], optionally copies [`CloudLayer`],
-/// and builds [`GpuAtmosphereSettings`].
+/// distance to its origin, copies it as [`ExtractedAtmosphere`], optionally copies [`CloudLayer`]
+/// (applying wind animation to its noise offset), and builds [`GpuAtmosphereSettings`].
 pub fn extract_atmosphere(
     mut commands: Commands,
     atmosphere_entities: Extract<Query<(Entity, &Atmosphere, &GlobalTransform, Option<&CloudLayer>)>>,
     cameras: Extract<Query<(RenderEntity, &AtmosphereSettings, &GlobalTransform), With<Camera3d>>>,
+    time: Extract<Res<Time>>,
 ) {
     let candidates: Vec<(Entity, &Atmosphere, &GlobalTransform, Option<&CloudLayer>)> =
         atmosphere_entities.iter().collect();
@@ -299,9 +301,12 @@ pub fn extract_atmosphere(
             .entity(render_entity)
             .insert(GpuAtmosphereSettings::from(settings.clone()));
         if let Some(cloud_layer) = cloud_layer {
-            commands
-                .entity(render_entity)
-                .insert(cloud_layer.clone());
+            // Apply wind animation at extract time so the authored component is untouched.
+            // Positive offsets move the sampled field opposite to the offset direction, so
+            // subtract to make clouds drift along the wind vector.
+            let mut cloud_layer = cloud_layer.clone();
+            cloud_layer.noise_offset -= cloud_layer.wind_velocity * time.elapsed_secs_wrapped();
+            commands.entity(render_entity).insert(cloud_layer);
         } else {
             commands.entity(render_entity).remove::<CloudLayer>();
         }
@@ -557,6 +562,14 @@ pub enum AtmosphereMode {
 ///
 /// Add this component to an [`Atmosphere`] entity to enable volumetric clouds for cameras
 /// that select that atmosphere.
+///
+/// The cloud model follows Schneider's "The Real-Time Volumetric Cloudscapes of Horizon
+/// Zero Dawn" (SIGGRAPH 2015) and the NUBIS family of techniques: a 2D macro map controls
+/// coverage and vertical profile types, a 3D Perlin–Worley texture shapes the base cloud
+/// forms, and a 3D Worley texture (distorted by curl noise) erodes the edges. Lighting
+/// follows Hillaire's "Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite"
+/// (SIGGRAPH 2016): a dual-lobe Henyey-Greenstein phase function with Wrenninge-style
+/// multiple-scattering octaves, plus powder and ambient terms.
 #[derive(Clone, Component, Reflect, ShaderType)]
 #[reflect(Clone, Default)]
 pub struct CloudLayer {
@@ -572,38 +585,95 @@ pub struct CloudLayer {
     pub cloud_density: f32,
 
     /// Absorption coefficient for clouds
+    /// units: m^-1 per unit density
     pub cloud_absorption: f32,
 
     /// Scattering coefficient for clouds
+    /// units: m^-1 per unit density
     pub cloud_scattering: f32,
 
-    /// Scale of the noise texture in world space
+    /// Global cloud coverage in [0, 1]. 0 = clear sky, 1 = overcast.
+    /// Applied as a bias to the coverage noise before density shaping.
+    pub coverage: f32,
+
+    /// World-space tiling scale of the 2D macro map (coverage/types).
+    /// units: m
     pub noise_scale: f32,
 
-    /// Offset for animating the noise texture
-    pub noise_offset: Vec3,
+    /// World-space tiling scale of the 3D Perlin–Worley shape noise.
+    /// units: m
+    pub shape_noise_scale: f32,
 
-    /// Scale of the detail noise in world space (smaller = higher frequency detail).
+    /// World-space tiling scale of the 3D Worley detail/erosion noise
+    /// (smaller = higher frequency detail).
     /// units: m
     pub detail_noise_scale: f32,
 
-    /// Strength of the detail noise modulation in [0,1].
-    /// 0 = disabled, 1 = full modulation.
+    /// Strength of the detail erosion in [0, 1].
+    /// 0 = disabled, 1 = full edge erosion.
     pub detail_strength: f32,
+
+    /// Maximum world-space distortion of detail sampling by curl noise.
+    /// units: m
+    pub curl_strength: f32,
+
+    /// Asymmetry of the forward Henyey-Greenstein lobe in (-1, 1).
+    pub phase_g_forward: f32,
+
+    /// Asymmetry of the backward Henyey-Greenstein lobe in (-1, 1).
+    pub phase_g_backward: f32,
+
+    /// Blend factor between the forward (0) and backward (1) phase lobes.
+    pub phase_blend: f32,
+
+    /// Multiple-scattering octave attenuation for scattering (`a` in Wrenninge et al.).
+    /// Should be <= `multiscatter_extinction` for energy conservation; clamped in the shader.
+    pub multiscatter_scatter: f32,
+
+    /// Multiple-scattering octave attenuation for extinction (`b` in Wrenninge et al.).
+    pub multiscatter_extinction: f32,
+
+    /// Multiple-scattering octave attenuation for phase eccentricity (`c` in Wrenninge et al.).
+    pub multiscatter_phase: f32,
+
+    /// Strength of the powder ("dark edges") term in [0, 1].
+    pub powder_strength: f32,
+
+    /// Strength of the ambient sky contribution.
+    pub ambient_strength: f32,
+
+    /// Offset for the noise textures. Wind is applied on top of this at render time.
+    pub noise_offset: Vec3,
+
+    /// Wind velocity used to animate the cloud field.
+    /// units: m/s
+    pub wind_velocity: Vec3,
 }
 
 impl Default for CloudLayer {
     fn default() -> Self {
         Self {
             cloud_layer_start: 6_362_000.0, // 1km above Earth's surface
-            cloud_layer_end: 6_363_000.0,   // 5km above Earth's surface
+            cloud_layer_end: 6_363_000.0,   // 2km above Earth's surface
             cloud_density: 1.0,
             cloud_absorption: 0.00005, // Physically correct: ~0.00005 m^-1 per unit density
             cloud_scattering: 0.0008,  // Physically correct: ~0.0008 m^-1 per unit density
+            coverage: 0.5,
             noise_scale: 64_000.0,
+            shape_noise_scale: 8_000.0,
+            detail_noise_scale: 1_500.0,
+            detail_strength: 0.5,
+            curl_strength: 300.0,
+            phase_g_forward: 0.85,
+            phase_g_backward: -0.2,
+            phase_blend: 0.5,
+            multiscatter_scatter: 0.5,
+            multiscatter_extinction: 0.5,
+            multiscatter_phase: 0.5,
+            powder_strength: 1.0,
+            ambient_strength: 1.0,
             noise_offset: Vec3::ZERO,
-            detail_noise_scale: 16_000.0,
-            detail_strength: 1.0,
+            wind_velocity: Vec3::ZERO,
         }
     }
 }

@@ -1,11 +1,17 @@
 // Tileable 3D Perlin–Worley Noise Generator
-// Writes RGBA channels:
+//
+// `main` writes the cloud *shape* noise (HZD-style, 128^3):
 // - R: Perlin–Worley (remapped billowy Perlin by low-frequency Worley FBM)
 // - G: Worley FBM (freq)
 // - B: Worley FBM (2*freq)
 // - A: Worley FBM (4*freq)
+//
+// `detail_main` writes the cloud *detail/erosion* noise (HZD-style, 32^3):
+// - R: Worley FBM (freq)
+// - G: Worley FBM (2*freq)
+// - B: Worley FBM (4*freq)
 
-@group(0) @binding(13) var noise_texture_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(13) var noise_texture_out: texture_storage_3d<rgba8unorm, write>;
 
 struct Params {
     base_frequency: u32,
@@ -170,6 +176,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         noise_texture_out,
         vec3<i32>(gid),
         vec4<f32>(pw, w0, w1, w2),
+    );
+}
+
+// Detail/erosion noise: three Worley FBM octave groups at increasing frequency,
+// used to erode the base cloud shape at its edges (Schneider 2015).
+@compute
+@workgroup_size(4, 4, 4)
+fn detail_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(noise_texture_out);
+    if (gid.x >= dims.x || gid.y >= dims.y || gid.z >= dims.z) {
+        return;
+    }
+
+    let uvw = (vec3<f32>(gid) + 0.5) / vec3<f32>(dims);
+    let p = vec3<f32>(uvw.xy, fract(uvw.z + params.z_offset));
+
+    let base = max(1u, params.base_frequency);
+
+    let w0 = clamp(worleyFbm(p, base), 0.0, 1.0);
+    let w1 = clamp(worleyFbm(p, base * 2u), 0.0, 1.0);
+    let w2 = clamp(worleyFbm(p, base * 4u), 0.0, 1.0);
+
+    textureStore(
+        noise_texture_out,
+        vec3<i32>(gid),
+        vec4<f32>(w0, w1, w2, 0.0),
     );
 }
 

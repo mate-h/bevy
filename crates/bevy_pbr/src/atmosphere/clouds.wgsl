@@ -1,15 +1,18 @@
-// Cloud rendering functions using 3D FBM noise
+// Volumetric cloud modeling.
+//
+// The density model follows Schneider, "The Real-Time Volumetric Cloudscapes of
+// Horizon Zero Dawn" (SIGGRAPH 2015) and the NUBIS family of techniques
+// ("Nubis Cubed", Advances in Real-Time Rendering, SIGGRAPH 2023):
+//
+// 1. A 2D macro map (coverage + vertical profile types) is combined with analytic
+//    bottom/top height profiles into a *dimensional profile*.
+// 2. A 3D Perlin-Worley texture forms the base cloud shapes via value erosion:
+//    density = remap(shape_noise, 1 - dimensional_profile, 1, 0, 1).
+// 3. A 3D Worley texture, distorted by 2D curl noise, erodes the cloud edges
+//    (wispy at the base, billowy at the top).
 #define_import_path bevy_pbr::atmosphere::clouds
 
-#import bevy_render::maths::{PI, ray_sphere_intersect}
-#import bevy_pbr::utils::interleaved_gradient_noise
-#import bevy_pbr::atmosphere::{
-    types::{Atmosphere, AtmosphereSettings},
-    bindings::{settings, atmosphere},
-    functions::{
-        get_local_r,
-    },
-}
+#import bevy_render::maths::ray_sphere_intersect
 
 struct CloudLayer {
     cloud_layer_start: f32,
@@ -17,16 +20,40 @@ struct CloudLayer {
     cloud_density: f32,
     cloud_absorption: f32,
     cloud_scattering: f32,
+    coverage: f32,
     noise_scale: f32,
-    noise_offset: vec3<f32>,
+    shape_noise_scale: f32,
     detail_noise_scale: f32,
     detail_strength: f32,
+    curl_strength: f32,
+    phase_g_forward: f32,
+    phase_g_backward: f32,
+    phase_blend: f32,
+    multiscatter_scatter: f32,
+    multiscatter_extinction: f32,
+    multiscatter_phase: f32,
+    powder_strength: f32,
+    ambient_strength: f32,
+    noise_offset: vec3<f32>,
+    wind_velocity: vec3<f32>,
 }
 
 @group(0) @binding(14) var<uniform> cloud_layer: CloudLayer;
+// 2D macro map:
+// - R: coverage (macro placement)
+// - G: bottom type (vertical profile shaping)
+// - B: top type (vertical profile shaping)
+// - A: small-scale coverage variation
 @group(0) @binding(15) var noise_texture_2d: texture_2d<f32>;
 @group(0) @binding(16) var noise_sampler_3d: sampler;
+// 3D shape noise:
+// - R: Perlin-Worley
+// - G/B/A: Worley FBM at 1x/2x/4x frequency
 @group(0) @binding(18) var perlin_worley_noise_3d: texture_3d<f32>;
+// 3D detail/erosion noise: Worley FBM at 1x/2x/4x frequency in R/G/B.
+@group(0) @binding(20) var detail_noise_3d: texture_3d<f32>;
+// 2D curl noise (signed RGB) used to distort detail sampling.
+@group(0) @binding(21) var curl_noise_2d: texture_2d<f32>;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let l2 = dot(v, v);
@@ -36,101 +63,47 @@ fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     return v * inverseSqrt(l2);
 }
 
-// Sample packed cloud noise (RGBA) at a given scale.
-// - R: coverage (macro placement)
-// - G: bottom type (vertical profile shaping)
-// - B: top type (vertical profile shaping)
-// - A: detail (erosion / "up-rez")
-fn sample_cloud_noise_rgba_at_scale(world_pos: vec3<f32>, noise_scale: f32) -> vec4<f32> {
-    // Convert world position to noise texture coordinates in XZ.
-    // Apply a small rotation to break up axis-aligned stretching artifacts.
-    let rot = mat2x2<f32>(
-        0.8660254, -0.5,
-        0.5, 0.8660254
-    ); // 30 degrees
-    let xz = rot * world_pos.xz;
-    let uv = (xz + cloud_layer.noise_offset.xz) / noise_scale;
-    return textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0);
-}
-
-fn sample_perlin_worley_3d(world_pos: vec3<f32>, h: f32) -> vec4<f32> {
-    // Map world XZ into texture space, and use normalized layer height as the 3rd dimension.
-    // A small rotation helps break up axis-aligned repetition.
-    let rot = mat2x2<f32>(
-        0.8660254, -0.5,
-        0.5, 0.8660254
-    );
-    let xz = rot * world_pos.xz;
-    // Scale is tied to the existing noise scale for now to keep tuning surface area small.
-    let uv = (xz + cloud_layer.noise_offset.xz) / 1000.0;
-    let w = h + cloud_layer.noise_offset.y * 1e-5;
-    let uvw = vec3<f32>(uv, w);
-    return textureSampleLevel(perlin_worley_noise_3d, noise_sampler_3d, uvw, 0.0);
-}
-
-/// Get cloud scattering coefficient per unit density
-fn get_cloud_scattering_coeff() -> f32 {
-    return cloud_layer.cloud_scattering;
-}
-
-/// Get cloud absorption coefficient per unit density
-fn get_cloud_absorption_coeff() -> f32 {
-    return cloud_layer.cloud_absorption;
-}
-
-// PERF/DEBUG: Hardcoded repeating sphere SDF volume (no texture fetches).
-//
-// This is intended for debugging raymarching performance and lighting/shadowing:
-// - Deterministic shape
-// - Cheap evaluation
-// - Soft boundary (stable under undersampling)
-//
-// All parameters are intentionally hardcoded in shader code.
-
-const CELL_SIZE_M: f32 = 4000.0;     // spacing between sphere centers (meters)
-const RADIUS_M: f32 = 750.0;        // sphere radius (meters)
-const SOFTNESS_M: f32 = 10.0;       // boundary softness (meters)
-
-// Debug toggle: when enabled, use a single sphere centered in the middle of the cloud layer
-// instead of a repeating cell volume. This is useful to validate coordinate systems and
-// shadow-map alignment.
-const CLOUD_DEBUG_SINGLE_SPHERE: bool = false;
-
-// Primary cloud shape toggle:
-// - false: use the debug sphere SDF volume (single/repeating) for lighting/debugging
-// - true : use noise-based cumulus shaping (envelope + FBM erosion)
-const CLOUD_USE_NOISE_SHAPE: bool = true;
-
-// --- Cumulus tuning knobs (shader constants for now) ---
-// Increase density and sharpen cloud borders by tightening the coverage threshold band
-// and applying a contrast curve.
-const CUMULUS_EDGE_THRESHOLD: f32 = 0.75; // higher => fewer, more isolated clouds
-const CUMULUS_EDGE_WIDTH: f32 = 0.01;     // smaller => sharper border
-const CUMULUS_EDGE_SHARPNESS: f32 = 1.0;  // >1 => steeper transition to "fully inside cloud"
-
-fn debug_sphere_center() -> vec3<f32> {
-    // Place the sphere at scene "origin" in XZ, and centered vertically in the cloud layer.
-    // Note: the atmosphere coordinate system is planet-centered; y points "up" locally.
-    let center_r = 0.5 * (cloud_layer.cloud_layer_start + cloud_layer.cloud_layer_end);
-    return vec3(0.0, center_r, 0.0);
-}
-
-// --- Noise-based cumulus shaping (NUBIS-like envelope method) ---
-//
-// We use:
-// - a 2D "coverage" field (noise texture) mapped over XZ
-// - an envelope profile over height (bottom/top gradients)
-// - FBM-like erosion/detail sampled from the same 2D noise with different scales/warps
-//
-// This keeps the binding footprint unchanged while producing much more cloud-like shapes
-// than the sphere debug volume.
-
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     let t = clamp((x - a) / max(1e-6, b - a), 0.0, 1.0);
     return mix(c, d, t);
 }
 
-// --- Vertical profile method (NUBIS-style) ---
+// 30 degree rotation applied to XZ noise lookups to break up axis-aligned
+// stretching/repetition artifacts.
+const NOISE_ROT: mat2x2<f32> = mat2x2<f32>(
+    0.8660254, -0.5,
+    0.5, 0.8660254
+);
+
+/// Sample the packed 2D macro map (coverage + profile types) over world XZ.
+fn sample_cloud_macro_map(world_pos: vec3<f32>) -> vec4<f32> {
+    let xz = NOISE_ROT * (world_pos.xz + cloud_layer.noise_offset.xz);
+    let uv = xz / cloud_layer.noise_scale;
+    return textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0);
+}
+
+/// Sample the 3D Perlin-Worley shape noise with full 3D world coordinates.
+fn sample_shape_noise(pos: vec3<f32>) -> vec4<f32> {
+    let uvw = (pos + cloud_layer.noise_offset) / cloud_layer.shape_noise_scale;
+    return textureSampleLevel(perlin_worley_noise_3d, noise_sampler_3d, uvw, 0.0);
+}
+
+/// Sample the 3D Worley detail noise with full 3D world coordinates.
+/// Detail scrolls slightly faster than the base shape so erosion churns over time.
+fn sample_detail_noise(pos: vec3<f32>) -> vec4<f32> {
+    let uvw = (pos + cloud_layer.noise_offset * 1.35) / cloud_layer.detail_noise_scale;
+    return textureSampleLevel(detail_noise_3d, noise_sampler_3d, uvw, 0.0);
+}
+
+/// Sample the signed curl noise field over world XZ.
+fn sample_curl_noise(world_pos: vec3<f32>) -> vec3<f32> {
+    // Tile the curl field a bit above the detail frequency so the distortion
+    // varies across a single detail tile.
+    let uv = (world_pos.xz + cloud_layer.noise_offset.xz) / (cloud_layer.detail_noise_scale * 4.0);
+    return textureSampleLevel(curl_noise_2d, noise_sampler_3d, uv, 0.0).rgb;
+}
+
+// --- Vertical profile (NUBIS-style) ---
 //
 // In Nubis/UE the "top type" and "bottom type" are used to sample 2D profile lookup textures:
 // - x axis: type
@@ -162,92 +135,119 @@ fn cloud_top_profile(h: f32, top_type: f32) -> f32 {
     return pow(x, exp);
 }
 
-fn sample_cumulus_shape(r: f32, world_pos: vec3<f32>) -> f32 {
-    // Cloud layer normalized height.
-    let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
-    let height_in_layer = r - cloud_layer.cloud_layer_start;
-    let h = clamp(height_in_layer / max(1.0, layer_thickness), 0.0, 1.0);
-
-    // NUBIS-like Vertical Profile Method
-    // We start with 2D NDF-style fields:
-    // - coverage: controls where clouds form
-    // - bottom_type/top_type: controls the vertical profile shape
-    //
-    // Then:
-    // dimensional_profile = vertical_profile * coverage
-    let macro_noise = sample_cloud_noise_rgba_at_scale(world_pos, cloud_layer.noise_scale);
-    var cov = macro_noise.r;
-    let bottom_type = macro_noise.g;
-    let top_type = macro_noise.b;
-
-    // Vertical profile (height-dependent density envelope).
-    let bottom_profile = cloud_bottom_profile(h, bottom_type);
-    let top_profile = cloud_top_profile(h, top_type);
-    let vertical_profile = clamp(bottom_profile * top_profile, 0.0, 1.0);
-    cov -= pow(h, 6.0 * top_type);
-
-    // // Keep the existing 2D detail channel for edge modulation / small-scale erosion.
-    let micro = sample_cloud_noise_rgba_at_scale(world_pos, cloud_layer.detail_noise_scale);
-    let detail_n = micro.a;
-    let edge_mod = (detail_n - 0.5) * smoothstep(0.0, 1.0, h);
-    cov += edge_mod * 1.0;
-
-    // 3D Perlin–Worley shaping: gives true volumetric breakup and avoids the "vertical walls"
-    // you get from purely 2D coverage fields.
-    let pw = sample_perlin_worley_3d(world_pos, h);
-    let worley = pw.yzw;
-    // Combine Worley FBM bands (matches the reference weights).
-    let wfbm = worley.x * 0.625 + worley.y * 0.125 + worley.z * 0.25;
-    var shape3 = remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0);
-    shape3 = remap(shape3, 0.85, 1.0, 0.0, 1.0);
-    shape3 = clamp(shape3, 0.0, 1.0);
-    cov += shape3 * 0.2;
-
-    // fake cov value for testing (xy sine wave)
-    // let cov_fake = sin(world_pos.x * 0.0003) * sin(world_pos.z * 0.0003);
-    
-    // Coverage mask with height-varying threshold modulation
-    let edge0 = CUMULUS_EDGE_THRESHOLD - CUMULUS_EDGE_WIDTH;
-    let edge1 = CUMULUS_EDGE_THRESHOLD + CUMULUS_EDGE_WIDTH;
-    let edge = pow(smoothstep(edge0, edge1, cov), CUMULUS_EDGE_SHARPNESS);
-    return edge;
+/// Result of sampling the cloud field at a point.
+struct CloudSample {
+    /// Shape density in [0, 1] (multiply by `cloud_layer.cloud_density` for medium density).
+    density: f32,
+    /// Dimensional profile in [0, 1]: coverage x vertical profile, before noise shaping.
+    /// Used by the lighting model (NUBIS-style ambient scattering).
+    profile: f32,
+    /// Normalized height within the cloud layer in [0, 1].
+    height: f32,
 }
 
-/// Cloud shape / coverage term in [0, 1].
-/// This is *not* a physical density by itself: it is the normalized field used to
-/// shape the cloud volume (noise + height falloff).
-fn get_cloud_coverage(r: f32, world_pos: vec3<f32>) -> f32 {
-    // Check if we're within the cloud layer
+/// Wind shear: skew sample positions along the wind direction with height, so cloud
+/// tops trail their bases slightly.
+const WIND_SHEAR_M: f32 = 500.0;
+
+/// Sample the full cloud field at a point.
+fn sample_cloud(r: f32, world_pos: vec3<f32>) -> CloudSample {
+    var out: CloudSample;
+    out.density = 0.0;
+    out.profile = 0.0;
+    out.height = 0.0;
+
+    // Check if we're within the cloud layer.
     if (r < cloud_layer.cloud_layer_start || r > cloud_layer.cloud_layer_end) {
-        return 0.0;
+        return out;
     }
 
-    if (CLOUD_USE_NOISE_SHAPE) {
-        return sample_cumulus_shape(r, world_pos);
-    }
-
-    // Debug sphere volume path
-    if (CLOUD_DEBUG_SINGLE_SPHERE) {
-        let c = debug_sphere_center();
-        let sdf = length(world_pos - c) - RADIUS_M;
-        let density = 1.0 - smoothstep(-SOFTNESS_M, SOFTNESS_M, sdf);
-        return clamp(density, 0.0, 1.0);
-    }
-
-    // Repeating spheres in XZ only.
     let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
-    let height_in_layer = r - cloud_layer.cloud_layer_start;
-    let center_y = 0.5 * layer_thickness;
-    let y_rel = height_in_layer - center_y;
-    let cell_xz = fract(world_pos.xz / CELL_SIZE_M) - vec2(0.5);
-    let q = vec3(cell_xz * CELL_SIZE_M, y_rel);
-    let sdf = length(q) - RADIUS_M;
-    let sphere_density = 1.0 - smoothstep(-SOFTNESS_M, SOFTNESS_M, sdf);
-    return clamp(sphere_density, 0.0, 1.0);
+    let h = clamp((r - cloud_layer.cloud_layer_start) / max(1.0, layer_thickness), 0.0, 1.0);
+    out.height = h;
+
+    // 1. Dimensional profile: coverage x vertical profile.
+    let macro_map = sample_cloud_macro_map(world_pos);
+
+    // Global coverage control: 0 clears the sky, 1 fills it. The macro FBM
+    // concentrates around 0.5, so treat `coverage` as a sliding threshold and
+    // rebuild a high-contrast signal above it: cloud interiors saturate to full
+    // coverage while edges ramp off softly.
+    let coverage_threshold = 1.0 - cloud_layer.coverage;
+    var coverage = remap(macro_map.r, coverage_threshold, coverage_threshold + 0.15, 0.0, 1.0);
+    // Small-scale coverage variation breaks up the macro structure.
+    coverage = saturate(coverage + (macro_map.a - 0.5) * 0.2);
+    if (coverage <= 0.0) {
+        return out;
+    }
+
+    let bottom_profile = cloud_bottom_profile(h, macro_map.g);
+    let top_profile = cloud_top_profile(h, macro_map.b);
+    let vertical_profile = saturate(bottom_profile * top_profile);
+
+    let dimensional_profile = vertical_profile * coverage;
+    out.profile = dimensional_profile;
+    if (dimensional_profile <= 0.0) {
+        return out;
+    }
+
+    // Height-based wind shear applied to the 3D noise lookups.
+    let wind_dir = cloud_layer.wind_velocity;
+    let wind_speed2 = dot(wind_dir, wind_dir);
+    var shaped_pos = world_pos;
+    if (wind_speed2 > 1e-6) {
+        shaped_pos += (wind_dir * inverseSqrt(wind_speed2)) * (h * WIND_SHEAR_M);
+    }
+
+    // 2. Base shape: Perlin-Worley remapped by Worley FBM octaves (GPU Pro 7),
+    //    then value-eroded by the dimensional profile (NUBIS):
+    //    density = saturate((noise - (1 - profile)) / profile)
+    let pw = sample_shape_noise(shaped_pos);
+    let shape_fbm = pw.g * 0.625 + pw.b * 0.25 + pw.a * 0.125;
+    let shape = remap(pw.r, shape_fbm - 1.0, 1.0, 0.0, 1.0);
+    var density = remap(shape, 1.0 - dimensional_profile, 1.0, 0.0, 1.0);
+
+    // 3. Detail erosion at cloud edges, distorted by curl noise (HZD).
+    if (density > 0.0 && cloud_layer.detail_strength > 0.0) {
+        // Curl distortion is strongest near the base for wispy, turbulent bottoms.
+        let curl = sample_curl_noise(world_pos);
+        let detail_pos = shaped_pos + curl * (cloud_layer.curl_strength * (1.0 - h));
+
+        let dn = sample_detail_noise(detail_pos);
+        let detail_fbm = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
+
+        // Wispy shapes (direct Worley) at the base transition to billowy shapes
+        // (inverted Worley) at the top.
+        let detail_mod = mix(detail_fbm, 1.0 - detail_fbm, saturate(h * 5.0));
+
+        // Erode most aggressively at the edges (low density) and leave cloud
+        // interiors intact.
+        let erosion = detail_mod * cloud_layer.detail_strength * (1.0 - density);
+        density = remap(density, erosion, 1.0, 0.0, 1.0);
+    }
+
+    out.density = density;
+    return out;
 }
 
-/// Returns (density, grad_mag) for the current debug cloud field.
-/// - density is the normalized coverage term in [0,1]
+/// Get cloud scattering coefficient per unit density
+fn get_cloud_scattering_coeff() -> f32 {
+    return cloud_layer.cloud_scattering;
+}
+
+/// Get cloud absorption coefficient per unit density
+fn get_cloud_absorption_coeff() -> f32 {
+    return cloud_layer.cloud_absorption;
+}
+
+/// Cloud *medium density* used for extinction / scattering integration.
+/// This is the normalized shape density scaled by `cloud_layer.cloud_density`.
+fn get_cloud_medium_density(r: f32, world_pos: vec3<f32>) -> f32 {
+    return sample_cloud(r, world_pos).density * cloud_layer.cloud_density;
+}
+
+/// Returns (density, grad_mag) for the cloud field.
+/// - density is the normalized shape density in [0,1]
 /// - grad_mag is an estimate of |∇density| in 1/m, useful for adaptive stepping.
 fn sample_cloud_field_density_and_grad(r: f32, world_pos: vec3<f32>) -> vec2<f32> {
     // Outside cloud layer => empty and flat field.
@@ -255,49 +255,21 @@ fn sample_cloud_field_density_and_grad(r: f32, world_pos: vec3<f32>) -> vec2<f32
         return vec2(0.0, 0.0);
     }
 
-    // If we are using the noise shape, approximate gradient magnitude with finite differences
-    // in XZ (cheap-ish and good enough for adaptive substepping decisions).
-    if (CLOUD_USE_NOISE_SHAPE) {
-        let d0 = sample_cumulus_shape(r, world_pos);
-        const EPS_M: f32 = 500.0;
-        // Sample along local tangent directions to avoid directional bias / skew.
-        let up = safe_normalize(world_pos);
-        let east = safe_normalize(vec3(-up.z, 0.0, up.x));
-        let north = safe_normalize(cross(up, east));
-        let dx = sample_cumulus_shape(r, world_pos + east * EPS_M);
-        let dz = sample_cumulus_shape(r, world_pos + north * EPS_M);
-        // |∇density| ≈ sqrt((dd/dx)^2 + (dd/dz)^2)
-        let ddx = abs(dx - d0) / EPS_M;
-        let ddz = abs(dz - d0) / EPS_M;
-        let grad_mag = sqrt(ddx * ddx + ddz * ddz);
-        return vec2(d0, grad_mag);
-    }
-
-    // Debug sphere field: analytic gradient proxy from SDF smoothstep.
-    var sdf: f32;
-    if (CLOUD_DEBUG_SINGLE_SPHERE) {
-        let c = debug_sphere_center();
-        sdf = length(world_pos - c) - RADIUS_M;
-    } else {
-        let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
-        let height_in_layer = r - cloud_layer.cloud_layer_start;
-        let center_y = 0.5 * layer_thickness;
-        let y_rel = height_in_layer - center_y;
-        let cell_xz = fract(world_pos.xz / CELL_SIZE_M) - vec2(0.5);
-        let q = vec3(cell_xz * CELL_SIZE_M, y_rel);
-        sdf = length(q) - RADIUS_M;
-    }
-
-    let edge0 = -SOFTNESS_M;
-    let edge1 = SOFTNESS_M;
-    let denom = (edge1 - edge0);
-    let tt = clamp((sdf - edge0) / denom, 0.0, 1.0);
-    let smoothen = tt * tt * (3.0 - 2.0 * tt);
-    let sphere_density = 1.0 - smoothen;
-    let d_sphere_density_dsdf = 6.0 * tt * (1.0 - tt) / denom;
-    let density = clamp(sphere_density, 0.0, 1.0);
-    let grad_mag = d_sphere_density_dsdf;
-    return vec2(density, grad_mag);
+    // Approximate gradient magnitude with finite differences in the local tangent
+    // plane (cheap-ish and good enough for adaptive substepping decisions).
+    let d0 = sample_cloud(r, world_pos).density;
+    const EPS_M: f32 = 500.0;
+    // Sample along local tangent directions to avoid directional bias / skew.
+    let up = safe_normalize(world_pos);
+    let east = safe_normalize(vec3(-up.z, 0.0, up.x));
+    let north = safe_normalize(cross(up, east));
+    let dx = sample_cloud(r, world_pos + east * EPS_M).density;
+    let dz = sample_cloud(r, world_pos + north * EPS_M).density;
+    // |∇density| ≈ sqrt((dd/dx)^2 + (dd/dz)^2)
+    let ddx = abs(dx - d0) / EPS_M;
+    let ddz = abs(dz - d0) / EPS_M;
+    let grad_mag = sqrt(ddx * ddx + ddz * ddz);
+    return vec2(d0, grad_mag);
 }
 
 /// Returns (start_t, end_t, valid) for the segment of the ray inside the cloud layer shell.
@@ -351,107 +323,4 @@ fn cloud_layer_segment(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> {
 
     // Convert km back to meters for callers.
     return vec3(t_min * KM_TO_M, t_max * KM_TO_M, select(0.0, 1.0, valid));
-}
-
-/// Cloud *medium density* used for extinction / scattering integration.
-/// This is the normalized coverage term scaled by `cloud_layer.cloud_density`.
-fn get_cloud_medium_density(r: f32, world_pos: vec3<f32>) -> f32 {
-    return get_cloud_coverage(r, world_pos) * cloud_layer.cloud_density;
-}
-
-/// Raymarch through clouds towards the sun to compute volumetric shadow
-/// Returns the light transmittance factor [0,1] where 0 = fully shadowed, 1 = no shadow
-/// Properly handles viewer inside clouds and grazing angles
-fn compute_cloud_shadow(
-    world_pos: vec3<f32>,
-    sun_dir: vec3<f32>,
-    steps: u32,
-    pixel_coords: vec2<f32>,
-) -> f32 {
-    // Early exit if clouds are disabled
-    if (cloud_layer.cloud_density <= 0.0) {
-        return 1.0;
-    }
-
-    // March bounds: only integrate within the cloud layer shell along the sun ray.
-    let seg = cloud_layer_segment(world_pos, sun_dir);
-    if (seg.z < 0.5) {
-        return 1.0;
-    }
-
-    var march_start = max(seg.x, 0.0);
-    var march_end = seg.y;
-    if (march_start >= march_end || march_end <= 0.0) {
-        return 1.0;
-    }
-
-    // Earth (planet) shadow term:
-    // If the sun ray hits the planet surface before it exits the cloud layer,
-    // the sun is fully occluded and there is no direct lighting.
-    let r0 = length(world_pos);
-    let up0 = normalize(world_pos);
-    let mu0 = dot(sun_dir, up0);
-    let ground_i = ray_sphere_intersect(r0, mu0, atmosphere.inner_radius);
-    // `ground_i.x` is the nearest positive intersection along the ray, if any.
-    if (ground_i.x > 0.0 && ground_i.x < march_end) {
-        return 0.0;
-    }
-
-    let march_distance = march_end - march_start;
-
-    // Adaptive step count: long segments need more samples, otherwise we can miss small dense regions
-    // (especially with the repeating-sphere debug density field).
-    const TARGET_STEP_M: f32 = 1500.0;
-    const MAX_SHADOW_STEPS: f32 = 16.0;
-    let desired = clamp(ceil(march_distance / TARGET_STEP_M), f32(steps), MAX_SHADOW_STEPS);
-    let shadow_steps = max(1u, u32(desired));
-
-    let step_size = march_distance / f32(shadow_steps);
-    var optical_depth = 0.0;
-
-    // Raymarch through clouds towards sun with per-step jitter.
-    for (var i = 0u; i < shadow_steps; i++) {
-        let j = interleaved_gradient_noise(pixel_coords, 100u + i); // [0,1]
-        let t = march_start + (f32(i) + j) * step_size;
-        let sample_pos = world_pos + sun_dir * t;
-        let sample_r = length(sample_pos);
-
-        let density = get_cloud_medium_density(sample_r, sample_pos);
-        if (density > 0.0) {
-            let extinction = density * (cloud_layer.cloud_scattering + cloud_layer.cloud_absorption);
-            optical_depth += extinction * step_size;
-            // Early out when essentially fully shadowed
-            if (optical_depth > 8.0) {
-                return 0.0;
-            }
-        }
-    }
-
-    return exp(-optical_depth);
-}
-
-/// Simplified cloud contribution for a single sample point
-/// Returns (luminance_added, transmittance_multiplier)
-fn sample_cloud_contribution(
-    world_pos: vec3<f32>,
-    step_size: f32,
-) -> vec2<f32> {
-    let r = length(world_pos);
-    let density = get_cloud_medium_density(r, world_pos);
-    
-    if (density < 0.01) {
-        return vec2(0.0, 1.0);
-    }
-    
-    // Physically correct coefficients (units: m^-1 per unit density)
-    let extinction = density * (cloud_layer.cloud_scattering + cloud_layer.cloud_absorption);
-    let scattering = density * cloud_layer.cloud_scattering;
-    
-    // Beer's law
-    let transmittance = exp(-extinction * step_size);
-    
-    // Simple uniform scattering (could be enhanced with actual sun direction)
-    let in_scatter = scattering * (1.0 - transmittance);
-    
-    return vec2(in_scatter, transmittance);
 }

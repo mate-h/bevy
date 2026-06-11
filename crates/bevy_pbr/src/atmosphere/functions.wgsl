@@ -20,13 +20,13 @@
 #ifdef CLOUDS_ENABLED
 #import bevy_pbr::atmosphere::bindings::stbn_texture
 #import bevy_pbr::atmosphere::clouds::{
-    get_cloud_coverage,
+    cloud_layer,
+    sample_cloud,
     get_cloud_medium_density,
     sample_cloud_field_density_and_grad,
     cloud_layer_segment,
     get_cloud_absorption_coeff,
     get_cloud_scattering_coeff,
-    sample_cloud_contribution,
 }
 #endif
 
@@ -260,21 +260,19 @@ fn build_light_basis(light_dir: vec3<f32>) -> LightBasis {
     return LightBasis(x, y);
 }
 
-/// Helper for cloud shadow PCF: evaluates transmittance from shadow map data.
-fn cloud_shadow_transmittance(data: vec3<f32>, d_sample: f32) -> f32 {
+/// Helper for cloud shadow sampling: evaluates the optical depth tau from shadow map data.
+fn cloud_shadow_tau(data: vec3<f32>, d_sample: f32) -> f32 {
     let front_depth = data.r * 1000.0;
     let mean_ext = data.g;
     let max_optical_depth = data.b;
     let delta = max(0.0, d_sample - front_depth);
-    var tau = mean_ext * delta;
-    tau = min(tau, max_optical_depth);
-    return exp(-tau);
+    let tau = mean_ext * delta;
+    return min(tau, max_optical_depth);
 }
 
 /// Ground illuminance variant: uses only the stored optical depth (B channel), ignoring front depth.
-fn cloud_shadow_optical_depth(data: vec3<f32>) -> f32 {
-    let optical_depth = data.b;
-    return exp(-optical_depth);
+fn cloud_shadow_tau_od_only(data: vec3<f32>) -> f32 {
+    return data.b;
 }
 
 fn snap_anchor_to_texel_grid(anchor: vec3<f32>, basis: LightBasis, extent: f32, size: vec2<u32>) -> vec3<f32> {
@@ -293,7 +291,7 @@ fn snap_anchor_to_texel_grid(anchor: vec3<f32>, basis: LightBasis, extent: f32, 
     return anchor + basis.x * dx + basis.y * dy;
 }
 
-/// Unreal-style cloud shadow map evaluation.
+/// Unreal-style cloud shadow map evaluation, returning the optical depth tau toward the light.
 ///
 /// The `cloud_shadow_map` stores:
 /// - R: front depth (meters) from the light-volume near plane
@@ -302,21 +300,24 @@ fn snap_anchor_to_texel_grid(anchor: vec3<f32>, basis: LightBasis, extent: f32, 
 ///
 /// For a world-space sample point, we compute:
 ///   tau = mean_ext * (d_sample - d_front), clamped by max_optical_depth
-///   T = exp(-tau)
+///
+/// The corresponding transmittance is T = exp(-tau). Returning tau instead of T lets the
+/// cloud lighting model attenuate each multiple-scattering octave differently
+/// (Wrenninge et al., "Oz: The Great and Volumetric", used by Frostbite).
 ///
 /// When `use_optical_depth_only` is true (e.g. for ground illuminance), front depth is ignored
-/// and transmittance is computed from the stored optical depth only: T = exp(-optical_depth).
-fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, use_optical_depth_only: bool) -> f32 {
+/// and the stored max optical depth is returned directly.
+fn sample_cloud_shadow_map_tau(world_pos: vec3<f32>, direction_to_light: vec3<f32>, use_optical_depth_only: bool) -> f32 {
     // Only meaningful in raymarched mode.
     if (settings.rendering_method != 1u) {
-        return 1.0;
+        return 0.0;
     }
 
     let extent = settings.cloud_shadow_map_extent;
     // Keep consumer consistent with producer: half-depth is derived from extent (Unreal-style).
     let half_depth = extent * 2.0;
     if (extent <= 0.0 || half_depth <= 0.0) {
-        return 1.0;
+        return 0.0;
     }
 
     // IMPORTANT: use the same trace direction as the compute pass:
@@ -333,7 +334,7 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     let x = dot(rel, basis.x);
     let y = dot(rel, basis.y);
     if (abs(x) > extent || abs(y) > extent) {
-        return 1.0;
+        return 0.0;
     }
 
     // Depth from near plane along light direction.
@@ -341,7 +342,7 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     let d_sample = dot(rel, trace_dir) + half_depth;
     let max_t = 2.0 * half_depth;
     if (d_sample <= 0.0 || d_sample >= max_t) {
-        return 1.0;
+        return 0.0;
     }
 
     let uv = vec2(x, y) / (2.0 * extent) + vec2(0.5);
@@ -349,12 +350,13 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     #ifdef CLOUD_SHADOW_SIMPLE_SAMPLING
     let d = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv, 0.0).rgb;
     if (use_optical_depth_only) {
-        return cloud_shadow_optical_depth(d);
+        return cloud_shadow_tau_od_only(d);
     }
-    return cloud_shadow_transmittance(d, d_sample);
+    return cloud_shadow_tau(d, d_sample);
     #else
     // 4-tap PCF (2x2 half-texel) to reduce aliasing and soften shadow edges.
     // Samples are offset by ±0.25 texels so the 2x2 footprint covers the sampling area.
+    // Filtering happens in transmittance space, then converts back to optical depth.
     let size = vec2<f32>(settings.cloud_shadow_map_size);
     let texel = vec2(1.0 / max(size.x, 1.0), 1.0 / max(size.y, 1.0));
     let o = 0.25 * texel;
@@ -364,13 +366,19 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     let d01 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(-o.x, o.y), 0.0).rgb;
     let d11 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(o.x, o.y), 0.0).rgb;
 
-    let t00 = select(cloud_shadow_transmittance(d00, d_sample), cloud_shadow_optical_depth(d00), use_optical_depth_only);
-    let t10 = select(cloud_shadow_transmittance(d10, d_sample), cloud_shadow_optical_depth(d10), use_optical_depth_only);
-    let t01 = select(cloud_shadow_transmittance(d01, d_sample), cloud_shadow_optical_depth(d01), use_optical_depth_only);
-    let t11 = select(cloud_shadow_transmittance(d11, d_sample), cloud_shadow_optical_depth(d11), use_optical_depth_only);
+    let t00 = select(cloud_shadow_tau(d00, d_sample), cloud_shadow_tau_od_only(d00), use_optical_depth_only);
+    let t10 = select(cloud_shadow_tau(d10, d_sample), cloud_shadow_tau_od_only(d10), use_optical_depth_only);
+    let t01 = select(cloud_shadow_tau(d01, d_sample), cloud_shadow_tau_od_only(d01), use_optical_depth_only);
+    let t11 = select(cloud_shadow_tau(d11, d_sample), cloud_shadow_tau_od_only(d11), use_optical_depth_only);
 
-    return (t00 + t10 + t01 + t11) * 0.25;
+    let mean_transmittance = (exp(-t00) + exp(-t10) + exp(-t01) + exp(-t11)) * 0.25;
+    return -log(max(mean_transmittance, 1e-6));
     #endif
+}
+
+/// Cloud shadow transmittance: T = exp(-tau). See `sample_cloud_shadow_map_tau`.
+fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, use_optical_depth_only: bool) -> f32 {
+    return exp(-sample_cloud_shadow_map_tau(world_pos, direction_to_light, use_optical_depth_only));
 }
 #endif
 
@@ -381,9 +389,13 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
     var inscattering = vec3(0.0);
     
     #ifdef CLOUDS_ENABLED
-    // Sample cloud *medium density* at this point (includes `cloud_layer.cloud_density`)
-    // so clouds respond consistently across scattering vs shadowing.
-    let cloud_density = get_cloud_medium_density(local_r, world_pos);
+    // Sample the cloud field once per point: density drives scattering, the
+    // dimensional profile and height drive the NUBIS-style ambient term.
+    let cloud = sample_cloud(local_r, world_pos);
+    let cloud_medium_density = cloud.density * cloud_layer.cloud_density;
+    let cloud_sigma_s = cloud_medium_density * cloud_layer.cloud_scattering;
+    let cloud_sigma_t = cloud_medium_density
+        * (cloud_layer.cloud_scattering + cloud_layer.cloud_absorption);
     #endif
     
     for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
@@ -404,43 +416,78 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
 
         let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
         var shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
-        var scattering_coeff = sample_scattering_lut(local_r, neg_LdotV);
-        
-        #ifdef CLOUDS_ENABLED
-        // NUBIS: Add volumetric cloud scattering with proper physical integration
-        // Clouds contribute to inscattering via Henyey-Greenstein phase function
-        // Compute volumetric shadow from clouds via the cloud shadow map (stable at grazing angles).
-        shadow_factor *= sample_cloud_shadow_map(world_pos, (*light).direction_to_light, false);
-        
-        // Cloud scattering coefficient: σ_s_cloud = density * scattering_coeff
-        // Using physically correct coefficients (units: m^-1 per unit density)
-        // Density is normalized [0, 1], coefficients represent actual physical values
-        // Water droplet clouds have scattering ~0.0008-0.001 m^-1 per unit density
-        let cloud_scattering_coeff = cloud_density * get_cloud_scattering_coeff();
-        
-        // Henyey-Greenstein phase function for anisotropic cloud scattering
-        // NUBIS/Frostbite-style: dual-lobe HG to better match real clouds.
-        //
-        // `neg_LdotV` here is dot(L, ray_dir); see sign convention note above.
-        let cos_theta = clamp(neg_LdotV, -1.0, 1.0);
-
-        // Forward lobe (strong forward scattering) and a weaker backward lobe.
-        // Matches the approach used in `bevy-volumetric-clouds` (Frostbite-inspired).
-        let g_fwd = 0.85;
-        let g_bwd = -0.2;
-        let lobe_lerp = 0.5;
-        let cloud_phase = dual_lobe_hg_phase(cos_theta, g_fwd, g_bwd, lobe_lerp);
-        
-        // Add cloud scattering contribution: σ_s_cloud * p(θ)
-        scattering_coeff += cloud_scattering_coeff * cloud_phase;
-        #endif
-
-        // Transmittance from scattering event to light source
-        let scattering_factor = shadow_factor * scattering_coeff;
+        let scattering_coeff = sample_scattering_lut(local_r, neg_LdotV);
 
         // Additive factor from the multiscattering LUT
         let psi_ms = sample_multiscattering_lut(local_r, mu_light);
         let multiscattering_factor = psi_ms * local_scattering;
+
+        #ifdef CLOUDS_ENABLED
+        // Optical depth through clouds toward this light, from the cloud shadow map
+        // (stable at grazing angles).
+        let cloud_tau = sample_cloud_shadow_map_tau(world_pos, (*light).direction_to_light, false);
+
+        var cloud_inscatter = 0.0;
+        if (cloud_sigma_s > 0.0) {
+            let cos_theta = clamp(neg_LdotV, -1.0, 1.0);
+
+            // Multiple scattering octaves (Wrenninge et al., used by Frostbite with N=2):
+            // each octave n attenuates scattering by a^n, light optical depth by b^n and
+            // phase eccentricity by c^n. Energy conservation requires a <= b.
+            let ms_b = saturate(cloud_layer.multiscatter_extinction);
+            let ms_a = min(saturate(cloud_layer.multiscatter_scatter), ms_b);
+            let ms_c = saturate(cloud_layer.multiscatter_phase);
+
+            var oct_a = 1.0;
+            var oct_b = 1.0;
+            var oct_c = 1.0;
+            for (var n = 0u; n < 2u; n++) {
+                let phase_n = dual_lobe_hg_phase(
+                    cos_theta,
+                    cloud_layer.phase_g_forward * oct_c,
+                    cloud_layer.phase_g_backward * oct_c,
+                    cloud_layer.phase_blend,
+                );
+                cloud_inscatter += oct_a * phase_n * exp(-cloud_tau * oct_b);
+                oct_a *= ms_a;
+                oct_b *= ms_b;
+                oct_c *= ms_c;
+            }
+
+            // Powder / "dark edges" term (Schneider 2015): in-scattering probability
+            // builds with depth into the cloud, so optically thin regions appear darker.
+            // Include a local extinction contribution so thin isolated wisps in front of
+            // the recorded shadow front still receive some darkening.
+            let tau_powder = cloud_tau + cloud_sigma_t * 100.0;
+            let powder = 1.0 - exp(-2.0 * tau_powder);
+            // View-dependent: strongest when looking away from the sun (cos_theta -> -1),
+            // fading out toward the silver lining (cos_theta -> 1).
+            let powder_blend = saturate(0.5 - 0.5 * cos_theta) * saturate(cloud_layer.powder_strength);
+            cloud_inscatter *= mix(1.0, powder, powder_blend);
+
+            cloud_inscatter *= cloud_sigma_s;
+        }
+
+        // Ambient sky contribution (NUBIS-style): approximate sky irradiance with the
+        // multiple-scattering LUT, attenuated toward cloud interiors by the dimensional
+        // profile and biased toward cloud tops (the sky dominates from above).
+        let cloud_ambient = psi_ms * cloud_sigma_s
+            * pow(1.0 - cloud.profile, 0.5)
+            * mix(0.4, 1.0, cloud.height)
+            * cloud_layer.ambient_strength;
+
+        // Air in-scattering is shadowed by the full cloud optical depth; the cloud term
+        // above handles its own per-octave self-shadowing, so only apply the spectral air
+        // transmittance + ground occlusion to it.
+        let cloud_scattering_factor = shadow_factor * cloud_inscatter + cloud_ambient;
+        shadow_factor *= exp(-cloud_tau);
+        #endif
+
+        // Transmittance from scattering event to light source
+        var scattering_factor = shadow_factor * scattering_coeff;
+        #ifdef CLOUDS_ENABLED
+        scattering_factor += cloud_scattering_factor;
+        #endif
 
         inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
     }

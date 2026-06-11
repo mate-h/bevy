@@ -45,18 +45,23 @@ impl Default for FbmNoiseParams {
     }
 }
 
-/// Size of the 2D noise texture
+/// Size of the 2D noise textures
 #[derive(Clone, Copy)]
 pub struct NoiseTextureSize {
+    /// Cloud macro map (coverage/type/detail) resolution.
     pub size: UVec2,
+    /// Curl noise texture resolution (HZD uses 128x128).
+    pub curl_size: UVec2,
 }
 
 impl Default for NoiseTextureSize {
     fn default() -> Self {
         Self {
-            // Higher resolution reduces visible repetition in cloud coverage.
-            // This is still cheap to generate once at startup.
-            size: UVec2::new(32, 32),
+            // Higher resolution reduces visible repetition in cloud coverage
+            // and carries more octaves of detail. Still cheap: generated once
+            // at startup.
+            size: UVec2::new(512, 512),
+            curl_size: UVec2::new(128, 128),
         }
     }
 }
@@ -101,10 +106,11 @@ impl FromWorld for FbmNoiseBindGroupLayout {
     }
 }
 
-/// Resource containing the compute pipeline for FBM noise generation
+/// Resource containing the compute pipelines for 2D cloud noise generation
 #[derive(Resource)]
 pub struct FbmNoisePipeline {
     pub pipeline: CachedComputePipelineId,
+    pub curl_pipeline: CachedComputePipelineId,
 }
 
 impl FromWorld for FbmNoisePipeline {
@@ -116,10 +122,22 @@ impl FromWorld for FbmNoisePipeline {
             label: Some("fbm_noise_2d_pipeline".into()),
             layout: vec![layout.descriptor.clone()],
             shader: load_embedded_asset!(world, "fbm_noise_3d.wgsl"),
+            entry_point: Some("main".into()),
             ..default()
         });
 
-        Self { pipeline }
+        let curl_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("curl_noise_2d_pipeline".into()),
+            layout: vec![layout.descriptor.clone()],
+            shader: load_embedded_asset!(world, "fbm_noise_3d.wgsl"),
+            entry_point: Some("curl_main".into()),
+            ..default()
+        });
+
+        Self {
+            pipeline,
+            curl_pipeline,
+        }
     }
 }
 
@@ -130,10 +148,18 @@ pub struct FbmNoiseTexture {
     pub size: UVec2,
 }
 
-/// Resource containing the bind group for the noise generation pass
+/// Resource containing the generated 2D curl noise texture (signed RGB).
+#[derive(Resource)]
+pub struct CurlNoiseTexture {
+    pub texture: CachedTexture,
+    pub size: UVec2,
+}
+
+/// Resource containing the bind groups for the noise generation passes
 #[derive(Resource)]
 pub struct FbmNoiseBindGroup {
     pub bind_group: BindGroup,
+    pub curl_bind_group: BindGroup,
 }
 
 /// Resource containing the uniform buffer for FBM parameters
@@ -152,40 +178,49 @@ pub fn init_fbm_noise_texture(
 ) {
     let size = NoiseTextureSize::default();
 
-    let texture_descriptor = TextureDescriptor {
-        label: Some("fbm_noise_2d_texture"),
-        size: Extent3d {
-            width: size.size.x,
-            height: size.size.y,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        // Packed cloud noise (coverage + type controls + detail).
-        format: TextureFormat::Rgba16Float,
-        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    };
+    let make_texture = |label: &'static str, size: UVec2| {
+        let texture_descriptor = TextureDescriptor {
+            label: Some(label),
+            size: Extent3d {
+                width: size.x,
+                height: size.y,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
 
-    let texture = render_device.create_texture(&texture_descriptor);
-    let default_view = texture.create_view(&TextureViewDescriptor::default());
-
-    commands.insert_resource(FbmNoiseTexture {
-        texture: CachedTexture {
+        let texture = render_device.create_texture(&texture_descriptor);
+        let default_view = texture.create_view(&TextureViewDescriptor::default());
+        CachedTexture {
             texture,
             default_view,
-        },
+        }
+    };
+
+    commands.insert_resource(FbmNoiseTexture {
+        // Packed cloud noise (coverage + type controls + detail).
+        texture: make_texture("fbm_noise_2d_texture", size.size),
         size: size.size,
+    });
+    commands.insert_resource(CurlNoiseTexture {
+        // Signed curl noise (RGB) for detail distortion; rgba16float keeps the sign.
+        texture: make_texture("curl_noise_2d_texture", size.curl_size),
+        size: size.curl_size,
     });
 }
 
-/// System to prepare the FBM noise bind group
+/// System to prepare the FBM noise bind groups
 pub fn prepare_fbm_noise_bind_group(
     mut commands: bevy_ecs::system::Commands,
     render_device: Res<RenderDevice>,
     layout: Res<FbmNoiseBindGroupLayout>,
     texture: Res<FbmNoiseTexture>,
+    curl_texture: Res<CurlNoiseTexture>,
     params_buffer: Res<FbmNoiseParamsBuffer>,
 ) {
     let bind_group = render_device.create_bind_group(
@@ -197,7 +232,19 @@ pub fn prepare_fbm_noise_bind_group(
         )),
     );
 
-    commands.insert_resource(FbmNoiseBindGroup { bind_group });
+    let curl_bind_group = render_device.create_bind_group(
+        "curl_noise_bind_group",
+        &layout.layout,
+        &BindGroupEntries::with_indices((
+            (13, &curl_texture.texture.default_view),
+            (14, params_buffer.buffer.as_entire_binding()),
+        )),
+    );
+
+    commands.insert_resource(FbmNoiseBindGroup {
+        bind_group,
+        curl_bind_group,
+    });
 }
 
 /// System to initialize the FBM noise parameters buffer
@@ -224,11 +271,14 @@ pub fn get_noise_dispatch_size(texture_size: UVec2) -> UVec2 {
     )
 }
 
-/// Resource to track if noise has been generated
+/// Resource to track if the 2D noise textures have been generated
 #[derive(Resource, Default)]
-pub struct NoiseGenerated(pub bool);
+pub struct NoiseGenerated {
+    pub map: bool,
+    pub curl: bool,
+}
 
-/// System to generate the FBM noise texture (runs once)
+/// System to generate the 2D cloud noise textures (each runs once)
 pub fn generate_fbm_noise_once(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -236,10 +286,10 @@ pub fn generate_fbm_noise_once(
     pipeline: Res<FbmNoisePipeline>,
     bind_group: Option<Res<FbmNoiseBindGroup>>,
     texture: Res<FbmNoiseTexture>,
+    curl_texture: Res<CurlNoiseTexture>,
     mut noise_generated: ResMut<NoiseGenerated>,
 ) {
-    // Only generate once
-    if noise_generated.0 {
+    if noise_generated.map && noise_generated.curl {
         return;
     }
 
@@ -247,14 +297,13 @@ pub fn generate_fbm_noise_once(
         return;
     };
 
-    let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline) else {
-        return;
-    };
-
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("fbm_noise_generation"),
     });
+    let mut any_dispatched = false;
 
+    if !noise_generated.map
+        && let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline)
     {
         let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("fbm_noise_2d_pass"),
@@ -266,10 +315,31 @@ pub fn generate_fbm_noise_once(
 
         let dispatch_size = get_noise_dispatch_size(texture.size);
         compute_pass.dispatch_workgroups(dispatch_size.x, dispatch_size.y, 1);
+
+        noise_generated.map = true;
+        any_dispatched = true;
     }
 
-    let command_buffer = encoder.finish();
-    render_queue.submit([command_buffer]);
+    if !noise_generated.curl
+        && let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.curl_pipeline)
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("curl_noise_2d_pass"),
+            timestamp_writes: None,
+        });
 
-    noise_generated.0 = true;
+        compute_pass.set_pipeline(compute_pipeline);
+        compute_pass.set_bind_group(0, &bind_group.curl_bind_group, &[]);
+
+        let dispatch_size = get_noise_dispatch_size(curl_texture.size);
+        compute_pass.dispatch_workgroups(dispatch_size.x, dispatch_size.y, 1);
+
+        noise_generated.curl = true;
+        any_dispatched = true;
+    }
+
+    if any_dispatched {
+        let command_buffer = encoder.finish();
+        render_queue.submit([command_buffer]);
+    }
 }
