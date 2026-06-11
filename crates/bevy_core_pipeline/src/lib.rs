@@ -7,6 +7,7 @@
 )]
 
 pub mod blit;
+mod camera_stack;
 pub mod core_2d;
 pub mod core_3d;
 pub mod deferred;

@@ -29,6 +29,13 @@ default):
 - **Deband dithering (`DebandDither`) is applied once in the post-process
   pass** instead of per-fragment in material shaders. The dither math is
   unchanged; it now acts on the blended image.
+- **Stacked cameras tone-map once, on the last camera.** When cameras render
+  to the same target and the later ones composite over the earlier output
+  (`ClearColorConfig::None`, no viewport), the stack is composed in
+  scene-linear space and the last camera's operator tone-maps the composed
+  image. Earlier cameras' operators do not run for that stack (Bevy warns if
+  they differ), which avoids tone-mapping the lower cameras' pixels twice.
+  Cameras that clear or render to a viewport keep their own pass, as before.
 - **`Tonemapping::None` is now a true passthrough.** The in-shader path used
   to apply `ColorGrading` exposure and post-saturation even with
   `Tonemapping::None`; now no color grading at all is applied without an

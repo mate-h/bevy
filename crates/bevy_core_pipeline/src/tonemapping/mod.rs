@@ -2,7 +2,7 @@ use bevy_app::prelude::*;
 use bevy_asset::{
     embedded_asset, load_embedded_asset, AssetServer, Assets, Handle, RenderAssetUsages,
 };
-use bevy_camera::{Camera, CompositingSpace, TonemappingEnabled};
+use bevy_camera::{Camera, ClearColorConfig, CompositingSpace, TonemappingEnabled};
 use bevy_ecs::prelude::*;
 use bevy_image::{CompressedImageFormats, Image, ImageSampler, ImageType};
 #[cfg(not(feature = "tonemapping_luts"))]
@@ -10,6 +10,7 @@ use bevy_log::error;
 use bevy_log::warn_once;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
+    camera::ExtractedCamera,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
@@ -39,7 +40,10 @@ pub use gt7::{
 };
 pub use node::tonemapping;
 
-use crate::FullscreenShader;
+use crate::{
+    camera_stack::{stack_deferred_views, StackView},
+    FullscreenShader,
+};
 
 /// 3D LUT (look up table) textures used for tonemapping
 #[derive(Resource, Clone, ExtractResource)]
@@ -791,6 +795,7 @@ pub fn prepare_view_tonemapping_pipelines(
         Entity,
         &ExtractedView,
         &ViewTarget,
+        Option<&ExtractedCamera>,
         Option<&Tonemapping>,
         Option<&DebandDither>,
         Option<&ViewDisplayTarget>,
@@ -799,10 +804,29 @@ pub fn prepare_view_tonemapping_pipelines(
     )>,
     working_color_space: Res<WorkingColorSpace>,
 ) {
+    // Cameras stacked on a shared main texture tone-map once, on the last
+    // camera with an active operator, so the earlier cameras' pixels are not
+    // tone-mapped a second time when the later camera's fullscreen pass runs
+    // over the composed buffer.
+    let deferred = stack_deferred_views(view_targets.iter().filter_map(
+        |(entity, _, view_target, camera, tonemapping, _, view_display_target, ..)| {
+            let camera = camera?;
+            Some(StackView {
+                entity,
+                texture: view_target.main_texture().id(),
+                sorted_index: camera.sorted_camera_index_for_target,
+                enabled: effective_tonemapping(tonemapping, view_display_target).is_enabled(),
+                composites_fullscreen: matches!(camera.clear_color, ClearColorConfig::None)
+                    && camera.viewport.is_none(),
+            })
+        },
+    ));
+
     for (
         entity,
         view,
         view_target,
+        _,
         tonemapping,
         dither,
         view_display_target,
@@ -810,6 +834,26 @@ pub fn prepare_view_tonemapping_pipelines(
         external_white_balance,
     ) in view_targets.iter()
     {
+        if let Some(finalizer) = deferred.get(&entity) {
+            // Render-world entities are retained, so the component must be
+            // actively removed when a view newly joins a stack.
+            commands.entity(entity).remove::<ViewTonemappingPipeline>();
+            let own = effective_tonemapping(tonemapping, view_display_target);
+            let finalizing = view_targets.get(*finalizer).ok().map(
+                |(_, _, _, _, tonemapping, _, view_display_target, ..)| {
+                    effective_tonemapping(tonemapping, view_display_target)
+                },
+            );
+            if finalizing.is_some_and(|finalizing| finalizing != own) {
+                warn_once!(
+                    "Stacked cameras rendering to the same target use different tone-mapping \
+                    operators ({own:?} and {finalizing:?}). The stack is composed in scene-linear \
+                    space and tone-mapped once, by the last camera, so its operator applies to \
+                    the whole stack."
+                );
+            }
+            continue;
+        }
         let requested_tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
         // D6 warn + degrade: an SDR-only operator on an HDR-transfer target
         // is substituted with an HDR-capable operator instead of silently
