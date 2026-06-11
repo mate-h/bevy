@@ -14,9 +14,11 @@ transfer function the final signal should be encoded with (`DisplayTransfer`:
 sRGB, scRGB-linear, PQ, or HLG). It is a required component of `Window`, so
 every window automatically gets one. The default, `DisplayTarget::SDR_SRGB`
 (paper white and peak of 100 nits, Rec.709, sRGB), reproduces Bevy's existing
-SDR output exactly. It is the foundation that upcoming HDR output support
-(peak-aware tone mapping, wide-gamut output, and HDR swapchain formats) will
-be parameterized by.
+SDR output exactly. It is the foundation that this release's HDR output
+support is parameterized by: peak-aware tone mapping
+(`Tonemapping::GranTurismo7`), wide-gamut Rec.2020 output through the display
+encoding pass, and the `Rgba16Float` scRGB swapchain format (see the "HDR
+display output (scRGB-linear)" release note for the end-to-end path).
 
 In the render world, every camera view resolves its target's calibration into
 a `ViewDisplayTarget` component (carrying both the `requested` calibration

@@ -44,7 +44,7 @@ use bevy_render::{
 };
 use bevy_window::DisplayTarget;
 
-use super::Tonemapping;
+use super::{effective_tonemapping, gt7_params_uniform_active, Tonemapping};
 
 /// Physical luminance in cd/m² that a linear frame-buffer value of `1.0`
 /// corresponds to in Gran Turismo's native unit convention.
@@ -862,23 +862,35 @@ impl Default for Gt7ParamsUniforms {
 /// [`Gt7ParamsUniforms`].
 ///
 /// Inserted by [`prepare_gt7_params_uniforms`] on every view whose
-/// [`Tonemapping`] is [`Tonemapping::GranTurismo7`] and that has an extracted
-/// [`GranTurismo7Params`] — exactly the views whose tonemapping pipeline is
-/// specialized with the `GT7_PARAMS_UNIFORM` shader def.
+/// *effective* operator (after the D6 SDR-only-operator substitution, see
+/// `effective_tonemapping` in the parent module) is
+/// [`Tonemapping::GranTurismo7`] and that either has an extracted
+/// [`GranTurismo7Params`] or was substituted — exactly the views whose
+/// tonemapping pipeline is specialized with the `GT7_PARAMS_UNIFORM` shader
+/// def (`gt7_params_uniform_active` is the shared predicate).
 #[derive(Component)]
 pub struct ViewGt7ParamsUniformOffset {
     /// The dynamic offset to pass to `set_bind_group`.
     pub offset: u32,
 }
 
-/// Prepares a [`Gt7ParamsUniform`] for every view using
-/// [`Tonemapping::GranTurismo7`] with a [`GranTurismo7Params`] component,
-/// validating the parameters and selecting SDR/HDR mode from the view's
-/// resolved [`ViewDisplayTarget`] (see [`Gt7ParamsUniform::new`]).
+/// Prepares a [`Gt7ParamsUniform`] for every view whose tonemapping pipeline
+/// binds it (`gt7_params_uniform_active`, the predicate shared with
+/// `prepare_view_tonemapping_pipelines`):
 ///
-/// Runs in `RenderSystems::PrepareResources`. Views without the component (or
-/// with a different operator) are skipped and keep the shader's baked SDR
-/// defaults.
+/// * views authored with [`Tonemapping::GranTurismo7`] **and** a
+///   [`GranTurismo7Params`] component — validating the parameters and
+///   selecting SDR/HDR mode from the view's resolved [`ViewDisplayTarget`]
+///   (see [`Gt7ParamsUniform::new`]);
+/// * views whose SDR-only operator was substituted with GT7 by the D6 table
+///   (`effective_tonemapping`) — using the camera's [`GranTurismo7Params`]
+///   if present and [`GranTurismo7Params::default`] otherwise, so the
+///   substitute runs in HDR mode driven by the display target's peak
+///   luminance instead of the shader's baked SDR defaults.
+///
+/// Runs in `RenderSystems::PrepareResources`. Views authored with
+/// `GranTurismo7` but without the component are skipped and keep the
+/// shader's baked SDR defaults (with the existing warn on HDR targets).
 pub fn prepare_gt7_params_uniforms(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -888,15 +900,27 @@ pub fn prepare_gt7_params_uniforms(
         (
             Entity,
             &Tonemapping,
-            &GranTurismo7Params,
+            Option<&GranTurismo7Params>,
             Option<&ViewDisplayTarget>,
         ),
         With<ExtractedView>,
     >,
 ) {
+    let uniform_active =
+        |tonemapping: &Tonemapping,
+         params: Option<&GranTurismo7Params>,
+         view_display_target: Option<&ViewDisplayTarget>| {
+            gt7_params_uniform_active(
+                *tonemapping,
+                effective_tonemapping(Some(tonemapping), view_display_target),
+                params.is_some(),
+            )
+        };
     let view_count = views
         .iter()
-        .filter(|(_, tonemapping, ..)| **tonemapping == Tonemapping::GranTurismo7)
+        .filter(|(_, tonemapping, params, view_display_target)| {
+            uniform_active(tonemapping, *params, *view_display_target)
+        })
         .count();
     let Some(mut writer) =
         gt7_params_uniforms
@@ -906,13 +930,14 @@ pub fn prepare_gt7_params_uniforms(
         return;
     };
     for (entity, tonemapping, params, view_display_target) in &views {
-        if *tonemapping != Tonemapping::GranTurismo7 {
+        if !uniform_active(tonemapping, params, view_display_target) {
             continue;
         }
         let display_target = view_display_target
             .map(|view_display_target| view_display_target.resolved)
             .unwrap_or_default();
-        let offset = writer.write(&Gt7ParamsUniform::new(&display_target, params));
+        let params = params.copied().unwrap_or_default();
+        let offset = writer.write(&Gt7ParamsUniform::new(&display_target, &params));
         commands
             .entity(entity)
             .insert(ViewGt7ParamsUniformOffset { offset });

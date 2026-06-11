@@ -124,11 +124,16 @@ fn photopic_weight(lambda_microns: f64) -> f64 {
 /// Bessel function of the first kind `J_n(x)` via Simpson integration of
 /// Bessel's integral `J_n(x) = (1/π)·∫₀^π cos(n·τ − x·sin τ) dτ`.
 ///
-/// Accurate to well below 1e-10 for the `x ≤ 16` range it is used in (the
-/// integrand completes only a few oscillations there). Only used at table
-/// build time and in tests.
+/// Accurate to machine precision for the `x ≤ 16` range it is used in (the
+/// integrand extends to a smooth periodic function, so the composite rule
+/// converges geometrically once the sample count exceeds `x`). Only used at
+/// table build time and in tests.
 fn bessel_j(n: u32, x: f64) -> f64 {
-    const INTERVALS: usize = 512; // even
+    // 128 (even) keeps ~1e-16 absolute error up to the asymptotic seam at
+    // x = 16 and produces a bit-identical f32 weight table to 512 intervals
+    // (verified; degradation only begins below ~64 intervals), while keeping
+    // the one-time table build at plugin init (see [`warm`]) to ~3 ms.
+    const INTERVALS: usize = 128;
     let h = PI / INTERVALS as f64;
     let f = |tau: f64| (f64::from(n) * tau - x * tau.sin()).cos();
     let mut sum = f(0.0) + f(PI);
@@ -231,6 +236,19 @@ fn normalized_band_weights(f_number: f64) -> [f32; GLARE_BANDS] {
 /// there are deliberately no literal weight constants in this module.
 static GLARE_WEIGHT_TABLE: LazyLock<[[f32; GLARE_BANDS]; F_NUMBER_LADDER.len()]> =
     LazyLock::new(|| F_NUMBER_LADDER.map(|n| normalized_band_weights(f64::from(n))));
+
+/// Forces the one-time build of [`GLARE_WEIGHT_TABLE`] (a few milliseconds
+/// of Bessel quadrature).
+///
+/// Called from `BloomPlugin::build` so the cost lands at app startup. Without
+/// this, the `LazyLock` would first be dereferenced inside the bloom render
+/// node's command-encoding loop (via [`blend_factor`]) on the first frame a
+/// view switches to
+/// [`BloomScatterModel::Gt7Glare`](super::BloomScatterModel::Gt7Glare),
+/// stalling the render thread mid-frame for a visible one-frame hitch.
+pub(crate) fn warm() {
+    LazyLock::force(&GLARE_WEIGHT_TABLE);
+}
 
 /// Replaces a non-finite or non-positive F-number with
 /// [`DEFAULT_F_NUMBER`], warning once.

@@ -57,15 +57,23 @@ What happens under `Rec2020`:
   algorithmic source to rebake from — so the tone mapping pass converts
   Rec.2020 → Rec.709 at its entry for them, clipping colors outside the
   Rec.709 gamut.
-- The tone mapping pass still outputs Rec.709 display-linear in every
-  configuration, so UI compositing, FXAA/SMAA, and the display encoding pass
-  are unchanged. The full wide-gamut display payoff (Rec.2020 values flowing
-  through to PQ output) arrives with the GT7 HDR-native output path and the
-  hue-preserving gamut compression stage in a future release; today the
-  working space buys wide-gamut-correct lighting math and GT7's native input.
+- The tone mapping pass outputs Rec.709 display-linear for every operator
+  **except** `Tonemapping::GranTurismo7` on an HDR-transfer display target:
+  there the operator emits its native linear Rec.2020 output straight into
+  the display encoding pass, which transforms it per the display's gamut —
+  identity for PQ/Rec.2020 signals, a hue-preserving gamut compression for
+  Rec.709-coordinate scRGB signals (see the Gran Turismo 7 tonemapping,
+  display encoding pass, and display gamut compression release notes, all in
+  this release). So the full wide-gamut display payoff — Rec.2020 values
+  flowing through to the HDR display signal — is live on GT7 HDR views,
+  while every other configuration keeps Rec.709 output and UI compositing,
+  FXAA/SMAA, and the display encoding pass behave as before. On GT7 HDR
+  views, UI composites its Rec.709-authored colors unconverted and saturated
+  UI colors can oversaturate (see the GT7 note for the documented
+  limitation).
 
-Known caveats under `Rec2020` (all documented on `WorkingColorSpace`):
-`Tonemapping::None` cameras (the `Camera2d` default) skip the conversion and
-render oversaturated (a `warn_once` fires); `CompositingSpace::Oklab`,
-auto-exposure metering and bloom luminance weights remain Rec.709-fit;
-gizmos, UI and atmosphere-generated sky values are not converted.
+Known caveats under `Rec2020`: `Tonemapping::None` cameras (the `Camera2d`
+default) skip the conversion and render oversaturated (a `warn_once` fires);
+`CompositingSpace::Oklab`, auto-exposure metering and bloom luminance weights
+remain Rec.709-fit; gizmos, UI and atmosphere-generated sky values are not
+converted.

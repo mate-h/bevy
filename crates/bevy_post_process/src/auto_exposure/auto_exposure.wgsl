@@ -23,7 +23,7 @@
 // chromaticity for auto white balance (see `AutoWhiteBalance` on the Rust side): the
 // compute_histogram pass accumulates fixed-point Yxy sums with the same metering-mask weights,
 // and the compute_average pass blends in a faint D65 "virtual light" anchor, temporally adapts
-// the white-point chromaticity, and composes a CAM16 correction matrix into the view's
+// the white-point chromaticity, and composes a von Kries correction matrix into the view's
 // color-grading balance matrix. Every auto-white-balance statement is gated on the
 // `awb_enabled` uniform flag, so the auto-exposure-only configuration executes exactly the
 // arithmetic it executed before auto white balance existed.
@@ -135,10 +135,21 @@ const AWB_REC2020_TO_X = vec3<f32>(0.6369580483012913, 0.14461690358620838, 0.16
 const AWB_REC2020_TO_Y = vec3<f32>(0.26270021201126703, 0.677998071518871, 0.059301716469861945);
 const AWB_REC2020_TO_Z = vec3<f32>(0.0, 0.028072693049087508, 1.0609850577107909);
 
-// The CAM16 RGB -> LMS / LMS -> RGB matrices, copied verbatim from
+// Rows of the inverse of the `AWB_REC709_TO_*` matrix (CIE 1931 XYZ ->
+// linear Rec.709 RGB, D65 white point), used to express white points in the
+// working RGB space when deriving the von Kries gains below.
+const AWB_XYZ_TO_REC709_R = vec3<f32>(3.2409699419045208, -1.537383177570093, -0.49861076029300311);
+const AWB_XYZ_TO_REC709_G = vec3<f32>(-0.96924363628087962, 1.8759675015077208, 0.041555057407175612);
+const AWB_XYZ_TO_REC709_B = vec3<f32>(0.055630079696993608, -0.20397695888897655, 1.0569715142428784);
+
+// The CAM16-derived RGB -> LMS / LMS -> RGB matrices, copied verbatim from
 // `RGB_TO_LMS` / `LMS_TO_RGB` in `bevy_render/src/view/mod.rs` — the same
 // matrices the CPU uses to build the user's static white-balance matrix from
-// `ColorGrading`'s temperature/tint; keep them in sync.
+// `ColorGrading`'s temperature/tint; keep them in sync. Note that this is
+// bevy's own white-normalized variant of the CAM16 LMS basis (its rows sum
+// to 1.0, mapping RGB white to LMS (1, 1, 1)), NOT the raw CAM16 transform
+// of CIE XYZ — the von Kries gains below must therefore be derived in THIS
+// basis, not in raw CAM16 LMS.
 const AWB_RGB_TO_LMS = mat3x3<f32>(
     vec3(0.311692, 0.0905138, 0.00764433),
     vec3(0.652085, 0.901341, 0.0486554),
@@ -150,16 +161,15 @@ const AWB_LMS_TO_RGB = mat3x3<f32>(
     vec3(-0.130646, 0.00353630, 1.0605344),
 );
 
-// The CAM16 LMS coordinates of the white point with CIE 1931 chromaticity
-// `xy` and unit luminance. This is the same algebraic simplification of
-// xy -> XYZ -> (CAM16 matrix) -> LMS used by
-// `From<ColorGrading> for ColorGradingUniform` in
-// `bevy_render/src/view/mod.rs`; keep the constants in sync.
-fn awb_xy_to_cam16_lms(xy: vec2<f32>) -> vec3<f32> {
-    return vec3(0.701634, 1.15856, -0.904175)
-        + (vec3(-0.051461, 0.045854, 0.953127)
-            + vec3(0.452749, -0.296122, -0.955206) * xy.x)
-            / xy.y;
+// The linear Rec.709 RGB coordinates of the white point with CIE 1931
+// chromaticity `xy` and unit luminance (Y = 1).
+fn awb_xy_to_rec709(xy: vec2<f32>) -> vec3<f32> {
+    let xyz = vec3(xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y);
+    return vec3(
+        dot(xyz, AWB_XYZ_TO_REC709_R),
+        dot(xyz, AWB_XYZ_TO_REC709_G),
+        dot(xyz, AWB_XYZ_TO_REC709_B),
+    );
 }
 
 // The correlated color temperature of a CIE 1931 chromaticity, using
@@ -208,17 +218,28 @@ fn awb_planckian_xy(cct: f32) -> vec2<f32> {
 // chromaticity is `adapted_xy`. The CCT is clamped to the 2500 K - 7000 K
 // output range of typical real-camera AWB specifications, the off-locus tint
 // component is preserved (clamped to +/-0.05 in xy for stability), and the
-// resulting white point is neutralized towards D65 with the same CAM16
-// von Kries adaptation the CPU uses for `ColorGrading`'s temperature/tint.
+// resulting white point is neutralized towards D65 by a von Kries adaptation
+// in bevy's CAM16-derived RGB <-> LMS basis (the same matrix pair the CPU
+// uses for `ColorGrading`'s temperature/tint).
 fn awb_balance_matrix(adapted_xy: vec2<f32>) -> mat3x3<f32> {
     let cct = awb_cct(adapted_xy);
     let locus = awb_planckian_xy(clamp(cct, 1667.0, 25000.0));
     let tint = clamp(adapted_xy - locus, vec2(-0.05), vec2(0.05));
     let white_xy = awb_planckian_xy(clamp(cct, 2500.0, 7000.0)) + tint;
 
-    // Von Kries adaptation in CAM16 LMS: independent gain on each cone
-    // response, scaling the estimated illuminant to D65.
-    let gain = awb_xy_to_cam16_lms(AWB_D65_XY) / awb_xy_to_cam16_lms(white_xy);
+    // Von Kries adaptation: independent gain on each cone response, scaling
+    // the estimated illuminant to D65. The gains MUST be derived in the same
+    // LMS basis the `AWB_LMS_TO_RGB * diag(gain) * AWB_RGB_TO_LMS` sandwich
+    // uses, so both white points are mapped through `AWB_RGB_TO_LMS` from
+    // their unit-luminance Rec.709 coordinates. (Deriving the gains in the
+    // raw CAM16 LMS basis instead — whose cone axes genuinely differ from
+    // bevy's white-normalized variant — only partially neutralizes the
+    // illuminant: a converged correction would leave tungsten light at an
+    // R/B channel ratio of ~1.54 instead of ~1.0.) Both vectors use Y = 1,
+    // so the correction preserves the white point's luminance. A D65 input
+    // yields a gain of exactly 1.0 (identical expressions on both sides).
+    let gain = (AWB_RGB_TO_LMS * awb_xy_to_rec709(AWB_D65_XY))
+        / (AWB_RGB_TO_LMS * awb_xy_to_rec709(white_xy));
     let scaled = mat3x3<f32>(
         gain * AWB_RGB_TO_LMS[0],
         gain * AWB_RGB_TO_LMS[1],

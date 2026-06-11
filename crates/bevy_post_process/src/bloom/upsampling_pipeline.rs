@@ -17,7 +17,8 @@ use bevy_render::{
     view::{ExtractedView, ViewDisplayTarget},
 };
 use bevy_shader::Shader;
-use bevy_utils::default;
+use bevy_utils::{default, once};
+use tracing::warn;
 
 #[derive(Component)]
 pub struct UpsamplingPipelineIds {
@@ -141,6 +142,12 @@ pub fn prepare_upsampling_pipeline(
         // its blend constants as energy-conserving lerp factors and forces
         // that blend state; `Aesthetic` uses the configured mode unchanged.
         let composite_mode = bloom.effective_composite_mode();
+        if composite_mode != bloom.composite_mode {
+            once!(warn!(
+                "Bloom composite_mode Additive is ignored under BloomScatterModel::Gt7Glare: \
+                the glare blend constants are solved as an energy-conserving lerp chain"
+            ));
+        }
 
         let pipeline_id = pipelines.specialize(
             &pipeline_cache,

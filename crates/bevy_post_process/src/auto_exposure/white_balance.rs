@@ -36,10 +36,10 @@ use tracing::warn;
 ///   temperature (the `McCamy` 1992 approximation) plus a tint offset from the
 ///   Planckian locus, the temperature is clamped to the **2500 K – 7000 K**
 ///   range typical of real camera AWB specifications, and the result is
-///   applied through Bevy's existing CAM16 white-balance machinery: the
-///   correction matrix is multiplied into the view's
-///   [`ColorGrading`](bevy_render::view::ColorGrading) balance matrix on the
-///   GPU.
+///   applied as a von Kries adaptation in the same LMS basis Bevy's existing
+///   white-balance machinery uses: the correction matrix is multiplied into
+///   the view's [`ColorGrading`](bevy_render::view::ColorGrading) balance
+///   matrix on the GPU.
 ///
 /// # Composition with manual color grading
 ///

@@ -26,9 +26,10 @@ The pass reads the per-view `DisplayTarget` calibration and performs:
 
 - a full-precision gamut transform from the view's *source* primaries — the
   tone-map operator's output gamut, resolved per view: Rec.2020 for
-  `Tonemapping::GranTurismo7` on HDR targets (the operator emits its native
-  Rec.2020 output directly, with no intermediate Rec.709 conversion or
-  clamp), Rec.709 for every other operator — to the display signal's
+  `Tonemapping::GranTurismo7` on HDR targets, whether authored or substituted
+  for an SDR-only operator (the operator emits its native Rec.2020 output
+  directly, with no intermediate Rec.709 conversion or clamp), Rec.709
+  otherwise — to the display signal's
   primaries: a Rec.709 → Rec.2020 expansion for PQ, the Rec.2020 → Rec.709
   contraction for GT7-on-scRGB, identity otherwise,
 - out-of-gamut handling: ACES-RGC-style perceptual gamut compression when the

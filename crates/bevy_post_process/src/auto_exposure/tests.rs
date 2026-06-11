@@ -2,7 +2,7 @@
 //!
 //! The functions below are an exact Rust mirror of the metering-reference blend, the
 //! temporal smoothing / two-stage clamp, and the auto white balance measurement /
-//! CCT conversion / CAM16 balance matrix in `auto_exposure.wgsl`, operation for
+//! CCT conversion / von Kries balance matrix in `auto_exposure.wgsl`, operation for
 //! operation. If the shader math changes, these mirrors must be updated to match.
 
 use super::{
@@ -475,6 +475,25 @@ const AWB_REC709_TO_XYZ_ROWS: [[f32; 3]; 3] = [
     [0.01933081871559185, 0.11919477979462599, 0.9505321522496607],
 ];
 
+/// Mirror of the `AWB_XYZ_TO_REC709_{R,G,B}` matrix rows.
+#[expect(
+    clippy::excessive_precision,
+    reason = "the literals mirror the WGSL constants digit for digit"
+)]
+const AWB_XYZ_TO_REC709_ROWS: [[f32; 3]; 3] = [
+    [3.2409699419045208, -1.537383177570093, -0.49861076029300311],
+    [
+        -0.96924363628087962,
+        1.8759675015077208,
+        0.041555057407175612,
+    ],
+    [
+        0.055630079696993608,
+        -0.20397695888897655,
+        1.0569715142428784,
+    ],
+];
+
 /// Mirror of `AWB_RGB_TO_LMS` (columns).
 const AWB_RGB_TO_LMS: [[f32; 3]; 3] = [
     [0.311692, 0.0905138, 0.00764433],
@@ -507,15 +526,20 @@ fn mat3_mul_mat3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     ]
 }
 
-/// Mirror of `awb_xy_to_cam16_lms`.
-fn awb_xy_to_cam16_lms(xy: [f32; 2]) -> [f32; 3] {
-    let base = [0.701634f32, 1.15856, -0.904175];
-    let a = [-0.051461f32, 0.045854, 0.953127];
-    let b = [0.452749f32, -0.296122, -0.955206];
+/// Mirror of `awb_xy_to_rec709`: the linear Rec.709 RGB coordinates of the
+/// white point with chromaticity `xy` and unit luminance.
+fn awb_xy_to_rec709(xy: [f32; 2]) -> [f32; 3] {
+    let xyz = [xy[0] / xy[1], 1.0, (1.0 - xy[0] - xy[1]) / xy[1]];
     [
-        base[0] + (a[0] + b[0] * xy[0]) / xy[1],
-        base[1] + (a[1] + b[1] * xy[0]) / xy[1],
-        base[2] + (a[2] + b[2] * xy[0]) / xy[1],
+        xyz[0] * AWB_XYZ_TO_REC709_ROWS[0][0]
+            + xyz[1] * AWB_XYZ_TO_REC709_ROWS[0][1]
+            + xyz[2] * AWB_XYZ_TO_REC709_ROWS[0][2],
+        xyz[0] * AWB_XYZ_TO_REC709_ROWS[1][0]
+            + xyz[1] * AWB_XYZ_TO_REC709_ROWS[1][1]
+            + xyz[2] * AWB_XYZ_TO_REC709_ROWS[1][2],
+        xyz[0] * AWB_XYZ_TO_REC709_ROWS[2][0]
+            + xyz[1] * AWB_XYZ_TO_REC709_ROWS[2][1]
+            + xyz[2] * AWB_XYZ_TO_REC709_ROWS[2][2],
     ]
 }
 
@@ -567,11 +591,13 @@ fn awb_white_point(adapted_xy: [f32; 2]) -> [f32; 2] {
     [out[0] + tint[0], out[1] + tint[1]]
 }
 
-/// Mirror of `awb_balance_matrix`.
+/// Mirror of `awb_balance_matrix`. The von Kries gains are derived in the
+/// same LMS basis the `LMS_TO_RGB * diag(gain) * RGB_TO_LMS` sandwich uses,
+/// by mapping both unit-luminance white points through `AWB_RGB_TO_LMS`.
 fn awb_balance_matrix(adapted_xy: [f32; 2]) -> [[f32; 3]; 3] {
     let white_xy = awb_white_point(adapted_xy);
-    let d65 = awb_xy_to_cam16_lms(AWB_D65_XY);
-    let white = awb_xy_to_cam16_lms(white_xy);
+    let d65 = mat3_mul_vec3(&AWB_RGB_TO_LMS, awb_xy_to_rec709(AWB_D65_XY));
+    let white = mat3_mul_vec3(&AWB_RGB_TO_LMS, awb_xy_to_rec709(white_xy));
     let gain = [d65[0] / white[0], d65[1] / white[1], d65[2] / white[2]];
     let scaled = [
         [
@@ -829,8 +855,11 @@ fn balance_matrix_is_identity_at_d65() {
 
 #[test]
 fn balance_matrix_neutralizes_a_warm_illuminant() {
-    // A warm (tungsten-ish) illuminant lighting a white scene.
-    let illuminant = [1.0f32, 0.7, 0.45];
+    // CIE standard illuminant A (tungsten, CCT 2856 K — inside the
+    // 2500 K - 7000 K output clamp, so the correction is unclamped) lighting
+    // a white scene, expressed in linear Rec.709 at unit luminance. Its raw
+    // R/B channel ratio is ~7.9.
+    let illuminant = awb_xy_to_rec709([0.44757, 0.40745]);
     let ([x, y], luminance) = rec709_to_xy_lum(illuminant);
 
     // Let the adaptation converge onto the measured chromaticity.
@@ -854,11 +883,27 @@ fn balance_matrix_neutralizes_a_warm_illuminant() {
         spread_after < spread_before,
         "correction did not reduce the warm cast: {spread_before} -> {spread_after}"
     );
-    // This illuminant's CCT (~4300 K) is inside the 2500 K - 7000 K output range, so the
-    // correction is not clamped and the corrected white should be close to achromatic.
+    // Because the von Kries gains are derived in the same LMS basis they are
+    // applied in, a converged in-range correction neutralizes the illuminant
+    // essentially exactly: the residual R/B ratio is ~1.0003 (from D65_XY's
+    // 5-digit rounding) plus ~0.1% of anchor pull. Deriving the gains in raw
+    // CAM16 LMS instead would leave a clearly visible R/B residual of ~1.54.
     assert!(
-        (spread_after - 1.0).abs() < 0.15,
-        "corrected illuminant {corrected:?} is not close to neutral"
+        (spread_after - 1.0).abs() < 0.01,
+        "corrected illuminant {corrected:?} is not neutral (R/B {spread_after})"
+    );
+    let max = corrected[0].max(corrected[1]).max(corrected[2]);
+    let min = corrected[0].min(corrected[1]).min(corrected[2]);
+    assert!(
+        max / min < 1.01,
+        "corrected illuminant {corrected:?} has a residual channel spread"
+    );
+    // The correction preserves the white point's luminance (both von Kries
+    // gains are derived from unit-luminance white points).
+    let (_, corrected_luminance) = rec709_to_xy_lum(corrected);
+    assert!(
+        (corrected_luminance - luminance).abs() < 0.01,
+        "correction changed the illuminant's luminance: {luminance} -> {corrected_luminance}"
     );
 }
 

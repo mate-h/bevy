@@ -38,7 +38,9 @@ per-channel clip, kept as a debug fallback for A/B comparison via the
 `DISPLAY_GAMUT_CLIP_DEBUG` shader def).
 
 Under `Auto` the compression is active for exactly one configuration: a
-`Tonemapping::GranTurismo7` camera on an scRGB HDR target. GT7 emits its
+`Tonemapping::GranTurismo7` camera (authored, or substituted for an SDR-only
+operator — see the scRGB HDR output release note) on an scRGB HDR target.
+GT7 emits its
 native Rec.2020 display-referred output on HDR targets, and scRGB signals are
 definitionally expressed in Rec.709 coordinates, so the encoder's gamut stage
 performs the Rec.2020 → Rec.709 contraction the limits above were derived

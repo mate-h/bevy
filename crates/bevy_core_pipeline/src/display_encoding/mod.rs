@@ -3,10 +3,11 @@
 //! encoding).
 //!
 //! The tone-mapping pass outputs *display-linear* color, scaled so `1.0` =
-//! paper white, in per-view source primaries (Rec.709 for every operator
-//! except `Tonemapping::GranTurismo7` on HDR targets, which emits its native
-//! Rec.2020 — see `tonemap_output_gamut`); UI then composites in that same
-//! space. This pass — scheduled after the UI pass and before the upscaling
+//! paper white, in per-view source primaries (Rec.709 for every effective
+//! operator except `Tonemapping::GranTurismo7` on HDR targets — authored or
+//! substituted by the D6 table (`effective_tonemapping`) — which emits its
+//! native Rec.2020; see `tonemap_output_gamut`); UI then composites in that
+//! same space. This pass — scheduled after the UI pass and before the upscaling
 //! blit — converts that buffer into the display's signal: a 3×3 gamut
 //! transform from the source primaries to the display primaries, an
 //! out-of-gamut handling step (ACES-RGC-style chroma compression when the
@@ -111,9 +112,11 @@ impl Plugin for DisplayEncodingPlugin {
 /// Out-of-gamut colors can only come out of the gamut stage when it
 /// *contracts* — when the pass's input primaries are wider than the resolved
 /// display primaries. The pass's input gamut is per-view (see
-/// `encoder_input_gamut`): Rec.2020 when the view's operator is
-/// `Tonemapping::GranTurismo7` on an HDR-transfer target (the operator emits
-/// its native Rec.2020 display-referred output), Rec.709 otherwise. Under
+/// `encoder_input_gamut`): Rec.2020 when the view's effective operator is
+/// `Tonemapping::GranTurismo7` on an HDR-transfer target — authored, or
+/// substituted for an SDR-only operator by the D6 table
+/// (`effective_tonemapping`) — as the operator emits its native Rec.2020
+/// display-referred output; Rec.709 otherwise. Under
 /// [`DisplayGamutCompression::Auto`] the compression is therefore active for
 /// exactly one reachable configuration: GT7 HDR-native Rec.2020 input onto a
 /// Rec.709-coordinate scRGB signal (a contraction). Identity transforms
@@ -169,7 +172,9 @@ pub enum OutOfGamutHandling {
 ///
 /// Delegates to [`tonemap_output_gamut`], the single source of truth shared
 /// with the tonemapping pipeline's `TONEMAP_OUTPUT_REC2020` def push:
-/// Rec.2020 exactly when the view's operator is
+/// Rec.2020 exactly when the view's *effective* operator (after the D6
+/// SDR-only-operator substitution, see
+/// [`effective_tonemapping`](crate::tonemapping::effective_tonemapping)) is
 /// [`Tonemapping::GranTurismo7`] and its resolved transfer is HDR (the
 /// operator then emits its native linear Rec.2020 display-referred output
 /// with no Rec.709 back-conversion), Rec.709 in every other configuration
@@ -280,8 +285,8 @@ pub struct DisplayEncodingPipelineKey {
     pub source_space: Option<CompositingSpace>,
     /// The color primaries of the pass's input — the tonemapping pass's
     /// output gamut for this view (see `encoder_input_gamut` /
-    /// [`tonemap_output_gamut`]): Rec.2020 for GT7 on HDR-transfer targets,
-    /// Rec.709 otherwise.
+    /// [`tonemap_output_gamut`]): Rec.2020 for GT7 (authored or
+    /// D6-substituted) on HDR-transfer targets, Rec.709 otherwise.
     pub source_gamut: DisplayGamut,
     /// The resolved display gamut the source color is transformed to.
     pub gamut: DisplayGamut,
@@ -415,7 +420,10 @@ pub struct ViewDisplayEncodingPipeline {
 /// The pass's input gamut is resolved per view through `encoder_input_gamut`
 /// (the [`tonemap_output_gamut`] single source shared with the tonemapping
 /// pipeline's `TONEMAP_OUTPUT_REC2020` def push): Rec.2020 for
-/// [`Tonemapping::GranTurismo7`] on HDR-transfer targets, Rec.709 otherwise.
+/// [`Tonemapping::GranTurismo7`] on HDR-transfer targets (authored, or
+/// substituted for an SDR-only operator by the D6 table —
+/// [`effective_tonemapping`](crate::tonemapping::effective_tonemapping)),
+/// Rec.709 otherwise.
 /// It also resolves the gamut stage's out-of-gamut handling from
 /// [`DisplayGamutCompression`]: compression is keyed in exactly when the
 /// gamut stage is a contraction (the input primaries are wider than the

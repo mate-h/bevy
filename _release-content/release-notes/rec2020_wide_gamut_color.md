@@ -25,7 +25,9 @@ let bright = Color::xy_y(0.3127, 0.3290, 5.0);
 ```
 
 Underneath, the new `primaries` module provides the building blocks the renderer's
-upcoming wide-gamut working-space support is built on: `Chromaticity` (CIE 1931 xy
+wide-gamut working-space support (`RenderPlugin::working_color_space`, also in this
+release — see the "Wide working color space (Rec.2020, opt-in)" release note) is
+built on: `Chromaticity` (CIE 1931 xy
 coordinates), `RgbPrimaries` (primary sets with constants for `BT709`, `BT2020`,
 `DISPLAY_P3`, and `ACES_CG`), and `rgb_to_rgb_matrix` for deriving conversion
 matrices between any two primary sets at runtime.

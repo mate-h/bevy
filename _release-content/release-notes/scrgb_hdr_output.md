@@ -40,6 +40,19 @@ its HDR mode (`Tonemapping::GranTurismo7` + `GranTurismo7Params`), highlights
 above paper white finally make it to the panel. Press `O` in the `tonemapping`
 example to try it on an HDR-capable display.
 
+SDR-only tone-mapping operators — everything except `GranTurismo7` and `None`,
+including the `Camera3d` default `TonyMcMapface` — cap their output at paper
+white, which would leave an HDR display's headroom permanently unused. A
+camera using one on an HDR-transfer target therefore degrades gracefully
+instead of silently rendering an SDR-capped image: the view runs
+`Tonemapping::GranTurismo7` instead (with the camera's `GranTurismo7Params`
+if present, otherwise the defaults) and Bevy warns once. The camera's
+`Tonemapping` component itself is never modified; set
+`Tonemapping::GranTurismo7` explicitly to adopt the substitute and silence
+the warning, or switch back to an SDR display target to keep the authored
+operator. (`Tonemapping::None` is not substituted — it is a deliberate
+pass-through — but also warns on HDR targets.)
+
 Supported today: macOS/iOS (Metal, EDR), Windows (Vulkan), and Wayland
 (Vulkan, Mesa 25.1+ color management). On other backends (DX12, X11, GLES,
 WebGPU) — and for the PQ and HLG transfers everywhere — wgpu cannot yet

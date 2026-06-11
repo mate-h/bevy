@@ -6,13 +6,15 @@ pull_requests: []
 The `Window` component now requires the new `DisplayTarget` component, which
 describes the display the window is presented on (paper white luminance, peak
 luminance, black level, color gamut, and transfer function). It is the
-foundation for upcoming HDR display output support.
+foundation for the HDR display output support that ships in this release (see
+the "HDR display output (scRGB-linear)" release note).
 
 Every entity with a `Window` automatically receives a `DisplayTarget` through
 the required-component machinery, defaulting to `DisplayTarget::SDR_SRGB`
 (paper white and peak of 100 nits, Rec.709 gamut, sRGB transfer). This default
-matches Bevy's existing behavior exactly, and in this release the component is
-inert data, so no action is required for rendering: output is unchanged.
+matches Bevy's existing behavior exactly — HDR output only activates when you
+request an HDR transfer yourself — so no action is required: output is
+unchanged.
 
 Things you may notice:
 

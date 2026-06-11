@@ -223,6 +223,21 @@ impl Tonemapping {
     pub fn is_enabled(&self) -> bool {
         *self != Tonemapping::None
     }
+
+    /// Whether this operator's output is inherently capped at `[0, 1]`
+    /// paper-white-relative range (an "SDR-only" operator): every operator
+    /// except [`Tonemapping::GranTurismo7`] (natively peak-luminance aware)
+    /// and [`Tonemapping::None`] (a true pass-through with unbounded output,
+    /// not an operator).
+    ///
+    /// On a view whose resolved display target requests an HDR transfer, an
+    /// SDR-only operator would silently cap the image at paper white, leaving
+    /// the display's HDR headroom permanently unused. The D6 substitution
+    /// table ([`effective_tonemapping`]) degrades such views to an
+    /// HDR-capable substitute (with a `warn_once!`) instead.
+    pub fn is_sdr_only(&self) -> bool {
+        !matches!(self, Tonemapping::None | Tonemapping::GranTurismo7)
+    }
 }
 
 /// Render-world marker component: the view's white-balance matrix
@@ -321,9 +336,12 @@ bitflags! {
         /// `GT7_PARAMS_UNIFORM` shader def is pushed, replacing the GT7
         /// operator's baked SDR defaults with prepared per-camera values.
         ///
-        /// Set when the view's [`Tonemapping`] is
-        /// [`Tonemapping::GranTurismo7`] **and** the camera has a
-        /// [`GranTurismo7Params`] component. Implies
+        /// Set when the view's *effective* operator
+        /// ([`effective_tonemapping`]) is [`Tonemapping::GranTurismo7`]
+        /// **and** either the camera has a [`GranTurismo7Params`] component
+        /// or the operator was substituted by the D6 table (substituted
+        /// views always bind the prepared uniform so the substitute runs in
+        /// HDR mode); see [`gt7_params_uniform_active`]. Implies
         /// [`Self::DISPLAY_TARGET_UNIFORM`].
         const GT7_PARAMS_UNIFORM        = 0x10;
         /// The tone-map operator emits its native linear Rec.2020
@@ -332,12 +350,14 @@ bitflags! {
         /// shader def.
         ///
         /// Set exactly when [`tonemap_output_gamut`] returns
-        /// [`DisplayGamut::Rec2020`]: the operator is
-        /// [`Tonemapping::GranTurismo7`] **and** the view's resolved display
-        /// target requests an HDR transfer. The display encoder derives its
-        /// input-gamut contract from the same function, so the two passes can
-        /// never disagree about the buffer's primaries. SDR views never set
-        /// this flag, keeping their pipelines byte-identical.
+        /// [`DisplayGamut::Rec2020`]: the *effective* operator
+        /// ([`effective_tonemapping`], i.e. after the D6 SDR-only-operator
+        /// substitution) is [`Tonemapping::GranTurismo7`] **and** the view's
+        /// resolved display target requests an HDR transfer. The display
+        /// encoder derives its input-gamut contract from the same function,
+        /// so the two passes can never disagree about the buffer's
+        /// primaries. SDR views never set this flag, keeping their pipelines
+        /// byte-identical.
         const TONEMAP_OUTPUT_REC2020    = 0x80;
         /// The view composites in gamma-encoded sRGB space
         /// ([`CompositingSpace::Srgb`](bevy_camera::CompositingSpace::Srgb)):
@@ -637,21 +657,94 @@ impl ViewTonemappingPipeline {
     }
 }
 
+/// Resolves the tone-mapping operator a view's pipeline actually runs,
+/// applying the D6 "warn + degrade" substitution table (DECISIONS.md D6).
+///
+/// An SDR-only operator ([`Tonemapping::is_sdr_only`]) on a view whose
+/// resolved display target requests an HDR transfer
+/// ([`ViewDisplayTarget::is_hdr_transfer`]) would cap the image at paper
+/// white, leaving the display's HDR headroom permanently unused — silent
+/// degradation that users read as breakage. Instead of running it
+/// as-authored, such views degrade to the highest-ranked available
+/// HDR-capable substitute:
+///
+/// 1. [`Tonemapping::GranTurismo7`] — purpose-built for HDR output,
+///    peak-luminance-direct, fully algorithmic (no `tonemapping_luts`
+///    feature requirement), so it is always available. The lower-ranked
+///    substitutes in the D6 table (a peak-parameterized
+///    [`Tonemapping::KhronosPbrNeutral`], then a peak-parameterized
+///    [`Tonemapping::ReinhardLuminance`]; never [`Tonemapping::None`]) are
+///    therefore currently unreachable and their peak-parameterized variants
+///    are not implemented.
+///
+/// The substitution applies to render-world *prepared* state only — the
+/// pipeline key ([`prepare_view_tonemapping_pipelines`], which emits the
+/// `warn_once!` naming the substitute), the GT7 params uniform
+/// ([`prepare_gt7_params_uniforms`], which uploads the camera's
+/// [`GranTurismo7Params`] if present and the defaults otherwise), and the
+/// display encoder's input-gamut contract ([`tonemap_output_gamut`]). The
+/// camera's authored [`Tonemapping`] component is never mutated.
+///
+/// Every other configuration returns the operator unchanged: SDR views
+/// (including HDR requests downgraded at surface negotiation), HDR views
+/// already using [`Tonemapping::GranTurismo7`], and [`Tonemapping::None`]
+/// (a pass-through, not an SDR-only operator; the display encoder warns
+/// about it separately).
+pub fn effective_tonemapping(
+    tonemapping: Option<&Tonemapping>,
+    view_display_target: Option<&ViewDisplayTarget>,
+) -> Tonemapping {
+    let tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
+    if tonemapping.is_sdr_only()
+        && view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer)
+    {
+        Tonemapping::GranTurismo7
+    } else {
+        tonemapping
+    }
+}
+
+/// Whether a view's tonemapping pipeline binds the per-view
+/// [`Gt7ParamsUniform`] (the `GT7_PARAMS_UNIFORM` shader def /
+/// [`TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM`]).
+///
+/// Single source shared by [`prepare_view_tonemapping_pipelines`] (the
+/// shader-def push and layout selection) and [`prepare_gt7_params_uniforms`]
+/// (the uniform write and dynamic-offset insertion), so the pipeline layout
+/// and the bound buffer can never disagree:
+///
+/// * a view whose **authored** operator is [`Tonemapping::GranTurismo7`]
+///   binds it iff the camera opted in with a [`GranTurismo7Params`]
+///   component (cameras without one keep the shader's baked SDR defaults,
+///   exactly as before — with the existing warn on HDR targets);
+/// * a D6-substituted view ([`effective_tonemapping`]) **always** binds it:
+///   the substitute must run in GT7's HDR mode (the baked defaults are SDR),
+///   using the camera's [`GranTurismo7Params`] if present and the defaults
+///   otherwise.
+pub fn gt7_params_uniform_active(
+    requested: Tonemapping,
+    effective: Tonemapping,
+    has_params: bool,
+) -> bool {
+    effective == Tonemapping::GranTurismo7 && (has_params || requested != Tonemapping::GranTurismo7)
+}
+
 /// The color primaries of the tonemapping pass's output for a view — and
 /// therefore the display-encoding pass's *input* gamut.
 ///
-/// Returns [`DisplayGamut::Rec2020`] exactly when the view's operator is
-/// [`Tonemapping::GranTurismo7`] and its resolved display target requests an
-/// HDR transfer ([`ViewDisplayTarget::is_hdr_transfer`]): in that
-/// configuration the tonemapping pipeline is specialized with the
-/// `TONEMAP_OUTPUT_REC2020` shader def
-/// ([`TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020`]) and the GT7
-/// operator emits its native linear Rec.2020 display-referred output without
-/// the Rec.709 back-conversion (see `gt7.wgsl`). Every other configuration —
-/// every SDR view, and every other operator under any working color space —
-/// emits Rec.709 display-linear (Rec.709-fit operators receive a
-/// Rec.2020 → Rec.709 conversion at the pass entry under the Rec.2020
-/// working space; see `tonemapping_shared.wgsl`).
+/// Returns [`DisplayGamut::Rec2020`] exactly when the view's **effective**
+/// operator ([`effective_tonemapping`], i.e. after the D6 SDR-only-operator
+/// substitution) is [`Tonemapping::GranTurismo7`] and its resolved display
+/// target requests an HDR transfer
+/// ([`ViewDisplayTarget::is_hdr_transfer`]): in that configuration the
+/// tonemapping pipeline is specialized with the `TONEMAP_OUTPUT_REC2020`
+/// shader def ([`TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020`]) and
+/// the GT7 operator emits its native linear Rec.2020 display-referred output
+/// without the Rec.709 back-conversion (see `gt7.wgsl`). Every other
+/// configuration — every SDR view, and every other effective operator under
+/// any working color space — emits Rec.709 display-linear (Rec.709-fit
+/// operators receive a Rec.2020 → Rec.709 conversion at the pass entry under
+/// the Rec.2020 working space; see `tonemapping_shared.wgsl`).
 ///
 /// This function is the **single source of truth** for that predicate:
 /// `prepare_view_tonemapping_pipelines` (the def push) and the display
@@ -659,7 +752,9 @@ impl ViewTonemappingPipeline {
 /// `encoder_input_gamut`) both derive from it, reading the same extracted
 /// [`Tonemapping`] component and the same [`ViewDisplayTarget`] prepared in
 /// `PrepareViews`, so the two pipelines can never disagree about the
-/// post-tonemap buffer's primaries within a frame.
+/// post-tonemap buffer's primaries within a frame. Pass the view's
+/// **authored** operator; the D6 substitution is applied internally so both
+/// callers stay in lockstep with the pipeline that actually runs.
 ///
 /// A missing [`ViewDisplayTarget`] is treated as the plain SDR default
 /// (matching the component's documented fallback), and a missing or
@@ -669,7 +764,7 @@ pub fn tonemap_output_gamut(
     tonemapping: Option<&Tonemapping>,
     view_display_target: Option<&ViewDisplayTarget>,
 ) -> DisplayGamut {
-    if tonemapping == Some(&Tonemapping::GranTurismo7)
+    if effective_tonemapping(tonemapping, view_display_target) == Tonemapping::GranTurismo7
         && view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer)
     {
         DisplayGamut::Rec2020
@@ -706,7 +801,24 @@ pub fn prepare_view_tonemapping_pipelines(
         external_white_balance,
     ) in view_targets.iter()
     {
-        let tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
+        let requested_tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
+        // D6 warn + degrade: an SDR-only operator on an HDR-transfer target
+        // is substituted with an HDR-capable operator instead of silently
+        // capping the image at paper white. See `effective_tonemapping` for
+        // the table; the substitution only ever changes prepared render-world
+        // state, never the authored component.
+        let tonemapping = effective_tonemapping(Some(&requested_tonemapping), view_display_target);
+        if tonemapping != requested_tonemapping {
+            warn_once!(
+                "A camera uses `Tonemapping::{requested_tonemapping:?}`, an SDR-only operator \
+                whose output is capped at paper white, but renders to an HDR display target; \
+                substituting `Tonemapping::GranTurismo7` for this view (using the camera's \
+                `GranTurismo7Params` if present, otherwise the defaults). Set \
+                `Tonemapping::GranTurismo7` on the camera explicitly to adopt the substitute \
+                and silence this warning, or use an SDR display target to keep \
+                `Tonemapping::{requested_tonemapping:?}`."
+            );
+        }
 
         // Working-space diagnostic: the Rec.2020 → display-primaries
         // conversion happens in the tonemapping pass, which
@@ -759,16 +871,20 @@ pub fn prepare_view_tonemapping_pipelines(
             view_target.compositing_space == Some(CompositingSpace::Oklab),
         );
 
-        // The GT7 params uniform is active exactly when the operator is GT7
-        // and the camera opted in with a `GranTurismo7Params` component
-        // (`prepare_gt7_params_uniforms` uses the same predicate).
-        let gt7_uniform_active = tonemapping == Tonemapping::GranTurismo7 && gt7_params.is_some();
+        // The GT7 params uniform is active exactly when the effective
+        // operator is GT7 and either the camera opted in with a
+        // `GranTurismo7Params` component or the operator was D6-substituted
+        // (`prepare_gt7_params_uniforms` uses the same shared predicate).
+        let gt7_uniform_active =
+            gt7_params_uniform_active(requested_tonemapping, tonemapping, gt7_params.is_some());
 
         // D6 diagnostic: GT7's HDR mode is selected inside the prepared
         // params uniform, so without the component the shader keeps its baked
         // SDR defaults — on an HDR surface the image silently stays clamped
-        // to paper white. Warn instead of degrading silently.
-        if tonemapping == Tonemapping::GranTurismo7
+        // to paper white. Warn instead of degrading silently. (Keyed on the
+        // *authored* operator: D6-substituted views always get a prepared
+        // uniform, so this does not apply to them.)
+        if requested_tonemapping == Tonemapping::GranTurismo7
             && gt7_params.is_none()
             && view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer)
         {
@@ -797,15 +913,17 @@ pub fn prepare_view_tonemapping_pipelines(
             TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM,
             gt7_uniform_active,
         );
-        // GT7 on an HDR-transfer target emits its native Rec.2020 output for
-        // the display encoder. `tonemap_output_gamut` is the single source of
-        // truth shared with the encoder's input-gamut contract
-        // (`encoder_input_gamut` in display_encoding); both read the same
-        // extracted/prepared components, so def push and encoder key always
-        // agree.
+        // GT7 on an HDR-transfer target (authored or D6-substituted) emits
+        // its native Rec.2020 output for the display encoder.
+        // `tonemap_output_gamut` is the single source of truth shared with
+        // the encoder's input-gamut contract (`encoder_input_gamut` in
+        // display_encoding); both read the same extracted/prepared components
+        // (and both pass the authored operator), so def push and encoder key
+        // always agree.
         flags.set(
             TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020,
-            tonemap_output_gamut(Some(&tonemapping), view_display_target) == DisplayGamut::Rec2020,
+            tonemap_output_gamut(Some(&requested_tonemapping), view_display_target)
+                == DisplayGamut::Rec2020,
         );
 
         let key = TonemappingPipelineKey {
@@ -1002,5 +1120,163 @@ mod tests {
             .insert(Tonemapping::GranTurismo7);
         app.update();
         assert!(app.world().entity(entity).contains::<TonemappingEnabled>());
+    }
+
+    use bevy_window::{DisplayTarget, DisplayTransfer};
+
+    const ALL_OPERATORS: [Tonemapping; 10] = [
+        Tonemapping::None,
+        Tonemapping::Reinhard,
+        Tonemapping::ReinhardLuminance,
+        Tonemapping::AcesFitted,
+        Tonemapping::AgX,
+        Tonemapping::SomewhatBoringDisplayTransform,
+        Tonemapping::TonyMcMapface,
+        Tonemapping::BlenderFilmic,
+        Tonemapping::KhronosPbrNeutral,
+        Tonemapping::GranTurismo7,
+    ];
+
+    fn hdr_view_display_target() -> ViewDisplayTarget {
+        ViewDisplayTarget::fulfilled(DisplayTarget {
+            paper_white_nits: 200.0,
+            peak_luminance_nits: 1000.0,
+            transfer: DisplayTransfer::ScRgbLinear,
+            ..DisplayTarget::SDR_SRGB
+        })
+    }
+
+    fn sdr_view_display_target() -> ViewDisplayTarget {
+        ViewDisplayTarget::fulfilled(DisplayTarget::SDR_SRGB)
+    }
+
+    /// A view whose HDR request was downgraded at surface negotiation: the
+    /// resolved target is plain SDR, so it must behave exactly like an SDR
+    /// view.
+    fn downgraded_view_display_target() -> ViewDisplayTarget {
+        ViewDisplayTarget {
+            requested: hdr_view_display_target().requested,
+            resolved: DisplayTarget::SDR_SRGB,
+        }
+    }
+
+    #[test]
+    fn sdr_only_excludes_exactly_none_and_gran_turismo_7() {
+        for operator in ALL_OPERATORS {
+            let expected = !matches!(operator, Tonemapping::None | Tonemapping::GranTurismo7);
+            assert_eq!(
+                operator.is_sdr_only(),
+                expected,
+                "is_sdr_only mismatch for {operator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn d6_substitution_fires_exactly_for_sdr_only_operators_on_hdr_targets() {
+        let hdr = hdr_view_display_target();
+        for operator in ALL_OPERATORS {
+            let effective = effective_tonemapping(Some(&operator), Some(&hdr));
+            if operator.is_sdr_only() {
+                // SDR-only operator + HDR transfer → GT7 substitute (D6:
+                // never `None`, never an operator capped at paper white).
+                assert_eq!(
+                    effective,
+                    Tonemapping::GranTurismo7,
+                    "expected D6 substitution for {operator:?} on an HDR target"
+                );
+            } else {
+                // `None` (pass-through, encoder warns separately) and GT7
+                // itself pass through unchanged.
+                assert_eq!(effective, operator);
+            }
+        }
+    }
+
+    #[test]
+    fn d6_substitution_never_fires_off_hdr_targets() {
+        for operator in ALL_OPERATORS {
+            // Plain SDR target.
+            assert_eq!(
+                effective_tonemapping(Some(&operator), Some(&sdr_view_display_target())),
+                operator
+            );
+            // HDR request downgraded at surface negotiation: resolved target
+            // is SDR, so the view keeps the authored operator bit-for-bit.
+            assert_eq!(
+                effective_tonemapping(Some(&operator), Some(&downgraded_view_display_target())),
+                operator
+            );
+            // Missing `ViewDisplayTarget` is the documented SDR fallback.
+            assert_eq!(effective_tonemapping(Some(&operator), None), operator);
+        }
+        // Missing operator is `None` (which is never substituted).
+        assert_eq!(
+            effective_tonemapping(None, Some(&hdr_view_display_target())),
+            Tonemapping::None
+        );
+    }
+
+    #[test]
+    fn tonemap_output_gamut_matches_the_effective_operator() {
+        let hdr = hdr_view_display_target();
+        for operator in ALL_OPERATORS {
+            // On HDR targets: Rec.2020 for GT7 (authored or substituted),
+            // Rec.709 only for the `None` pass-through.
+            let expected = if operator == Tonemapping::None {
+                DisplayGamut::Rec709
+            } else {
+                DisplayGamut::Rec2020
+            };
+            assert_eq!(
+                tonemap_output_gamut(Some(&operator), Some(&hdr)),
+                expected,
+                "output gamut mismatch for {operator:?} on an HDR target"
+            );
+            // SDR (and downgraded, and missing) targets are always Rec.709.
+            assert_eq!(
+                tonemap_output_gamut(Some(&operator), Some(&sdr_view_display_target())),
+                DisplayGamut::Rec709
+            );
+            assert_eq!(
+                tonemap_output_gamut(Some(&operator), Some(&downgraded_view_display_target())),
+                DisplayGamut::Rec709
+            );
+            assert_eq!(
+                tonemap_output_gamut(Some(&operator), None),
+                DisplayGamut::Rec709
+            );
+        }
+    }
+
+    #[test]
+    fn gt7_params_uniform_active_table() {
+        let hdr = hdr_view_display_target();
+        let gt7 = Tonemapping::GranTurismo7;
+
+        // Authored GT7 binds the uniform iff the camera opted in with params.
+        assert!(gt7_params_uniform_active(gt7, gt7, true));
+        assert!(!gt7_params_uniform_active(gt7, gt7, false));
+
+        // D6-substituted views always bind it (the substitute must run in
+        // HDR mode, which only the prepared uniform can select) — with the
+        // camera's params if present, defaults otherwise.
+        for operator in ALL_OPERATORS {
+            if !operator.is_sdr_only() {
+                continue;
+            }
+            let effective = effective_tonemapping(Some(&operator), Some(&hdr));
+            assert!(gt7_params_uniform_active(operator, effective, false));
+            assert!(gt7_params_uniform_active(operator, effective, true));
+        }
+
+        // Non-GT7 effective operators never bind it, params or not.
+        for operator in ALL_OPERATORS {
+            if operator == gt7 {
+                continue;
+            }
+            assert!(!gt7_params_uniform_active(operator, operator, false));
+            assert!(!gt7_params_uniform_active(operator, operator, true));
+        }
     }
 }

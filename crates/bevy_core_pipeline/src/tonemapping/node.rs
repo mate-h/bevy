@@ -144,6 +144,11 @@ pub fn tonemapping(
             &cached.bind_group
         }
         cached => {
+            // LUT selection keys on the *authored* operator. For views whose
+            // SDR-only operator was D6-substituted with GT7 (see
+            // `effective_tonemapping`) this binds the authored operator's
+            // LUT, which is harmless: the GT7 shader path never samples the
+            // LUT, and every LUT satisfies the same 3D-texture layout entry.
             let lut_bindings =
                 get_lut_bindings(&gpu_images, &tonemapping_luts, tonemapping, &fallback_image);
 

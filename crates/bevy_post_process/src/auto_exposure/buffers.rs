@@ -10,7 +10,7 @@ use bevy_utils::once;
 use tracing::warn;
 
 use super::{
-    pipeline::{AutoExposureState, AutoExposureUniform},
+    pipeline::{AutoExposureState, AutoExposureUniform, ViewAutoExposurePipeline},
     settings::PhysiologicalAdaptation,
     AutoExposure, AutoExposureExternalReference, AutoWhiteBalance,
 };
@@ -43,6 +43,11 @@ type ExtractedCamera = (
 #[derive(Resource)]
 pub(super) struct ExtractedStateBuffers {
     changed: Vec<ExtractedCamera>,
+    /// Render-world entities whose camera stopped metering entirely (all
+    /// metering components removed while the camera itself stays alive).
+    /// These are *render* entities because [`AutoExposureBuffers`] is keyed
+    /// by render entities; cameras that were despawned outright are handled
+    /// by the liveness sweep in [`prepare_buffers`] instead.
     removed: Vec<Entity>,
 }
 
@@ -80,6 +85,7 @@ pub(super) fn extract_buffers(
             Or<(With<AutoExposure>, With<AutoWhiteBalance>)>,
         >,
     >,
+    render_entities: Extract<Query<RenderEntity>>,
 ) {
     let mut changed: Vec<ExtractedCamera> = changed
         .iter()
@@ -112,9 +118,17 @@ pub(super) fn extract_buffers(
                     reference.copied(),
                     white_balance.copied(),
                 ));
-            } else {
-                fully_removed.push(entity);
+            } else if let Ok(render_entity) = render_entities.get(entity) {
+                // The camera is still alive but no longer meters: tear its
+                // buffer down by its *render*-world key — the buffer map is
+                // keyed by render entities, so pushing the main-world entity
+                // here would silently leave the buffer (and the metering
+                // dispatches consuming it) alive forever.
+                fully_removed.push(render_entity);
             }
+            // Otherwise the camera was despawned outright; its render entity
+            // is torn down by the sync machinery and `prepare_buffers`'
+            // liveness sweep drops the buffer.
         };
 
         for entity in removed.read() {
@@ -144,10 +158,12 @@ pub(super) fn extract_buffers(
 }
 
 pub(super) fn prepare_buffers(
+    mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut extracted: ResMut<ExtractedStateBuffers>,
     mut buffers: ResMut<AutoExposureBuffers>,
+    live_entities: Query<()>,
 ) {
     for (entity, settings, reference, white_balance) in extracted.changed.drain(..) {
         let uniform = build_uniform(
@@ -178,7 +194,22 @@ pub(super) fn prepare_buffers(
 
     for entity in extracted.removed.drain(..) {
         buffers.buffers.remove(&entity);
+
+        // Also drop the cached per-view pipeline component: the queue system
+        // only ever *inserts* it, so without this a camera that stopped
+        // metering would keep dispatching the metering pass every frame
+        // against the (now stale) buffer.
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.remove::<ViewAutoExposurePipeline>();
+        }
     }
+
+    // Cameras that are despawned outright never make it into the `removed`
+    // list (their main-world entity is gone before the removal events are
+    // read), so sweep out buffers whose render-world entity no longer exists.
+    buffers
+        .buffers
+        .retain(|&entity, _| live_entities.contains(entity));
 }
 
 /// Builds the settings uniform for one view from the optional [`AutoExposure`],
