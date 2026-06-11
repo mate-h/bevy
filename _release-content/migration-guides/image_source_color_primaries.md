@@ -11,16 +11,7 @@ pub source_primaries: SourceColorPrimaries,
 
 It records which color primaries (gamut) the image data is expressed in — `Bt709`
 (the sRGB primaries, and the default), `Bt2020`, or `DisplayP3`. This is metadata
-only: it does not change how any image is decoded, stored, or rendered today. It
-exists for the configurable wide working color space that also ships in this
-release (`RenderPlugin::working_color_space` — see the "Wide working color space
-(Rec.2020, opt-in)" release note); the stamp is propagated to
-`GpuImage::source_primaries` in the render world. Note that the
-`WorkingColorSpace::Rec2020` texture conversion currently assumes all sampled
-color textures are authored against Rec.709 and does not yet consult this field —
-textures stamped with wide primaries are over-converted. A per-texture escape
-hatch that uses the stamp to convert each texture from its actual source gamut is
-a follow-up.
+only: it does not change how any image is decoded, stored, or rendered today.
 
 If you construct `Image` with a struct literal, you must now provide the field;
 `SourceColorPrimaries::default()` (BT.709) preserves the previous behavior:
@@ -65,3 +56,11 @@ Asset loaders now stamp this field when loading:
   transfer function (PQ/HLG), which is still loaded as-is.
 - The glTF loader stamps `Bt709` explicitly on all textures, as mandated by the
   glTF 2.0 specification.
+
+The field exists for the configurable wide working color space that also ships in
+this release (`RenderPlugin::working_color_space` — see the "Wide working color
+space (Rec.2020, opt-in)" release note); the stamp is propagated to
+`GpuImage::source_primaries` in the render world. For now,
+`WorkingColorSpace::Rec2020` still assumes every sampled color texture is Rec.709
+and does not yet consult this field; a per-texture conversion that uses the stamp
+is a planned follow-up.

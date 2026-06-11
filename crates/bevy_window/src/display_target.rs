@@ -37,9 +37,8 @@ use bevy_reflect::{ReflectDeserialize, ReflectSerialize};
 ///
 /// `DisplayTarget` is a required component of [`Window`](crate::Window):
 /// every window entity automatically receives one, defaulting to
-/// [`DisplayTarget::SDR_SRGB`], which is byte-identical to Bevy's behavior
-/// before this component existed. Multiple cameras rendering to the same
-/// window share the window's single `DisplayTarget`.
+/// [`DisplayTarget::SDR_SRGB`], the standard SDR sRGB output. Multiple cameras
+/// rendering to the same window share the window's single `DisplayTarget`.
 ///
 /// Render targets that are not windows (`RenderTarget::Image`,
 /// `RenderTarget::TextureView`) have no window entity to host this component;
@@ -73,7 +72,7 @@ pub struct DisplayTarget {
     /// viewing environment; ITU-R BT.2408 recommends 203 nits for HDR
     /// broadcast.
     ///
-    /// Note that the scRGB-linear transfer function defines its own reference
+    /// The scRGB-linear transfer function defines its own reference
     /// white of 80 nits at signal value `1.0`; the encoder accounts for this
     /// by scaling by `paper_white_nits / 80` when encoding for
     /// [`DisplayTransfer::ScRgbLinear`]. No such factor is baked into this
@@ -122,8 +121,8 @@ impl DisplayTarget {
     /// luminance of 100 nits, black level of 0, [`DisplayGamut::Rec709`]
     /// primaries, [`DisplayTransfer::Srgb`] encoding.
     ///
-    /// This is the [`Default`] value, and produces output byte-identical to
-    /// Bevy's behavior before `DisplayTarget` existed.
+    /// This is the [`Default`] value: the standard SDR sRGB output path, with
+    /// no display-encoding pass and hardware sRGB encode on writeback.
     pub const SDR_SRGB: Self = Self {
         paper_white_nits: 100.0,
         peak_luminance_nits: 100.0,
@@ -210,9 +209,8 @@ impl DisplayTarget {
     /// every renderer stage that folds `paper_white_nits` into its math (the
     /// tone-mapping operators' seam renormalization *and* the display
     /// encoder's transfer encoding) must use this method, so the two scale
-    /// factors cancel exactly as the seam contract requires regardless of
-    /// what the user authored. Warning about the fallback is left to the
-    /// callers (this method is pure).
+    /// factors cancel exactly regardless of what the user authored. Warning
+    /// about the fallback is left to the callers (this method is pure).
     pub fn sanitized_paper_white_nits(&self) -> f32 {
         if !self.paper_white_nits.is_finite() || self.paper_white_nits <= 0.0 {
             Self::SDR_SRGB.paper_white_nits
@@ -265,8 +263,8 @@ pub enum DisplayGamut {
 /// color (already tone-mapped and gamut-mapped) into the non-linear (or
 /// scaled linear) signal values the display expects.
 ///
-/// Note that backend support varies. Through wgpu's surface color-space API
-/// (currently Bevy's wgpu fork, pending upstream under
+/// Backend support varies and depends on wgpu's surface color-space API
+/// (tracked upstream under
 /// [wgpu#2920](https://github.com/gfx-rs/wgpu/issues/2920)): [`Srgb`] is
 /// available everywhere; [`ScRgbLinear`] on macOS/iOS (Metal), Windows
 /// (Vulkan/DX12), Wayland (Vulkan), and browser WebGPU on HDR-capable

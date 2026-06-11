@@ -47,7 +47,7 @@ commands.spawn((
 ```
 
 When the camera renders to a target whose resolved `DisplayTarget` requests an HDR transfer
-(scRGB-linear, or PQ once wgpu can negotiate it), the operator is configured in its HDR mode
+(scRGB-linear or PQ), the operator is configured in its HDR mode
 — with or without the `GranTurismo7Params` component (the defaults are used if it is
 absent), matching the source implementation, which initializes HDR mode directly from the
 target's peak: the tone curve is rebuilt around the display's `peak_luminance_nits` (clamped
@@ -69,8 +69,8 @@ The encoder's gamut stage then becomes a true source → display transform:
 One documented limitation of the Rec.2020-native path: Bevy UI composites its
 Rec.709-authored colors into the post-tonemap buffer unconverted, so on a GT7-HDR view
 saturated UI colors are reinterpreted in the wider primaries and oversaturate slightly
-(grays and whites are unaffected — the white point is shared). Per-view UI gamut conversion
-is planned as part of the UI HDR follow-up (see `plans/ui-hdr-rfc.md` in the working notes).
+(grays and whites are unaffected — the white point is shared). Converting UI colors per
+view to match the display gamut is future work.
 
 On plain SDR targets, cameras without the component are completely unaffected, and SDR
 output remains byte-identical.

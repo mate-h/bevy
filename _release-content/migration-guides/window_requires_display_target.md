@@ -7,7 +7,7 @@ The `Window` component now requires the new `DisplayTarget` component, which
 describes the display the window is presented on (paper white luminance, peak
 luminance, black level, color gamut, and transfer function). It is the
 foundation for the HDR display output support that ships in this release (see
-the "HDR display output (scRGB-linear)" release note).
+the "HDR display output (scRGB-linear and HDR10/PQ)" release note).
 
 Every entity with a `Window` automatically receives a `DisplayTarget` through
 the required-component machinery, defaulting to `DisplayTarget::SDR_SRGB`

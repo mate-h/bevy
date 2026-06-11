@@ -29,8 +29,8 @@
 //   4. transfer encoding (`DISPLAY_TRANSFER_SCRGB` / `DISPLAY_TRANSFER_PQ`).
 //
 // This shader is never specialized for sRGB targets: the exact sRGB OETF is
-// hardware-applied on the upscaling blit's `*UnormSrgb` writeback, byte-
-// identical to Bevy's behavior before this pass existed.
+// hardware-applied on the upscaling blit's `*UnormSrgb` writeback, so plain
+// SDR views never run this pass.
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 #import bevy_render::display_target::DisplayTargetUniform
@@ -59,7 +59,7 @@
 // RgbPrimaries::BT2020)`). Identical literals to `GT7_REC_709_TO_REC_2020`
 // in gt7.wgsl / `REC_709_TO_REC_2020` in gt7.rs.
 // TODO: deduplicate with shared color-space constants once they land in
-// `bevy_render::color_operations` (HDR workstream follow-up).
+// `bevy_render::color_operations`.
 const REC_709_TO_REC_2020 = mat3x3<f32>(
     0.627403895934699, 0.06909728935823199, 0.016391438875150228,   // column 0
     0.32928303837788375, 0.919540395075459, 0.08801330787722578,    // column 1
@@ -73,7 +73,7 @@ const REC_709_TO_REC_2020 = mat3x3<f32>(
 // `GT7_REC_2020_TO_REC_709` in gt7.wgsl / `REC_2020_TO_REC_709` in gt7.rs /
 // `REC2020_TO_REC709` in bevy_render::working_color_space.
 // TODO: deduplicate with shared color-space constants once they land in
-// `bevy_render::color_operations` (HDR workstream follow-up).
+// `bevy_render::color_operations`.
 const REC_2020_TO_REC_709 = mat3x3<f32>(
     1.6604910021084347, -0.12455047452159052, -0.01815076335490522, // column 0
     -0.5876411387885496, 1.1328998971259598, -0.10057889800800739,  // column 1
@@ -181,8 +181,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     rgb = REC_2020_TO_REC_709 * rgb;
 #endif
 
-    // 3. Out-of-gamut handling (DECISIONS.md D3: perceptual compression,
-    // with the per-channel clip as the debug fallback). The compression def
+    // 3. Out-of-gamut handling (perceptual compression, with the per-channel
+    // clip as the debug fallback). The compression def
     // is pushed only when the gamut stage can actually produce out-of-gamut
     // colors (a gamut *contraction*, or `DisplayGamutCompression::Always`);
     // expansions and identity transforms keep the plain clip below, which is
@@ -200,7 +200,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     rgb = max(rgb, vec3(0.0));
 
     // 4. Transfer encoding. Input is paper-white-relative display-linear
-    // (1.0 = paper white at the operator output, the D1/D5 convention).
+    // (1.0 = paper white at the operator output).
 #ifdef DISPLAY_TRANSFER_SCRGB
     // scRGB-linear: 1.0 = 80 nits, so scale by paper_white / 80.
     rgb = scrgb_encode(rgb, display_target.paper_white_nits);

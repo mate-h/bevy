@@ -11,14 +11,14 @@
     dt_lut_sampler,
 }
 
-// Only pulled in when the Gran Turismo 7 operator is selected, so every other
-// specialization composes exactly as before.
+// Only pulled in when the Gran Turismo 7 operator is selected, so no other
+// specialization references this import.
 #ifdef TONEMAP_METHOD_GRAN_TURISMO_7
 #import bevy_core_pipeline::tonemapping_gt7::tone_mapping_gran_turismo_7
 #endif
 
 // Only pulled in when the project opted into the Rec.2020 working space, so
-// default (Rec.709) projects compose exactly as before.
+// default (Rec.709) projects do not reference this import.
 #ifdef WORKING_COLOR_SPACE_REC2020
 #import bevy_render::working_color_space::rec2020_to_rec709
 #endif

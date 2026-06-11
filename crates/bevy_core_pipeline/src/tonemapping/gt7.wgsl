@@ -49,9 +49,11 @@ struct Gt7Params {
 #ifdef GT7_PARAMS_UNIFORM
 // Per-view GT7 parameters prepared on the CPU (`Gt7ParamsUniform` in gt7.rs).
 // Bound only when the pipeline is specialized with the GT7_PARAMS_UNIFORM
-// shader def: the view's tonemapping is GranTurismo7 AND the camera has a
-// `GranTurismo7Params` component. The binding index is pushed as a shader def
-// so other bind groups can rebind it elsewhere (6 in the tonemapping pass).
+// shader def: the view's effective tonemapping is GranTurismo7 AND either the
+// camera has a `GranTurismo7Params` component or the view renders to an
+// HDR-transfer target (see `gt7_params_uniform_active` in tonemapping/mod.rs).
+// The binding index is pushed as a shader def so other bind groups can rebind
+// it elsewhere (6 in the tonemapping pass).
 @group(0) @binding(#GT7_PARAMS_BINDING_INDEX) var<uniform> gt7_params_uniform: Gt7Params;
 #endif
 
@@ -253,7 +255,7 @@ fn gt7_tone_map(rgb: vec3<f32>, params: Gt7Params) -> vec3<f32> {
 //    (a): the curve always sees Gran Turismo's 250-nit-calibrated scene).
 // 3. Run the operator. In SDR mode the 1/2.5 correction factor brings the
 //    display-referred result back to [0, 1]; in HDR mode (selected by the
-//    prepared params uniform) the factor is the D5 seam renormalization
+//    prepared params uniform) the factor is the paper-white renormalization
 //    100 / paper_white_nits, so the output is paper-white-relative
 //    ([0, peak / paper_white]).
 // 4. Output gamut, selected by the TONEMAP_OUTPUT_REC2020 shader def — pushed

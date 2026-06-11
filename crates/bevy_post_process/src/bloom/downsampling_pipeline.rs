@@ -43,9 +43,8 @@ pub struct BloomDownsamplingPipelineKeys {
     first_downsample: bool,
     uniform_scale: bool,
     /// The bloom pyramid format the pass renders into: `Rg11b10Ufloat` for
-    /// views on SDR display targets (bit-for-bit the historical pipeline),
-    /// `Rgba16Float` for views whose resolved display target transfer is HDR
-    /// (see [`bloom_texture_format`]).
+    /// views on SDR display targets, `Rgba16Float` for views whose resolved
+    /// display target transfer is HDR (see [`bloom_texture_format`]).
     texture_format: TextureFormat,
 }
 

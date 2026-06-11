@@ -4,8 +4,7 @@
 // `bevy_render::view::display_target_uniform` (Rust); the two must stay
 // field-for-field in sync. The uniform is bound conditionally: passes declare
 // the binding only under the `DISPLAY_TARGET_UNIFORM` shader def, so pipelines
-// for plain-SDR views never reference this module and compose byte-identically
-// to Bevy's pre-`DisplayTarget` shaders.
+// for plain-SDR views never reference this module.
 
 #define_import_path bevy_render::display_target
 
@@ -37,6 +36,6 @@ struct DisplayTargetUniform {
     min_luminance_nits: f32,
     // Display gamut as a DISPLAY_GAMUT_* index.
     gamut: u32,
-    // Requested transfer function as a DISPLAY_TRANSFER_* index.
+    // Resolved transfer function as a DISPLAY_TRANSFER_* index.
     transfer: u32,
 }

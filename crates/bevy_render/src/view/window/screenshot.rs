@@ -164,9 +164,9 @@ pub fn save_to_disk(path: impl AsRef<Path>) -> impl FnMut(On<ScreenshotCaptured>
                     let img = match (&dyn_img, format) {
                         // Float sources keep their full range in
                         // float-capable containers.
-                        // TODO: a calibrated HDR golden-image path (metadata,
-                        // PQ containers, paper-white-aware SDR preview) is
-                        // tracked by the HDR spec's v-hdr-golden work.
+                        // TODO: add a calibrated HDR golden-image path
+                        // (metadata, PQ containers, paper-white-aware SDR
+                        // preview).
                         (
                             DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_),
                             ImageFormat::OpenExr,

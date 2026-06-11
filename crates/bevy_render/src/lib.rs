@@ -133,8 +133,8 @@ pub struct RenderPlugin {
     pub render_creation: RenderCreation,
     /// The color primaries of the renderer's scene-referred working space.
     ///
-    /// Defaults to [`WorkingColorSpace::Rec709`] (bit-for-bit identical to
-    /// Bevy before this setting existed). This is a project-global axis read
+    /// Defaults to [`WorkingColorSpace::Rec709`], where the working-space
+    /// conversions are identities. This is a project-global axis read
     /// exactly once, when the plugin builds: changing the extracted
     /// [`WorkingColorSpace`] resource at runtime has no effect, because
     /// render pipelines are specialized against it at startup.

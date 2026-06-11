@@ -43,6 +43,10 @@ otherwise):
 - Tone mapping operators other than `Tonemapping::GranTurismo7` are
   Rec.709-fit and clip working-space colors outside the Rec.709 gamut at the
   tone mapping pass entry.
+- Some parts of the renderer are not yet converted and stay Rec.709-fit:
+  `CompositingSpace::Oklab` and the bloom luminance weights; clustered decals
+  and irradiance volumes; the `specular_tint` and clearcoat tint material
+  inputs; `bevy_solari`; and gizmos, UI, and atmosphere-generated sky values.
 - `LinearRgba` (and the rest of `bevy_color`) remains defined as linear
   Rec.709; the conversion to the working space happens exactly once, at the
   render-world seams above. Do not pre-convert colors you hand to standard

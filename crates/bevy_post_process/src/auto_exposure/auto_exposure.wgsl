@@ -25,8 +25,8 @@
 // and the compute_average pass blends in a faint D65 "virtual light" anchor, temporally adapts
 // the white-point chromaticity, and composes a von Kries correction matrix into the view's
 // color-grading balance matrix. Every auto-white-balance statement is gated on the
-// `awb_enabled` uniform flag, so the auto-exposure-only configuration executes exactly the
-// arithmetic it executed before auto white balance existed.
+// `awb_enabled` uniform flag, so the auto-exposure-only configuration runs no white-balance
+// arithmetic at all.
 
 #import bevy_render::view::View
 #import bevy_render::globals::Globals
@@ -430,8 +430,8 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
     // probe luminance, estimated on the CPU) is fused with the histogram average as a
     // weighted average, where the histogram always has weight 1.0. A constant metering
     // bias is then applied to the fused result.
-    // Both statements are skipped entirely at their neutral values, so the default
-    // configuration executes exactly the same arithmetic as before they were added.
+    // Both statements are skipped entirely at their neutral values: the default
+    // configuration meters from the histogram alone.
     if settings.external_reference_weight > 0.0 {
         avg_lum = (avg_lum + settings.external_reference_ev * settings.external_reference_weight)
             / (1.0 + settings.external_reference_weight);

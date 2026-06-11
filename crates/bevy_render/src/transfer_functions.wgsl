@@ -13,9 +13,9 @@
 // NOTE on duplication: `bevy_core_pipeline::tonemapping_gt7` (gt7.wgsl)
 // carries its own self-contained PQ helpers (same ST-2084 constants, same
 // numerically-stable exp2/log2 form) because the GT7 operator is a verbatim,
-// fixture-locked port that imports nothing. Deduplicating gt7.wgsl onto this
-// module is deliberately deferred (HDR workstream follow-up); if you change
-// the PQ math here, check `gt7.wgsl` stays consistent.
+// fixture-locked port that imports nothing. gt7.wgsl is not deduplicated onto
+// this module; if you change the PQ math here, check `gt7.wgsl` stays
+// consistent.
 
 #define_import_path bevy_render::transfer_functions
 
@@ -80,8 +80,7 @@ fn srgb_eotf(signal: vec3<f32>) -> vec3<f32> {
 const SCRGB_REFERENCE_WHITE_NITS: f32 = 80.0;
 
 // Encodes paper-white-relative display-linear color (1.0 = paper white at the
-// tone-map operator output, per the D1/D5 numeric convention) as scRGB-linear
-// signal, where 1.0 = 80 nits:
+// tone-map operator output) as scRGB-linear signal, where 1.0 = 80 nits:
 //
 //   V = L * paper_white_nits / 80
 //

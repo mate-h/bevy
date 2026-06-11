@@ -78,7 +78,12 @@ impl core::ops::DerefMut for ManualDisplayTargets {
 ///   `DisplayTarget` (from the `DisplayTarget` component on the
 ///   [`Window`](bevy_window::Window) entity).
 /// - [`NormalizedRenderTarget::Image`] / [`NormalizedRenderTarget::TextureView`]:
-///   looked up in [`ManualDisplayTargets`].
+///   looked up in [`ManualDisplayTargets`] by the full
+///   [`NormalizedRenderTarget`] key. The match is exact: for an image target,
+///   the key includes `ImageRenderTarget::scale_factor`, so a registered
+///   entry only resolves for views whose target has the same `scale_factor`
+///   (and image handle) — a different `scale_factor` misses and falls back to
+///   the default.
 /// - [`NormalizedRenderTarget::None`], `target == None`, or any missing
 ///   entry: [`DisplayTarget::SDR_SRGB`].
 pub fn resolve_display_target(

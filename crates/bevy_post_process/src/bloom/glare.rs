@@ -501,7 +501,7 @@ mod tests {
     }
 
     /// Invalid F-numbers degrade to the default instead of poisoning the
-    /// weights (D6: warn + degrade).
+    /// weights.
     #[test]
     fn invalid_f_number_degrades_to_default() {
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -2.8] {

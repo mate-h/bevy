@@ -115,6 +115,10 @@ pub struct Bloom {
 
     /// Maximum size of each dimension for the largest mipchain texture used in downscaling/upscaling.
     /// Only tweak if you are seeing visual artifacts.
+    ///
+    /// The [`BloomScatterModel::Gt7Glare`] glare pattern's on-screen angular
+    /// size is calibrated for the default value of `512`; other values rescale
+    /// the glare pattern accordingly.
     pub max_mip_dimension: u32,
 
     /// Amount to stretch the bloom on each axis. Artistic control, can be used to emulate
@@ -124,7 +128,7 @@ pub struct Bloom {
 
     /// Selects how the blurred pyramid levels are weighted when composited
     /// back onto the image (default: [`BloomScatterModel::Aesthetic`], the
-    /// existing parametric curve).
+    /// parametric curve).
     ///
     /// [`BloomScatterModel::Gt7Glare`] replaces the parametric curve with
     /// per-level weights derived from the diffraction pattern of a camera
@@ -247,11 +251,10 @@ impl Default for Bloom {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Reflect)]
 #[reflect(Default, Clone, PartialEq)]
 pub enum BloomScatterModel {
-    /// The hand-tuned parametric curve Bevy's bloom has always used, shaped
+    /// The hand-tuned parametric curve, shaped
     /// by [`Bloom::intensity`], [`Bloom::low_frequency_boost`],
     /// [`Bloom::low_frequency_boost_curvature`] and
-    /// [`Bloom::high_pass_frequency`]. This is the default and renders
-    /// exactly as before this enum existed.
+    /// [`Bloom::high_pass_frequency`]. This is the default.
     #[default]
     Aesthetic,
 
@@ -277,6 +280,10 @@ pub enum BloomScatterModel {
     /// - [`Bloom::low_frequency_boost`],
     ///   [`Bloom::low_frequency_boost_curvature`] and
     ///   [`Bloom::high_pass_frequency`] are unused.
+    ///
+    /// The glare's on-screen angular size is calibrated for the default
+    /// [`Bloom::max_mip_dimension`] of `512`; other values rescale the glare
+    /// pattern accordingly.
     Gt7Glare {
         /// The aperture F-number (focal length over aperture diameter) of
         /// the virtual camera, clamped to the standard full-stop ladder
@@ -433,11 +440,10 @@ mod tests {
     use super::*;
     use bevy_math::Vec4;
 
-    /// The precomputation packing must stay bit-identical to the historical
-    /// inline math from the extract impl (the SDR byte-identity contract for
-    /// `threshold`-based prefilters).
+    /// The precomputation packing must stay bit-identical to the reference
+    /// inline math for `threshold`-based prefilters.
     #[test]
-    fn threshold_precomputations_match_legacy_inline_math() {
+    fn threshold_precomputations_match_reference_inline_math() {
         for (threshold, threshold_softness) in [
             (0.0_f32, 0.0_f32),
             (0.6, 0.2),
@@ -446,7 +452,7 @@ mod tests {
             (0.6, 2.0),
         ] {
             let knee = threshold * threshold_softness.clamp(0.0, 1.0);
-            let legacy = Vec4::new(
+            let reference = Vec4::new(
                 threshold,
                 threshold - knee,
                 2.0 * knee,
@@ -454,7 +460,7 @@ mod tests {
             );
             let shared = BloomUniforms::threshold_precomputations(threshold, threshold_softness);
             assert_eq!(
-                legacy.to_array().map(f32::to_bits),
+                reference.to_array().map(f32::to_bits),
                 shared.to_array().map(f32::to_bits)
             );
         }
@@ -462,7 +468,7 @@ mod tests {
 
     #[test]
     fn prefilter_activity() {
-        // Framebuffer-value thresholds behave as before.
+        // A non-zero framebuffer-value `threshold` activates the prefilter.
         let fb = BloomPrefilter {
             threshold: 0.6,
             ..Default::default()

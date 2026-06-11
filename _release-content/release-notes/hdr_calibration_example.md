@@ -21,12 +21,12 @@ an "HDR settings" screen in your own game:
   `min_luminance_nits`.
 
 All adjustments mutate the primary window's `DisplayTarget` live — including
-toggling the requested transfer between sRGB and scRGB-linear, which
-renegotiates the swapchain on the fly — and a Gran Turismo 7 preview toggle
-runs the full HDR tone-mapping path on the same patterns. The patterns are
-rendered with `Tonemapping::None` and unlit materials so they reach the
+cycling the requested transfer with the `T` key (sRGB → scRGB-linear → PQ),
+which renegotiates the swapchain on the fly — and a Gran Turismo 7 preview
+toggle runs the full HDR tone-mapping path on the same patterns. The patterns
+are rendered with `Tonemapping::None` and unlit materials so they reach the
 display encoder at exact paper-white-relative values. The example also listens
-for the new `WindowMonitorChanged` event and suggests recalibrating when the
+for the new `WindowMonitorChanged` message and suggests recalibrating when the
 window lands on a different monitor.
 
 `DisplayTarget` gained matching builder-style helpers for deriving calibrated

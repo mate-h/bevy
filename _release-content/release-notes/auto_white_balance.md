@@ -4,10 +4,11 @@ authors: ["@stuartparmenter"]
 pull_requests: []
 ---
 
-Bevy now ships an automatic white balance, modeled on the system Polyphony Digital presented
-for Gran Turismo 7 at SIGGRAPH 2025 ("Physically Based Tone Mapping in Gran Turismo 7") —
-a feature that is essentially absent from real-time engines, which usually only expose manual
-temperature/tint sliders.
+Bevy now ships an automatic white balance: it estimates the scene's dominant illuminant from
+what the camera sees and slowly shifts the white point toward neutral, so a scene lit by warm
+tungsten or cool daylight no longer carries a permanent color cast. It is modeled on the system
+Polyphony Digital presented for Gran Turismo 7 at SIGGRAPH 2025 ("Physically Based Tone Mapping
+in Gran Turismo 7").
 
 Add the new `AutoWhiteBalance` component to a camera (with the `AutoExposurePlugin`), and the
 renderer estimates the scene's dominant illuminant and slowly adapts the white point towards

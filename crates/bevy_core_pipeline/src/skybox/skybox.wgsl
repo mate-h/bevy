@@ -2,7 +2,7 @@
 #import bevy_pbr::utils::coords_to_viewport_uv
 
 // Only pulled in when the project opted into the Rec.2020 working space, so
-// default (Rec.709) projects compose exactly as before.
+// default (Rec.709) projects do not reference this import.
 #ifdef WORKING_COLOR_SPACE_REC2020
 #import bevy_render::working_color_space::rec709_to_rec2020
 #endif

@@ -647,11 +647,9 @@ pub fn extract_cameras(
             //   exactly as fresh as the swapchain format read above.)
             // - Otherwise an explicit `CompositingSpace::Srgb` keeps its
             //   linear-storage `Rgba8Unorm` main texture (shaders write
-            //   sRGB-encoded values into it for gamma-encoded blending),
-            //   exactly as before.
+            //   sRGB-encoded values into it for gamma-encoded blending).
             // - Everything else (e.g. `Tonemapping::None` 2D cameras on SDR
-            //   targets) follows the output texture's view format, exactly
-            //   as before.
+            //   targets) follows the output texture's view format.
             let hdr_transfer = resolve_view_display_target(
                 target.as_ref(),
                 &extracted_windows,

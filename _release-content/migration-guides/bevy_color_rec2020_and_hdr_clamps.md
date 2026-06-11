@@ -24,12 +24,10 @@ behavior **only for SDR inputs**, and pass HDR / out-of-range values through:
   luminance is outside the SDR range. Inputs with all channels in `[0, 1]` and an
   SDR target luminance behave exactly as before.
 - `Luminance::lighter` for `LinearRgba` and `LinearRec2020` still clamps to white
-  for SDR colors (luminance and every color channel at most `1.0`), but HDR colors
-  — whose luminance *or* any individual channel exceeds `1.0`, the same predicate
-  `with_luminance` uses — keep getting brighter instead of being pulled down to
-  `1.0`, scaling so that their chromaticity is preserved. For example, a saturated
-  emissive red like `LinearRgba::new(4.0, 0.0, 0.0, 1.0)` (luminance ≈ 0.85) is no
-  longer desaturated towards white.
+  for SDR colors, but HDR colors (any channel or the luminance above `1.0`) now
+  keep getting brighter while preserving their chromaticity, instead of being
+  pulled toward white. For example, a saturated emissive red like
+  `LinearRgba::new(4.0, 0.0, 0.0, 1.0)` is no longer desaturated.
 - `Luminance::lighter` for `Xyza`, `Laba`, `Lcha`, `Oklaba`, `Oklcha`, `Hsla`, and
   `Okhsla` still clamps to white for colors whose luminance/lightness is at most
   `1.0`, but colors whose luminance/lightness already exceeds `1.0` keep getting
@@ -40,9 +38,7 @@ behavior **only for SDR inputs**, and pass HDR / out-of-range values through:
   documented `[0.0, 1.0]` range.
 - The `Laba` → `Lcha` conversion no longer clamps chroma to `[0.0, 1.5]`. All colors
   within the sRGB gamut have chroma below `1.5`, so this only changes results for
-  wide-gamut inputs, which now round-trip losslessly. (The same conversion also
-  computed hue through a redundant `to_radians()` scaling of the `atan2` operands;
-  this was harmless and has been cleaned up.)
+  wide-gamut inputs, which now round-trip losslessly.
 
 Quantization methods (`ColorToPacked::to_u8_array` and friends) still clamp to
 `[0, 1]`, since `u8` output has no headroom for HDR values.

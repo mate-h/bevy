@@ -14,7 +14,7 @@ fn enable_hdr_output(
     mut window: Single<&mut DisplayTarget, With<PrimaryWindow>>,
     camera: Single<Entity, With<Camera>>,
 ) {
-    *window = DisplayTarget {
+    **window = DisplayTarget {
         paper_white_nits: 200.0,
         peak_luminance_nits: 1000.0,
         // Or `DisplayTransfer::Pq` for HDR10 output.

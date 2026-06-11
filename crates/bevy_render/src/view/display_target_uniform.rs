@@ -14,8 +14,9 @@
 //!    for the *resolved* one: when the surface could not fulfil the requested
 //!    transfer (e.g. scRGB-linear on a backend without `Rgba16Float`
 //!    surfaces), the resolved target degrades to
-//!    [`DisplayTarget::SDR_SRGB`], so downgraded views take the plain SDR
-//!    path bit-for-bit. Views whose target cannot be resolved fall back to
+//!    [`DisplayTarget::SDR_SRGB`], so downgraded views take the same plain
+//!    SDR path as a natively-SDR view. Views whose target cannot be resolved
+//!    fall back to
 //!    [`DisplayTarget::SDR_SRGB`]. All cameras rendering to the same surface
 //!    resolve to the same value by construction.
 //! 2. [`prepare_display_target_uniforms`] runs in
@@ -30,8 +31,8 @@
 //! `DISPLAY_TARGET_UNIFORM` shader def guarding it) is only added to a
 //! pipeline when the view's display target is not the plain
 //! [`DisplayTarget::SDR_SRGB`] default, or when an active operator needs it.
-//! Views on default SDR targets specialize to pipelines that are byte-identical
-//! to the ones produced before this machinery existed.
+//! Views on default SDR targets specialize to pipelines that carry no
+//! display-target bindings.
 //!
 //! The matching WGSL struct lives in `display_target.wgsl` and is importable as
 //! `bevy_render::display_target`.
@@ -85,8 +86,8 @@ pub struct ViewDisplayTarget {
     /// user owns the texture format). When the requested transfer had to be
     /// downgraded (see `negotiate_surface_format` in `view::window`), this
     /// is [`DisplayTarget::SDR_SRGB`] for a full SDR downgrade (so the
-    /// downgraded view takes the plain SDR path bit-for-bit), or the
-    /// requested target with only the transfer replaced when the surface
+    /// downgraded view takes the same plain SDR path as a natively-SDR view),
+    /// or the requested target with only the transfer replaced when the surface
     /// carries a *different HDR* transfer (PQ downgraded to scRGB-linear, or
     /// HLG fulfilled as PQ/HDR10) — the user's calibration still applies.
     /// See `resolve_window_display_target` in this module.
@@ -108,8 +109,8 @@ impl ViewDisplayTarget {
     ///
     /// This is the negative of the `DISPLAY_TARGET_UNIFORM` shader-def
     /// predicate: plain-SDR views (including views whose HDR request was
-    /// downgraded at surface negotiation) push no new shader defs and keep
-    /// their pipelines byte-identical to Bevy's pre-`DisplayTarget` output.
+    /// downgraded at surface negotiation) push no new shader defs, so their
+    /// pipelines carry no display-target bindings.
     pub fn is_plain_sdr_srgb(&self) -> bool {
         self.resolved == DisplayTarget::SDR_SRGB
     }
@@ -183,8 +184,8 @@ pub const fn display_transfer_index(transfer: DisplayTransfer) -> u32 {
 /// | | | | 3 | HLG |
 ///
 /// Gamut conversion matrices are deliberately **not** part of this uniform;
-/// the gamut-transform pass of the display pipeline derives them per pipeline
-/// (they arrive with the encoder workstream).
+/// the gamut-transform stage of the display-encoding pass derives them per
+/// pipeline.
 ///
 /// The [`From<DisplayTarget>`] conversion copies values verbatim, but the
 /// uniform writer ([`prepare_display_target_uniforms`]) sanitizes
@@ -269,8 +270,8 @@ pub struct ViewDisplayTargetUniformOffset {
 /// - `Some(`[`DisplayTransfer::Srgb`]`)` while an HDR transfer was requested
 ///   (a full SDR downgrade): the **whole** target degrades to
 ///   [`DisplayTarget::SDR_SRGB`], not just the transfer field, so the view
-///   takes the plain SDR path bit-for-bit (D6: warn + degrade; the warning
-///   is emitted at negotiation time in `create_surfaces`).
+///   takes the same plain SDR path as a natively-SDR view (warn + degrade;
+///   the warning is emitted at negotiation time in `create_surfaces`).
 /// - `Some(transfer)` differing from the requested transfer while both are
 ///   HDR (the negotiation fulfilled the request with a different HDR
 ///   encoding: PQ downgraded to scRGB-linear when HDR10 is unavailable, or
@@ -286,7 +287,7 @@ pub(crate) fn resolve_window_display_target(
     match surface_transfer {
         // The surface negotiation downgraded the request all the way to SDR:
         // degrade the whole target to the plain SDR default so the view
-        // takes the SDR path bit-for-bit.
+        // takes the same SDR path as a natively-SDR view.
         Some(DisplayTransfer::Srgb) if requested.transfer != DisplayTransfer::Srgb => {
             DisplayTarget::SDR_SRGB
         }
@@ -376,9 +377,9 @@ pub fn prepare_view_display_targets(
 /// bit-for-bit) with a `warn_once!` when the authored value had to be
 /// replaced. This keeps the GPU-side paper white single-sourced with the
 /// value the tone-mapping operators (e.g. GT7's `sdr_correction_factor`)
-/// fold at their own prepare step, so the seam contract — operator output
-/// × `100 / paper_white`, encoder × `paper_white / 80` (scRGB) or
-/// `× paper_white` (PQ) — holds for every authored input.
+/// fold at their own prepare step, so the paper-white factors — operator
+/// output × `100 / paper_white`, encoder × `paper_white / 80` (scRGB) or
+/// `× paper_white` (PQ) — cancel for every authored input.
 ///
 /// Runs in
 /// [`RenderSystems::PrepareResources`](crate::RenderSystems::PrepareResources),

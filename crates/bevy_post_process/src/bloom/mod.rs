@@ -613,10 +613,11 @@ mod tests {
         (bloom.intensity + lf_boost) * high_pass_lq
     }
 
-    /// Every existing settings combination (scatter model untouched) must
-    /// produce bit-identical blend factors to the pre-glare implementation.
+    /// All `BloomScatterModel::Aesthetic` settings combinations must produce
+    /// the same blend factors as the dedicated aesthetic implementation,
+    /// independent of the glare code path.
     #[test]
-    fn aesthetic_blend_factors_bit_identical_to_legacy() {
+    fn aesthetic_blend_factors_match_dedicated_implementation() {
         let presets = [
             Bloom::NATURAL,
             Bloom::ANAMORPHIC,

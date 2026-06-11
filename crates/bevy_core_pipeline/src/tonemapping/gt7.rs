@@ -77,10 +77,10 @@ pub const GT7_MAX_HDR_PEAK_NITS: f32 = 10000.0;
 /// (`GT7_REC_709_TO_REC_2020`, note: column-major there); the two must stay
 /// bit-identical so this module remains an exact parity reference for the
 /// shader.
-// The shared engine-wide constants now live in
+// The shared engine-wide constants live in
 // `bevy_render::working_color_space` (`REC709_TO_REC2020`, column-major
-// `Mat3`); the row-major copies here are kept as the parity-fixture format
-// and are bit-identity-locked against the shared constants by
+// `Mat3`); the row-major copies here are the parity-fixture format and are
+// bit-identity-locked against the shared constants by
 // `matrices_bitwise_match_bevy_render_working_color_space`.
 pub const REC_709_TO_REC_2020: [[f32; 3]; 3] = [
     [0.627_403_9, 0.329_283_03, 0.043_313_067],
@@ -114,7 +114,7 @@ pub const REC_2020_TO_REC_709: [[f32; 3]; 3] = [
 /// [`Self::sanitized`] each frame and uploads a [`Gt7ParamsUniform`] that
 /// replaces the shader's baked defaults — falling back to [`Self::default`]
 /// for cameras without the component. Cameras **without** this component on
-/// SDR targets keep using the baked SDR defaults, exactly as before.
+/// SDR targets keep using the shader's baked SDR defaults.
 ///
 /// The operator's mode follows the view's resolved [`DisplayTarget`], with
 /// or without this component: on a target that requests an HDR transfer, the
@@ -592,15 +592,15 @@ impl Gt7ToneMapping {
     /// (no `TONEMAP_OUTPUT_REC2020` shader def). This is the CPU parity
     /// reference for GPU readback tests of the SDR path.
     ///
-    /// Seam contract (SDR output):
+    /// SDR-output steps:
     /// 1. Convert scene-linear Rec.709 → Rec.2020.
     /// 2. Multiply by `2.5`: Bevy's `1.0` (SDR paper white) maps to GT7's
     ///    250-nit paper white (`2.5` frame-buffer units).
     /// 3. Run the operator (SDR mode brings the result back to `[0, 1]` via
     ///    the `1 / 2.5` correction factor).
     /// 4. Convert the display-referred result Rec.2020 → Rec.709 for the
-    ///    existing sRGB output chain, clamping to `[0, 1]` (out-of-gamut
-    ///    Rec.2020 results have no SDR Rec.709 representation).
+    ///    sRGB output chain, clamping to `[0, 1]` (out-of-gamut Rec.2020
+    ///    results have no SDR Rec.709 representation).
     ///
     /// On HDR-transfer targets the pass instead emits the operator's native
     /// Rec.2020 output for the display encoder — see
@@ -658,11 +658,12 @@ impl Gt7ToneMapping {
     /// the same predicate that pushes the shader def; see
     /// `tonemap_output_gamut` in `tonemapping/mod.rs`).
     ///
-    /// With the D5 seam renormalization folded into
+    /// With the paper-white renormalization folded into
     /// [`Self::sdr_correction_factor`] (`100 / paper_white_nits`, as prepared
     /// by [`Gt7ParamsUniform::new`] for HDR targets), the output range is
     /// `[0, peak_nits / paper_white_nits]` — paper-white-relative
-    /// display-linear, the D1/D5 convention the encoder expects.
+    /// display-linear (`1.0` = paper white), the convention the encoder
+    /// expects.
     ///
     /// This is the CPU parity reference for GPU readback tests of the GT7
     /// HDR path under the default Rec.709 working space.
@@ -740,9 +741,9 @@ pub struct Gt7ParamsUniform {
     pub fade_end: f32,
     /// Post-clamp output scale. `1 / 2.5` in SDR mode (Polyphony's native
     /// rescale of the 250-nit-referred result into `[0, 1]`);
-    /// `100 / paper_white_nits` in HDR mode (the D5 seam renormalization so
-    /// `1.0` = paper white at the operator output — identity at the default
-    /// 100-nit paper white).
+    /// `100 / paper_white_nits` in HDR mode (the paper-white renormalization
+    /// at the operator/encoder seam, so `1.0` = paper white at the operator
+    /// output — identity at the default 100-nit paper white).
     pub sdr_correction_factor: f32,
 }
 
@@ -823,7 +824,8 @@ impl Gt7ParamsUniform {
         // seam renormalization (× 100 / paper_white) and the display
         // encoder's transfer encoding (× paper_white / 80 for scRGB,
         // × paper_white for PQ) must fold the IDENTICAL paper-white value or
-        // the D5 cancellation breaks for degenerate/out-of-range inputs.
+        // the paper-white factors fail to cancel for degenerate/out-of-range
+        // inputs.
         let paper_white = display_target.sanitized_paper_white_nits();
         if !display_target.paper_white_nits.is_finite() || display_target.paper_white_nits <= 0.0 {
             warn_once!(
@@ -870,10 +872,10 @@ impl Gt7ParamsUniform {
             );
             tone_mapping = Gt7ToneMapping::new_hdr(peak);
         }
-        // D5 seam renormalization: rescale the operator's native output
-        // (1.0 = 100 nits) so that 1.0 = paper white. `apply` multiplies by
-        // this factor after the peak clamp, so the CPU struct stays a valid
-        // parity reference for the shader.
+        // Paper-white renormalization at the operator/encoder seam: rescale
+        // the operator's native output (1.0 = 100 nits) so that 1.0 = paper
+        // white. `apply` multiplies by this factor after the peak clamp, so
+        // the CPU struct stays a valid parity reference for the shader.
         tone_mapping.sdr_correction_factor = REFERENCE_LUMINANCE / paper_white;
         Self::from(&tone_mapping)
     }
@@ -901,7 +903,7 @@ impl Default for Gt7ParamsUniforms {
 /// [`Gt7ParamsUniforms`].
 ///
 /// Inserted by [`prepare_gt7_params_uniforms`] on every view whose
-/// *effective* operator (after the D6 SDR-only-operator substitution, see
+/// *effective* operator (after the SDR-only-operator substitution, see
 /// `effective_tonemapping` in the parent module) is
 /// [`Tonemapping::GranTurismo7`] and that either has an extracted
 /// [`GranTurismo7Params`] or renders to an HDR-transfer target — exactly the
@@ -923,7 +925,7 @@ pub struct ViewGt7ParamsUniformOffset {
 ///   selecting SDR/HDR mode from the view's resolved [`ViewDisplayTarget`]
 ///   (see [`Gt7ParamsUniform::new`]);
 /// * views on an HDR-transfer target whose effective operator is GT7 —
-///   authored GT7 as well as SDR-only operators substituted by the D6 table
+///   authored GT7 as well as SDR-only operators substituted with GT7
 ///   (`effective_tonemapping`) — using the camera's [`GranTurismo7Params`]
 ///   if present and [`GranTurismo7Params::default`] otherwise, so GT7 always
 ///   runs in HDR mode driven by the display target's peak luminance instead
@@ -1142,8 +1144,8 @@ mod tests {
 
     #[test]
     fn curve_matches_reference_values() {
-        // Curve-only values from the C++ reference harness; covers the spec's
-        // numeric check table (toe, exact-linear region, shoulder, asymptote).
+        // Curve-only values from the C++ reference harness; covers each
+        // curve region (toe, exact-linear region, shoulder, asymptote).
         let curve25 = Gt7ToneMappingCurve::new(2.5, 0.25, 0.538, 0.444, 1.28);
         let curve10 = Gt7ToneMappingCurve::new(10.0, 0.25, 0.538, 0.444, 1.28);
         let curve40 = Gt7ToneMappingCurve::new(40.0, 0.25, 0.538, 0.444, 1.28);
@@ -1243,12 +1245,12 @@ mod tests {
     }
 
     /// The Rec.2020-native SDR seam (`WORKING_COLOR_SPACE_REC2020`) must be
-    /// bit-identical to the legacy Rec.709 seam fed the same color: the
-    /// legacy path computes the identical Rec.709 → Rec.2020 expansion as
-    /// its first step, so handing the expanded value to the native seam
-    /// replays the exact same float operations.
+    /// bit-identical to the Rec.709-working seam fed the same color: the
+    /// Rec.709-working path computes the identical Rec.709 → Rec.2020
+    /// expansion as its first step, so handing the expanded value to the
+    /// native seam replays the exact same float operations.
     #[test]
-    fn rec2020_native_seam_matches_legacy_seam_bitwise() {
+    fn rec2020_native_seam_matches_rec709_seam_bitwise() {
         let sdr = Gt7ToneMapping::new_sdr();
         let inputs: [[f32; 3]; 6] = [
             [0.5, 1.23, 0.75],
@@ -1259,16 +1261,16 @@ mod tests {
             [0.538, 1.11, 0.444],
         ];
         for rec709 in inputs {
-            let legacy = sdr.apply_bevy_scene_linear_sdr(rec709);
+            let rec709_working = sdr.apply_bevy_scene_linear_sdr(rec709);
             let native = sdr.apply_bevy_scene_linear_sdr_rec2020_native(mat3_mul_vec3(
                 &REC_709_TO_REC_2020,
                 rec709,
             ));
-            for (l, n) in legacy.iter().zip(native.iter()) {
+            for (l, n) in rec709_working.iter().zip(native.iter()) {
                 assert_eq!(
                     l.to_bits(),
                     n.to_bits(),
-                    "seam mismatch for input {rec709:?}: {legacy:?} vs {native:?}"
+                    "seam mismatch for input {rec709:?}: {rec709_working:?} vs {native:?}"
                 );
             }
         }
@@ -1343,7 +1345,7 @@ mod tests {
 
     /// The `TONEMAP_OUTPUT_REC2020` seams differ from the SDR seams by
     /// EXACTLY the dropped Rec.2020 → Rec.709 back-conversion + clamp:
-    /// re-applying it on the CPU reproduces the legacy output bit-for-bit,
+    /// re-applying it on the CPU reproduces the SDR-seam output bit-for-bit,
     /// for both working spaces and both operator modes (all four wrapper def
     /// combinations are coherent).
     #[test]
@@ -1367,7 +1369,7 @@ mod tests {
         };
 
         let mut hdr = Gt7ToneMapping::new_hdr(1000.0);
-        // The D5 seam renormalization, as the HDR prepare path folds it.
+        // The paper-white renormalization, as the HDR prepare path folds it.
         hdr.sdr_correction_factor = REFERENCE_LUMINANCE / 200.0;
 
         let inputs: [[f32; 3]; 6] = [
@@ -1396,10 +1398,10 @@ mod tests {
         }
     }
 
-    /// With the D5 renormalization prepared by `Gt7ParamsUniform::new` for an
-    /// HDR target, the native-output seam's ceiling is exactly
-    /// `peak / paper_white` — paper-white-relative display-linear, the
-    /// encoder's input convention.
+    /// With the paper-white renormalization prepared by
+    /// `Gt7ParamsUniform::new` for an HDR target, the native-output seam's
+    /// ceiling is exactly `peak / paper_white` — paper-white-relative
+    /// display-linear, the encoder's input convention.
     #[test]
     fn hdr_native_output_is_paper_white_relative() {
         let params = GranTurismo7Params::default();
@@ -1514,7 +1516,7 @@ mod tests {
     }
 
     /// HDR-target uniform must match the C++ reference's HDR init products
-    /// and apply the D5 seam renormalization (`100 / paper_white`).
+    /// and apply the paper-white renormalization (`100 / paper_white`).
     #[test]
     fn uniform_hdr_mode_matches_init_fixtures() {
         let params = GranTurismo7Params::default();
@@ -1547,7 +1549,7 @@ mod tests {
         assert!((uniform.peak_ucs - 1.0).abs() < 1e-6);
     }
 
-    /// The D6 clamp table for HDR-mode peak/paper-white selection.
+    /// The clamp table for HDR-mode peak/paper-white selection.
     #[test]
     fn uniform_hdr_mode_clamp_table() {
         let params = GranTurismo7Params::default();
@@ -1609,9 +1611,9 @@ mod tests {
     /// The seam renormalization must fold the *exact* value
     /// [`DisplayTarget::sanitized_paper_white_nits`] returns — the same
     /// method the display pipeline's uniform writer applies before the
-    /// encoder multiplies by paper white — so the D5 cancellation
+    /// encoder multiplies by paper white — so the paper-white factors
     /// (`× 100 / paper_white` here, `× paper_white / 80` or
-    /// `× paper_white` at the encoder) holds bit-for-bit for every input.
+    /// `× paper_white` at the encoder) cancel bit-for-bit for every input.
     #[test]
     fn paper_white_fold_is_single_sourced_with_the_display_pipeline() {
         let params = GranTurismo7Params::default();

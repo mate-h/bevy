@@ -14,15 +14,12 @@ HDR-aware. All of these changes are gated per view on the *resolved* display
 target, so cameras presenting to SDR targets compile byte-identical shaders
 and render exactly as before.
 
-**Contrast adaptive sharpening (CAS)** was algorithmically broken on HDR
-input: the RCAS limiter constants are clip solves that assume the signal
-peaks at 1.0, and with brighter input the limiter could divide by zero, flip
-sign, or massively under/overshoot — fireflies and inverted sharpening. On
-HDR-target views the shader now range-compresses the 5-tap neighborhood into
-`[0, 1)` with the reversible Reinhard `x / (1 + x)`, runs the unmodified RCAS
-math where its assumptions hold, decompresses the result, and bounds
-overshoot by `max(local_max, paper_white)` so sharpening can never
-manufacture out-of-scene highlights.
+**Contrast adaptive sharpening (CAS)** assumed the image never went brighter
+than paper white, so on HDR input it broke down — producing bright speckles
+(fireflies) and even inverted sharpening around highlights. On HDR-target views
+the sharpening math now runs in a remapped range where its assumptions hold and
+is bounded so it can never invent out-of-scene highlights, keeping sharpening
+clean even where the image reaches well above paper white.
 
 **FXAA and SMAA** run after tone mapping and detect edges with luma
 thresholds calibrated for `[0, 1]`. On HDR-target views the luma used for

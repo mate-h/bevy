@@ -3,7 +3,7 @@
 #import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d}
 
 // Only pulled in when the project opted into the Rec.2020 working space, so
-// default (Rec.709) projects compose exactly as before.
+// default (Rec.709) projects do not reference this import.
 #ifdef WORKING_COLOR_SPACE_REC2020
 #import bevy_render::working_color_space::rec709_to_rec2020
 #endif
@@ -855,19 +855,18 @@ pbr_input.material.uv_transform = uv_transform;
     }
 
 #ifdef WORKING_COLOR_SPACE_REC2020
-    // Working-space seam (T2.5): the composed color quantities — material
+    // Working-space conversion: the composed color quantities — material
     // factor × texture sample × vertex color for base color, factor ×
     // texture for emissive, and the sampled lightmap radiance — are all
     // Rec.709-authored. Convert them into the Rec.2020 working space exactly
     // once, after composition, so per-channel tinting keeps its
     // sRGB-relative appearance and every texture path (bindless, meshlet,
     // compressed formats) is covered by a single site. Textures stamped with
-    // wide source primaries (`Image::source_primaries`) currently have no
-    // per-texture escape hatch and are over-converted (documented follow-up;
-    // see `GpuImage::source_primaries`). Data inputs (normal, metallic/
-    // roughness, occlusion, clearcoat, anisotropy) are not colors and are
-    // deliberately not converted; the specular tint / reflectance inputs are
-    // currently not converted either (documented limitation).
+    // wide source primaries (`Image::source_primaries`) have no per-texture
+    // escape hatch and are over-converted (see `GpuImage::source_primaries`).
+    // Data inputs (normal, metallic/roughness, occlusion, clearcoat,
+    // anisotropy) are not colors and are not converted; the specular tint /
+    // reflectance inputs are not converted either.
     pbr_input.material.base_color = vec4(
         rec709_to_rec2020(pbr_input.material.base_color.rgb),
         pbr_input.material.base_color.a,

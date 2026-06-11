@@ -1452,7 +1452,7 @@ doc-scrape-examples = true
 name = "HDR Calibration"
 description = "HGIG-style calibration patterns for tuning a window's DisplayTarget on an HDR display"
 category = "3D Rendering"
-# HDR display output is not reachable through WebGPU/WebGL
+# HDR display output relies on the surface color-space API, which wasm (WebGPU/WebGL) does not expose
 wasm = false
 
 [[example]]

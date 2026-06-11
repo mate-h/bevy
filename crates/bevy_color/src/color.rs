@@ -219,9 +219,13 @@ impl Color {
     ///
     /// # Arguments
     ///
-    /// * `red` - Red channel. [0.0, 1.0]
-    /// * `green` - Green channel. [0.0, 1.0]
-    /// * `blue` - Blue channel. [0.0, 1.0]
+    /// * `red` - Red channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
+    /// * `green` - Green channel. Typically `[0.0, 1.0]` for SDR
+    ///   display-referred colors; HDR/scene-referred values may exceed `1.0`
+    ///   and are preserved.
+    /// * `blue` - Blue channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     /// * `alpha` - Alpha channel. [0.0, 1.0]
     pub const fn linear_rgba(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
         Self::LinearRgba(LinearRgba {
@@ -236,9 +240,13 @@ impl Color {
     ///
     /// # Arguments
     ///
-    /// * `red` - Red channel. [0.0, 1.0]
-    /// * `green` - Green channel. [0.0, 1.0]
-    /// * `blue` - Blue channel. [0.0, 1.0]
+    /// * `red` - Red channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
+    /// * `green` - Green channel. Typically `[0.0, 1.0]` for SDR
+    ///   display-referred colors; HDR/scene-referred values may exceed `1.0`
+    ///   and are preserved.
+    /// * `blue` - Blue channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub const fn linear_rgb(red: f32, green: f32, blue: f32) -> Self {
         Self::LinearRgba(LinearRgba {
             red,

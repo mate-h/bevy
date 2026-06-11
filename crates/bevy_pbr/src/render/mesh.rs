@@ -2710,8 +2710,7 @@ pub struct MeshPipeline {
     /// material base color / emissive, lightmap samples, and environment-map
     /// radiance convert into the working space in the fragment shaders);
     /// when it is the default `WorkingColorSpace::Rec709`, no def is pushed
-    /// and every pipeline composes byte-identically to before the
-    /// working-space axis existed.
+    /// and every pipeline composes with no working-space defs.
     pub working_color_space: WorkingColorSpace,
 }
 
@@ -3310,7 +3309,7 @@ impl SpecializedMeshPipeline for MeshPipeline {
 
         // Project-global working-space axis: pushed for every specialization
         // when (and only when) the app opted into the Rec.2020 working
-        // space, so default projects compose byte-identically.
+        // space, so default projects compose with no working-space defs.
         if self.working_color_space.is_rec2020() {
             shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
         }

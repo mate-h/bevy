@@ -25,11 +25,14 @@ use bytemuck::{Pod, Zeroable};
 )]
 #[repr(C)]
 pub struct LinearRgba {
-    /// The red channel. [0.0, 1.0]
+    /// The red channel. Typically `[0.0, 1.0]` for SDR display-referred
+    /// colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub red: f32,
-    /// The green channel. [0.0, 1.0]
+    /// The green channel. Typically `[0.0, 1.0]` for SDR display-referred
+    /// colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub green: f32,
-    /// The blue channel. [0.0, 1.0]
+    /// The blue channel. Typically `[0.0, 1.0]` for SDR display-referred
+    /// colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub blue: f32,
     /// The alpha channel. [0.0, 1.0]
     pub alpha: f32,
@@ -114,9 +117,13 @@ impl LinearRgba {
     ///
     /// # Arguments
     ///
-    /// * `red` - Red channel. [0.0, 1.0]
-    /// * `green` - Green channel. [0.0, 1.0]
-    /// * `blue` - Blue channel. [0.0, 1.0]
+    /// * `red` - Red channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
+    /// * `green` - Green channel. Typically `[0.0, 1.0]` for SDR
+    ///   display-referred colors; HDR/scene-referred values may exceed `1.0`
+    ///   and are preserved.
+    /// * `blue` - Blue channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub const fn rgb(red: f32, green: f32, blue: f32) -> Self {
         Self {
             red,

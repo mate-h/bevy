@@ -276,10 +276,9 @@ impl PhysiologicalAdaptation {
 ///
 /// where the frame buffer histogram always carries a weight of `1.0`.
 ///
-/// Engine-computed references (sky dome, sun illuminance, light probe luminance) are planned
-/// follow-ups that will feed this same seam; today the component is purely user-driven, and
-/// only a single fused external reference is supported. If multiple sources need to be
-/// combined, fuse them into one `ev`/`weight` pair before writing the component.
+/// The component is user-driven, and only a single fused external reference is supported.
+/// If multiple sources need to be combined (e.g. a sky dome, sun illuminance, and light
+/// probe luminance), fuse them into one `ev`/`weight` pair before writing the component.
 ///
 /// This component only has an effect on cameras that also have [`AutoExposure`].
 #[derive(Component, Clone, Copy, Debug, PartialEq, Reflect)]

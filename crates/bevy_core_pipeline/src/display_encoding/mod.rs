@@ -5,8 +5,8 @@
 //! The tone-mapping pass outputs *display-linear* color, scaled so `1.0` =
 //! paper white, in per-view source primaries (Rec.709 for every effective
 //! operator except `Tonemapping::GranTurismo7` on HDR targets — authored or
-//! substituted by the D6 table (`effective_tonemapping`) — which emits its
-//! native Rec.2020; see `tonemap_output_gamut`); UI then composites in that
+//! substituted for an SDR-only operator (`effective_tonemapping`) — which
+//! emits its native Rec.2020; see `tonemap_output_gamut`); UI then composites in that
 //! same space. This pass — scheduled after the UI pass and before the upscaling
 //! blit — converts that buffer into the display's signal: a 3×3 gamut
 //! transform from the source primaries to the display primaries, an
@@ -19,15 +19,15 @@
 //! [`DisplayTarget::SDR_SRGB`](bevy_window::DisplayTarget) (and any other
 //! target whose transfer is [`DisplayTransfer::Srgb`]), the exact sRGB OETF is
 //! applied for free by the hardware on the upscaling blit's `*UnormSrgb`
-//! writeback, exactly as before this pass existed; such views never receive a
+//! writeback; such views never receive a
 //! [`ViewDisplayEncodingPipeline`] and the node early-returns without touching
 //! the GPU. The shader-side transfer functions (scRGB / PQ) activate only for
 //! HDR transfers.
 //!
 //! Surface negotiation (`create_surfaces` in `bevy_render::view::window`)
 //! configures the swapchain this pass's output is presented through, using
-//! wgpu's surface color-space API (currently Bevy's wgpu fork, pending
-//! upstream under <https://github.com/gfx-rs/wgpu/issues/2920>): an
+//! wgpu's surface color-space API (tracked upstream under
+//! <https://github.com/gfx-rs/wgpu/issues/2920>): an
 //! `Rgba16Float` extended-sRGB-linear swapchain for
 //! [`DisplayTransfer::ScRgbLinear`] (macOS/iOS Metal, Windows Vulkan/DX12,
 //! Wayland Vulkan), or an HDR10 swapchain (typically `Rgb10a2Unorm`) for
@@ -113,7 +113,7 @@ impl Plugin for DisplayEncodingPlugin {
 /// Controls how the display-encoding pass handles colors that fall outside
 /// the display gamut after its gamut-transform stage.
 ///
-/// The primary handling (per DECISIONS.md D3) is a perceptual,
+/// The primary handling is a perceptual,
 /// hue-approximate chroma compression toward the achromatic axis in the
 /// style of the ACES 1.3 Reference Gamut Compression — see the
 /// [`gamut_compression`] module for the algorithm, constants, citations, and
@@ -127,7 +127,7 @@ impl Plugin for DisplayEncodingPlugin {
 /// display primaries. The pass's input gamut is per-view (see
 /// `encoder_input_gamut`): Rec.2020 when the view's effective operator is
 /// `Tonemapping::GranTurismo7` on an HDR-transfer target — authored, or
-/// substituted for an SDR-only operator by the D6 table
+/// substituted for an SDR-only operator
 /// (`effective_tonemapping`) — as the operator emits its native Rec.2020
 /// display-referred output; Rec.709 otherwise. Under
 /// [`DisplayGamutCompression::Auto`] the compression is therefore active for
@@ -149,14 +149,14 @@ pub enum DisplayGamutCompression {
     Auto,
     /// Always compress on views the display-encoding pass runs for.
     ///
-    /// Note that compression is not free for in-gamut colors: channels whose
+    /// Compression is not free for in-gamut colors: channels whose
     /// distance from the achromatic axis exceeds the ACES RGC threshold
     /// (≈ 0.8) are pulled slightly inward to make room for the compressed
     /// out-of-gamut range, so forcing this on a path with no possible
     /// out-of-gamut input desaturates highly saturated colors for no
     /// benefit.
     Always,
-    /// Debug fallback (DECISIONS.md D3): replace the compression with the
+    /// Debug fallback: replace the compression with the
     /// hue-shifting per-channel clip, for A/B comparison. Pushes the
     /// `DISPLAY_GAMUT_CLIP_DEBUG` shader def instead of
     /// `DISPLAY_GAMUT_COMPRESSION`.
@@ -185,7 +185,7 @@ pub enum OutOfGamutHandling {
 ///
 /// Delegates to [`tonemap_output_gamut`], the single source of truth shared
 /// with the tonemapping pipeline's `TONEMAP_OUTPUT_REC2020` def push:
-/// Rec.2020 exactly when the view's *effective* operator (after the D6
+/// Rec.2020 exactly when the view's *effective* operator (after the
 /// SDR-only-operator substitution, see
 /// [`effective_tonemapping`](crate::tonemapping::effective_tonemapping)) is
 /// [`Tonemapping::GranTurismo7`] and its resolved transfer is HDR (the
@@ -299,7 +299,7 @@ pub struct DisplayEncodingPipelineKey {
     /// The color primaries of the pass's input — the tonemapping pass's
     /// output gamut for this view (see `encoder_input_gamut` /
     /// [`tonemap_output_gamut`]): Rec.2020 for GT7 (authored or
-    /// D6-substituted) on HDR-transfer targets, Rec.709 otherwise.
+    /// substituted) on HDR-transfer targets, Rec.709 otherwise.
     pub source_gamut: DisplayGamut,
     /// The resolved display gamut the source color is transformed to.
     pub gamut: DisplayGamut,
@@ -412,7 +412,7 @@ pub struct ViewDisplayEncodingPipeline {
 /// the [`ViewDisplayEncodingPipeline`] marker in sync (inserted for views on
 /// HDR-transfer display targets, removed otherwise).
 ///
-/// Applies the D6 prepare-time coercions before keying the pipeline:
+/// Applies the prepare-time transfer/gamut coercions before keying the pipeline:
 /// * [`DisplayTransfer::Hlg`] → [`DisplayTransfer::Pq`]: HLG is
 ///   scene-referred — encoding tone-mapped (display-referred) output with
 ///   the HLG OETF would double-tone-map. Window surfaces fulfil HLG requests
@@ -439,7 +439,7 @@ pub struct ViewDisplayEncodingPipeline {
 /// (the [`tonemap_output_gamut`] single source shared with the tonemapping
 /// pipeline's `TONEMAP_OUTPUT_REC2020` def push): Rec.2020 for
 /// [`Tonemapping::GranTurismo7`] on HDR-transfer targets (authored, or
-/// substituted for an SDR-only operator by the D6 table —
+/// substituted for an SDR-only operator —
 /// [`effective_tonemapping`](crate::tonemapping::effective_tonemapping)),
 /// Rec.709 otherwise.
 /// It also resolves the gamut stage's out-of-gamut handling from
@@ -507,11 +507,11 @@ pub fn prepare_view_display_encoding_pipelines(
                 .remove::<ViewDisplayEncodingPipeline>();
             continue;
         }
-        // D1 guidance: HDR display output reaches noticeably wider gamuts
-        // when the scene is rendered in the Rec.2020 working space. This is
-        // advisory only (the Rec.709 working space remains correct, just
-        // gamut-limited); a global axis must never flip automatically
-        // because one window went HDR.
+        // HDR display output reaches noticeably wider gamuts when the scene
+        // is rendered in the Rec.2020 working space. This is advisory only
+        // (the Rec.709 working space remains correct, just gamut-limited);
+        // a global axis must never flip automatically because one window
+        // went HDR.
         if view_display_target.is_hdr_transfer() && !working_color_space.is_rec2020() {
             warn_once!(
                 "A camera is rendering to an HDR display target while the working color \
@@ -532,9 +532,8 @@ pub fn prepare_view_display_encoding_pipelines(
         }
 
         // A camera without an active tone-mapping operator writes unbounded
-        // scene-linear values straight into the encoder (D6: defined but
-        // almost certainly unintended — PQ of raw scene values clips and
-        // distorts).
+        // scene-linear values straight into the encoder (defined but almost
+        // certainly unintended — PQ of raw scene values clips and distorts).
         if !tonemapping.is_some_and(Tonemapping::is_enabled) {
             warn_once!(
                 "A camera with `Tonemapping::None` is rendering to an HDR display target; \

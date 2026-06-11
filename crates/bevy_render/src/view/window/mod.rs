@@ -638,13 +638,12 @@ fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<
 /// format together with the color spaces the surface supports it in, a
 /// superset of `auto_formats`). Policy per requested transfer:
 ///
-/// - [`DisplayTransfer::Srgb`] (the default): the EXACT historical SDR
+/// - [`DisplayTransfer::Srgb`] (the default): the plain SDR
 ///   selection — the first of `Rgba8UnormSrgb` / `Bgra8UnormSrgb` in
 ///   capability order, else the surface's first `Auto`-configurable format —
-///   paired with [`SurfaceColorSpace::Auto`]. `Auto` reproduces wgpu's
-///   historical color-space behavior bit-for-bit (sRGB for the 8-bit
-///   formats; extended-sRGB-linear for a first-listed `Rgba16Float` where
-///   supported, exactly as before the color-space API existed) and is always
+///   paired with [`SurfaceColorSpace::Auto`]. `Auto` lets wgpu pick the
+///   color space (sRGB for the 8-bit formats; extended-sRGB-linear for a
+///   first-listed `Rgba16Float` where supported) and is always
 ///   valid for formats in `auto_formats`, whereas an explicit
 ///   [`SurfaceColorSpace::Srgb`] would fail validation on drivers that do
 ///   not advertise the sRGB color space by name. Note: a
@@ -658,10 +657,10 @@ fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<
 /// - [`DisplayTransfer::ScRgbLinear`]: `Rgba16Float` +
 ///   [`SurfaceColorSpace::ExtendedSrgbLinear`] when advertised (macOS/iOS
 ///   Metal EDR, Windows Vulkan/DX12, Wayland Vulkan, browser WebGPU on
-///   HDR-capable displays); else warn + SDR downgrade (D6).
+///   HDR-capable displays); else warn + SDR downgrade.
 /// - [`DisplayTransfer::Pq`]: HDR10 ([`SurfaceColorSpace::Hdr10`]) on the
 ///   advertised formats (see [`negotiate_hdr10`]; requires the OS to have
-///   HDR output enabled on DX12/Vulkan). When unavailable, the D6 downgrade
+///   HDR output enabled on DX12/Vulkan). When unavailable, the downgrade
 ///   chain applies, each step with its own warning:
 ///   PQ → scRGB-linear → SDR sRGB.
 /// - [`DisplayTransfer::Hlg`]: fulfilled as **PQ/HDR10**, never as an HLG
@@ -675,7 +674,7 @@ fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<
 ///   once a scene-referred HLG encoder path exists.
 ///
 /// Gamut interaction: the negotiation keys on the transfer alone, consistent
-/// with the encoder's D6 gamut coercions — HDR10 *is* Rec.2020 (the encoder
+/// with the encoder's gamut coercions — HDR10 *is* Rec.2020 (the encoder
 /// coerces PQ targets to a Rec.2020 encode), and extended-sRGB-linear *is*
 /// Rec.709-coordinate (the encoder coerces scRGB targets to Rec.709
 /// coordinates; wide gamut rides out-of-range component values).
@@ -684,7 +683,8 @@ fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<
 /// against) the passed capabilities, so `create_surfaces` can configure it
 /// without tripping `ConfigureSurfaceError::UnsupportedColorSpace`. A full
 /// downgrade resolves to [`DisplayTransfer::Srgb`]; the caller propagates
-/// this so downgraded views take the plain SDR path bit-for-bit.
+/// this so downgraded views take the same plain SDR path as a natively-SDR
+/// view.
 fn negotiate_surface_format(
     auto_formats: &[TextureFormat],
     format_capabilities: &[SurfaceFormatCapabilities],
@@ -735,9 +735,8 @@ fn negotiate_surface_format(
     }
 
     // SDR path: prefer sRGB formats for surfaces, but fall back to the first
-    // available format if no sRGB formats are available. This must stay
-    // byte-identical to Bevy's historical selection; `Auto` reproduces wgpu's
-    // historical color-space behavior for whichever format wins.
+    // available format if no sRGB formats are available. `Auto` lets wgpu
+    // pick the color space for whichever format wins.
     if let Some(first) = auto_formats.first() {
         let mut format = *first;
         for available_format in auto_formats {
@@ -857,13 +856,12 @@ pub fn create_surfaces(
             let configuration = SurfaceConfiguration {
                 format: negotiated.format,
                 // The color space negotiated for the requested
-                // `DisplayTarget::transfer` (`Auto` on the SDR path,
-                // reproducing wgpu's historical behavior bit-for-bit).
-                // Every explicit pair comes from `caps.format_capabilities`,
-                // so this configure cannot fail wgpu's
-                // `UnsupportedColorSpace` validation.
+                // `DisplayTarget::transfer` (`Auto` on the SDR path, letting
+                // wgpu pick the color space). Every explicit pair comes from
+                // `caps.format_capabilities`, so this configure cannot fail
+                // wgpu's `UnsupportedColorSpace` validation.
                 //
-                // TODO(T1.5): the wgpu surface color-space API does not (yet)
+                // TODO: the wgpu surface color-space API does not (yet)
                 // expose HDR10 mastering metadata (SMPTE ST 2086 display
                 // primaries/luminance, CTA-861.3 MaxCLL/MaxFALL); drivers use
                 // their own defaults. When it does, wire
@@ -1127,9 +1125,9 @@ mod tests {
     };
 
     #[test]
-    fn srgb_default_selection_is_unchanged() {
-        // The plain SDR default must keep Bevy's historical selection, with
-        // `Auto` (wgpu's historical color-space behavior).
+    fn srgb_default_selects_srgb_format_with_auto() {
+        // The plain SDR default selects an sRGB format paired with `Auto`,
+        // letting wgpu pick the color space.
         let (formats, caps) = metal_like();
         assert_eq!(
             negotiate_surface_format(&formats, &caps, DisplayTransfer::Srgb),
@@ -1273,7 +1271,7 @@ mod tests {
 
     #[test]
     fn pq_downgrades_through_scrgb_to_sdr() {
-        // D6 downgrade chain: PQ → scRGB-linear when HDR10 is unavailable…
+        // Downgrade chain: PQ → scRGB-linear when HDR10 is unavailable…
         let (formats, caps) = scrgb_only();
         assert_eq!(
             negotiate_surface_format(&formats, &caps, DisplayTransfer::Pq),

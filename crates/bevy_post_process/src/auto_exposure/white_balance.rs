@@ -61,9 +61,10 @@ use tracing::warn;
 /// `SomewhatBoringDisplayTransform`) may shift the corrected color slightly
 /// away from neutral again.
 ///
-/// Add this component to a 2d or 3d camera together with the
+/// Add this component to a 3d camera together with the
 /// [`AutoExposurePlugin`](super::AutoExposurePlugin) (which owns the shared
-/// metering infrastructure).
+/// metering infrastructure). The metering pass runs only in the 3d core
+/// pipeline, so the correction has no effect on 2d cameras.
 ///
 /// [Yxy]: https://en.wikipedia.org/wiki/CIE_1931_color_space#CIE_xy_chromaticity_diagram_and_the_CIE_xyY_color_space
 #[derive(Component, Clone, Copy, Debug, PartialEq, Reflect)]

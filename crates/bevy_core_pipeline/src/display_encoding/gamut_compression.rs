@@ -43,8 +43,8 @@
 //!
 //! # Why ACES RGC and not an exact hue-preserving `ICtCp` compression?
 //!
-//! DECISIONS.md D3 names hue-preserving compression in `ICtCp` as the primary
-//! out-of-gamut strategy. An *exact* constant-hue mapping needs the distance
+//! The ideal out-of-gamut strategy is hue-preserving compression in `ICtCp`.
+//! An *exact* constant-hue mapping needs the distance
 //! to the RGB gamut boundary along the chroma direction in `ICtCp`, which has
 //! no closed form — production implementations (e.g. ACES 2.0's output
 //! transform) iterate a chroma bisection per pixel through three matrix pairs
@@ -56,9 +56,9 @@
 //! and ≈ 16° worst case for the Rec.2020 blue corner — see the fixture
 //! tests; the per-channel clip it replaces drifts substantially more and,
 //! unlike the compression, collapses distinct out-of-gamut colors onto one
-//! another). Upgrading the `DISPLAY_GAMUT_COMPRESSION` shader path to a true
-//! `ICtCp` boundary search is a tracked follow-up of the HDR workstream; the
-//! ACES RGC stays as the cheap default.
+//! another). A true `ICtCp` boundary search would replace the
+//! `DISPLAY_GAMUT_COMPRESSION` shader path; the ACES RGC is the cheap
+//! default.
 
 use bevy_math::{ops, Vec3};
 
@@ -286,7 +286,7 @@ mod tests {
     /// after a Rec.2020 → Rec.709 contraction) keep hue drift in the low
     /// single digits of degrees. The per-direction bounds are the measured
     /// behavior of the per-channel formulation (cyan directions stay under
-    /// the spec's ~2° figure; green/yellow directions drift up to ~3–4.5°).
+    /// ~2°; green/yellow directions drift up to ~3–4.5°).
     #[test]
     fn moderate_out_of_gamut_hue_drift_is_small() {
         // The Rec.2020 color with the worst cyan-direction distance

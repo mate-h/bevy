@@ -1,12 +1,12 @@
 //! The project-global working color space of the renderer.
 //!
-//! Bevy's scene-referred rendering has historically used linear Rec.709 (the
-//! sRGB primaries) as its implicit working color space. [`WorkingColorSpace`]
-//! makes that axis explicit and configurable: the default,
-//! [`WorkingColorSpace::Rec709`], keeps every existing behavior bit-for-bit,
-//! while the opt-in [`WorkingColorSpace::Rec2020`] switches the scene-referred
-//! buffers and lighting math to the wide-gamut ITU-R BT.2020 primaries
-//! (D65 white point throughout).
+//! Bevy's scene-referred rendering uses linear Rec.709 (the sRGB primaries)
+//! as its default working color space. [`WorkingColorSpace`] makes that axis
+//! explicit and configurable: the default, [`WorkingColorSpace::Rec709`], is
+//! a pass-through that leaves scene-referred buffers and lighting math in
+//! linear Rec.709, while the opt-in [`WorkingColorSpace::Rec2020`] switches
+//! them to the wide-gamut ITU-R BT.2020 primaries (D65 white point
+//! throughout).
 //!
 //! The working color space is configured on
 //! [`RenderPlugin`](crate::RenderPlugin) and is **immutable after the app is
@@ -27,8 +27,8 @@ use bevy_reflect::{prelude::ReflectDefault, Reflect};
 /// pipeline when the [`WorkingColorSpace`] is [`WorkingColorSpace::Rec2020`].
 ///
 /// When the working color space is [`WorkingColorSpace::Rec709`] (the
-/// default), the def is *not* pushed and every shader composes exactly as it
-/// did before the working-space axis existed.
+/// default), the def is *not* pushed and every shader composes with no
+/// working-space def.
 pub const WORKING_COLOR_SPACE_REC2020_SHADER_DEF: &str = "WORKING_COLOR_SPACE_REC2020";
 
 /// The color primaries of the renderer's scene-referred working space.
@@ -66,10 +66,10 @@ pub const WORKING_COLOR_SPACE_REC2020_SHADER_DEF: &str = "WORKING_COLOR_SPACE_RE
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
 #[reflect(Resource, Debug, Default, Clone, PartialEq, Hash)]
 pub enum WorkingColorSpace {
-    /// Linear Rec.709 / sRGB primaries, D65 white point (the status quo).
+    /// Linear Rec.709 / sRGB primaries, D65 white point (the default).
     ///
-    /// All rendering is bit-for-bit identical to Bevy before the
-    /// working-space axis existed.
+    /// The working-space conversions are identities, so rendering matches a
+    /// build with no working-space support compiled in.
     #[default]
     Rec709,
     /// Linear ITU-R BT.2020 (Rec.2020) primaries, D65 white point.
@@ -125,7 +125,7 @@ pub const REC2020_TO_REC709: Mat3 = Mat3::from_cols(
 /// the identity guarantee live in exactly one place.
 ///
 /// * [`WorkingColorSpace::Rec709`]: returns `color` **unchanged, bit-for-bit**
-///   (the byte-identical-SDR guarantee).
+///   (an exact identity for the SDR default).
 /// * [`WorkingColorSpace::Rec2020`]: applies [`REC709_TO_REC2020`] to the RGB
 ///   channels (alpha is untouched). Out-of-gamut inputs (negative or > 1
 ///   components) convert linearly like any other value.
@@ -181,8 +181,8 @@ mod tests {
     /// from the (0.3127, 0.3290) chromaticity, while the BT.2087 constants
     /// (shared bit-for-bit with `gt7.rs`/`gt7.wgsl`/`display_encoding.wgsl`)
     /// follow the tabulated-white convention; observed disagreement is a few
-    /// ULP (relative ~1e-6). See the T2.5a notes; the bitwise gt7-parity
-    /// test lives in `bevy_core_pipeline::tonemapping::gt7`.
+    /// ULP (relative ~1e-6). The bitwise gt7-parity test lives in
+    /// `bevy_core_pipeline::tonemapping::gt7`.
     #[test]
     fn matrices_match_bevy_color_primaries_within_tolerance() {
         assert_mat3_rel_eq(
@@ -219,7 +219,7 @@ mod tests {
     }
 
     /// `Rec709` must be a bit-for-bit identity through the shared helper
-    /// (this is the byte-identical-SDR guarantee).
+    /// (the exact-identity guarantee for the SDR default).
     #[test]
     fn rec709_is_bitwise_identity() {
         let color = LinearRgba::new(1.5, -0.25, 0.000123, 0.5);

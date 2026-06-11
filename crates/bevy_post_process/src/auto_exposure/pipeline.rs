@@ -60,8 +60,8 @@ pub struct AutoExposureUniform {
     pub(super) awb_anchor: f32,
     /// Non-zero when the camera has an `AutoWhiteBalance` component. All auto
     /// white balance shader statements are gated on this flag, so the
-    /// auto-exposure-only configuration executes exactly the same arithmetic
-    /// as before the flag existed.
+    /// auto-exposure-only configuration runs no white-balance arithmetic at
+    /// all.
     pub(super) awb_enabled: u32,
     /// Padding so the struct size stays a multiple of 16 bytes, matching the
     /// WGSL uniform address space struct size rounding.
