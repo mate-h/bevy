@@ -545,10 +545,7 @@ fn awb_xy_to_rec709(xy: [f32; 2]) -> [f32; 3] {
 
 /// Mirror of `awb_cct` (the `McCamy` 1992 approximation).
 fn awb_cct(xy: [f32; 2]) -> f32 {
-    let mut d = 0.1858 - xy[1];
-    if d.abs() < 1e-6 {
-        d = if d >= 0.0 { 1e-6 } else { -1e-6 };
-    }
+    let d = (0.1858 - xy[1]).min(-1e-6);
     let n = ((xy[0] - 0.3320) / d).clamp(-1.2, 1.3);
     ((449.0 * n + 3525.0) * n + 6823.3) * n + 5520.33
 }
@@ -687,6 +684,37 @@ fn mccamy_matches_known_illuminants() {
     assert!(
         (a - 2856.0).abs() < 15.0,
         "CCT of illuminant A was {a}, expected ~2856 K"
+    );
+}
+
+#[test]
+fn deep_blue_scenes_read_as_cool_not_warm() {
+    // A scene dominated by saturated blue light adapts to a chromaticity below
+    // McCamy's y = 0.1858 epicenter (this fixture is Rec.709 blue blended with
+    // the default D65 anchor). The CCT must stay pinned at the cool end so the
+    // correction reduces blue; a sign flip in the denominator would read it as
+    // ~1632 K (tungsten) and boost blue instead.
+    let adapted_xy = [0.1853, 0.1184];
+    let cct = awb_cct(adapted_xy);
+    assert!(
+        cct > 7000.0,
+        "deep-blue chromaticity produced CCT {cct} K, expected the cool extreme"
+    );
+
+    // The correction must warm the image: red and green roughly preserved,
+    // blue strongly attenuated. A denominator sign flip instead produces a
+    // blue gain of ~2.
+    let matrix = awb_balance_matrix(adapted_xy);
+    let corrected_white = mat3_mul_vec3(&matrix, [1.0, 1.0, 1.0]);
+    assert!(
+        (0.9..1.3).contains(&corrected_white[0]) && (0.9..1.2).contains(&corrected_white[1]),
+        "red/green of corrected white drifted to {:?}",
+        corrected_white
+    );
+    assert!(
+        corrected_white[2] < 0.8,
+        "white balance must attenuate blue on a deep-blue scene, got gain {}",
+        corrected_white[2]
     );
 }
 

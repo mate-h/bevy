@@ -175,14 +175,15 @@ fn awb_xy_to_rec709(xy: vec2<f32>) -> vec3<f32> {
 // The correlated color temperature of a CIE 1931 chromaticity, using
 // McCamy's approximation (C. S. McCamy 1992, "Correlated color temperature
 // as an explicit function of chromaticity coordinates", Color Research &
-// Application 17(2)). The intermediate `n` is clamped so that extreme
-// chromaticities produce a finite CCT inside the Planckian-locus
-// approximation's validity range instead of NaN/infinity.
+// Application 17(2)). The denominator is clamped to stay negative: every
+// real illuminant sits above the y = 0.1858 epicenter, so chromaticities
+// below it (deep blue/violet scenes) must keep reading as cool — letting
+// the sign flip would classify them as extremely warm and drive the
+// correction in the wrong direction. The intermediate `n` is clamped so
+// that extreme chromaticities produce a finite CCT inside the
+// Planckian-locus approximation's validity range.
 fn awb_cct(xy: vec2<f32>) -> f32 {
-    var d = 0.1858 - xy.y;
-    if abs(d) < 1e-6 {
-        d = select(-1e-6, 1e-6, d >= 0.0);
-    }
+    let d = min(0.1858 - xy.y, -1e-6);
     let n = clamp((xy.x - 0.3320) / d, -1.2, 1.3);
     return ((449.0 * n + 3525.0) * n + 6823.3) * n + 5520.33;
 }
