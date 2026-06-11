@@ -302,6 +302,39 @@ pub(crate) fn resolve_window_display_target(
     }
 }
 
+/// Resolves the [`ViewDisplayTarget`] for a camera's normalized render
+/// target: the requested [`DisplayTarget`] (window component or
+/// [`ManualDisplayTargets`] entry; see [`resolve_display_target`]) with the
+/// window surface's negotiated transfer folded in (see
+/// `resolve_window_display_target` in this module).
+///
+/// Single source shared by [`prepare_view_display_targets`] (which inserts
+/// the per-view component after surface negotiation, so the resolved
+/// transfer is this frame's) and camera extraction (`extract_cameras`, which
+/// picks the main-texture format — there the surface transfer is the
+/// *previous* frame's negotiation result, exactly as fresh as the swapchain
+/// format the extraction already reads for the output format).
+pub(crate) fn resolve_view_display_target(
+    target: Option<&NormalizedRenderTarget>,
+    extracted_windows: &ExtractedWindows,
+    manual_display_targets: &ManualDisplayTargets,
+) -> ViewDisplayTarget {
+    let requested = resolve_display_target(target, extracted_windows, manual_display_targets);
+
+    let surface_transfer = match target {
+        Some(NormalizedRenderTarget::Window(window_ref)) => extracted_windows
+            .get(&window_ref.entity())
+            .and_then(|window| window.resolved_transfer),
+        _ => None,
+    };
+    let resolved = resolve_window_display_target(requested, surface_transfer);
+
+    ViewDisplayTarget {
+        requested,
+        resolved,
+    }
+}
+
 /// Resolves and inserts a [`ViewDisplayTarget`] on every extracted view that
 /// has an [`ExtractedCamera`].
 ///
@@ -310,7 +343,7 @@ pub(crate) fn resolve_window_display_target(
 /// fresh — so later prepare systems (pipeline specialization, uniform
 /// preparation) can rely on the component being present.
 ///
-/// Resolution policy:
+/// Resolution policy ([`resolve_view_display_target`]):
 /// - **Window targets** go through surface negotiation; see
 ///   `resolve_window_display_target` (this module) for how the surface's
 ///   resolved transfer maps onto the requested target.
@@ -324,24 +357,12 @@ pub fn prepare_view_display_targets(
     views: Query<(Entity, &ExtractedCamera), With<ExtractedView>>,
 ) {
     for (entity, camera) in &views {
-        let requested = resolve_display_target(
+        let view_display_target = resolve_view_display_target(
             camera.target.as_ref(),
             &extracted_windows,
             &manual_display_targets,
         );
-
-        let surface_transfer = match camera.target.as_ref() {
-            Some(NormalizedRenderTarget::Window(window_ref)) => extracted_windows
-                .get(&window_ref.entity())
-                .and_then(|window| window.resolved_transfer),
-            _ => None,
-        };
-        let resolved = resolve_window_display_target(requested, surface_transfer);
-
-        commands.entity(entity).insert(ViewDisplayTarget {
-            requested,
-            resolved,
-        });
+        commands.entity(entity).insert(view_display_target);
     }
 }
 

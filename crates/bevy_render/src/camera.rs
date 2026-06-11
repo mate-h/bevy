@@ -10,7 +10,8 @@ use crate::{
     sync_world::{MainEntity, MainEntityHashSet, RenderEntity, SyncToRenderWorld},
     texture::{GpuImage, ManualTextureViews},
     view::{
-        ColorGrading, ExtractedView, ExtractedWindows, Msaa, NoIndirectDrawing,
+        display_target_uniform::resolve_view_display_target, ColorGrading, ExtractedView,
+        ExtractedWindows, ManualDisplayTargets, Msaa, NoIndirectDrawing,
         RenderExtractedVisibleEntities, RenderVisibleEntities, RenderVisibleEntitiesClass,
         RetainedViewEntity, ViewUniformOffset, VisibilityExtractionSystemParam,
     },
@@ -502,6 +503,7 @@ pub fn extract_cameras(
     >,
     primary_window: Extract<Query<Entity, With<PrimaryWindow>>>,
     extracted_windows: Res<ExtractedWindows>,
+    manual_display_targets: Res<ManualDisplayTargets>,
     manual_texture_views: Res<ManualTextureViews>,
     images: Res<RenderAssets<GpuImage>>,
     mut existing_render_visible_entities_cpu_culling: Query<
@@ -630,13 +632,31 @@ pub fn extract_cameras(
             //   values, blending still happens in the encoded space), not a
             //   storage-format requirement, and fp16 keeps encoded values
             //   above 1.0 intact for the tonemapping pass to decode.
+            // - Cameras whose resolved display target requests an HDR
+            //   transfer get the `Rgba16Float` intermediate too: the
+            //   display-encoding pass runs for every such view (even
+            //   `Tonemapping::None` ones, which it warns about), and its
+            //   input contract is unclamped display-linear values. Without
+            //   this, a `Tonemapping::None` camera on a PQ/HDR10 window
+            //   would render into the swapchain's `Rgb10a2Unorm` format,
+            //   clamping at 1.0 and quantizing to 10-bit *linear* before the
+            //   encoder ever sees the values. (The resolved transfer read at
+            //   extraction is the previous frame's negotiation result —
+            //   exactly as fresh as the swapchain format read above.)
             // - Otherwise an explicit `CompositingSpace::Srgb` keeps its
             //   linear-storage `Rgba8Unorm` main texture (shaders write
             //   sRGB-encoded values into it for gamma-encoded blending),
             //   exactly as before.
-            // - Everything else (e.g. `Tonemapping::None` 2D cameras) follows
-            //   the output texture's view format, exactly as before.
-            let target_format = if hdr || tonemapping_enabled {
+            // - Everything else (e.g. `Tonemapping::None` 2D cameras on SDR
+            //   targets) follows the output texture's view format, exactly
+            //   as before.
+            let hdr_transfer = resolve_view_display_target(
+                target.as_ref(),
+                &extracted_windows,
+                &manual_display_targets,
+            )
+            .is_hdr_transfer();
+            let target_format = if hdr || tonemapping_enabled || hdr_transfer {
                 TextureFormat::Rgba16Float
             } else if compositing_space.is_some_and(|s| *s == CompositingSpace::Srgb) {
                 TextureFormat::Rgba8Unorm

@@ -99,10 +99,10 @@ pub struct Hdr;
 /// [`PostUpdate`](https://docs.rs/bevy/latest/bevy/app/struct.PostUpdate.html)).
 ///
 /// Cameras with this marker render to an `Rgba16Float` intermediate main
-/// texture (like [`Hdr`], which still forces it independently), so that the
-/// node-side tone-mapping and display-encoding post-process passes operate
-/// over a high-precision buffer instead of quantizing through an 8-bit
-/// intermediate. This includes cameras with an explicit
+/// texture (like [`Hdr`] and like cameras on HDR display targets, which both
+/// force it independently), so that the node-side tone-mapping and
+/// display-encoding post-process passes operate over a high-precision buffer
+/// instead of quantizing through an 8-bit intermediate. This includes cameras with an explicit
 /// [`CompositingSpace::Srgb`]/[`CompositingSpace::Oklab`]: shaders still
 /// write encoded values (blending stays in the encoded space), but the
 /// storage is fp16 so scene-referred values above 1.0 survive until the

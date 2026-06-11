@@ -24,8 +24,11 @@ What this means in practice:
   textures doubles (8 → 16 bytes per pixel). If you relied on the 8-bit
   intermediate, add `Tonemapping::None` (and tone-map yourself) or use
   `CompositingSpace::Srgb` without an active operator (see below).
-- **Camera2d** (default `Tonemapping::None`): unchanged. Pixel-art and UI
-  cameras keep their existing 8-bit path exactly.
+- **Camera2d** (default `Tonemapping::None`): unchanged on SDR targets.
+  Pixel-art and UI cameras keep their existing 8-bit path exactly. On a
+  window whose `DisplayTarget` requests an HDR transfer, every camera —
+  including `Tonemapping::None` ones — gets the `Rgba16Float` intermediate,
+  so the display-encoding pass receives unclamped, unquantized values.
 - **Cameras with `Hdr`**: unchanged (already `Rgba16Float`).
 - **Cameras with an explicit `CompositingSpace::Srgb`** and no active
   tone-mapping operator: unchanged — they keep the sRGB-compositing
