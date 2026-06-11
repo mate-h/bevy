@@ -129,8 +129,18 @@ pub struct ExtractedWindow {
 }
 
 impl ExtractedWindow {
-    fn set_swapchain_texture(&mut self, frame: wgpu::SurfaceTexture) {
-        self.swap_chain_texture_view_format = Some(frame.texture.format().add_srgb_suffix());
+    fn set_swapchain_texture(
+        &mut self,
+        frame: wgpu::SurfaceTexture,
+        texture_view_format: Option<TextureFormat>,
+    ) {
+        // `texture_view_format` is the sRGB view format the negotiation
+        // stored in `SurfaceData` (`None` for HDR transfers and formats
+        // without an sRGB pair); recomputing `add_srgb_suffix` here would
+        // re-attach a hardware sRGB encode that the negotiation decided
+        // against.
+        self.swap_chain_texture_view_format =
+            Some(texture_view_format.unwrap_or_else(|| frame.texture.format()));
         let texture_view_descriptor = TextureViewDescriptor {
             format: self.swap_chain_texture_view_format,
             ..default()
@@ -303,13 +313,20 @@ impl SurfaceData {
 
     /// Applies a fresh [`negotiate_surface_format`] outcome to the stored
     /// configuration: surface format, color space, the sRGB view format (only
-    /// 8-bit non-sRGB formats get one; float/HDR formats have no sRGB pair
-    /// and shaders write signal values directly), and the resolved transfer.
+    /// 8-bit non-sRGB formats on the plain sRGB transfer get one), and the
+    /// resolved transfer.
+    ///
+    /// The sRGB view is gated on the *resolved transfer*, not just the
+    /// format: a last-resort HDR10 negotiation can land on an 8-bit format,
+    /// whose stores carry already-PQ-encoded signal — a hardware sRGB
+    /// encode on top would double-encode it.
     fn apply_negotiated(&mut self, negotiated: NegotiatedSurface) {
         let view_format = negotiated.format.add_srgb_suffix();
         self.configuration.format = negotiated.format;
         self.configuration.color_space = negotiated.color_space;
-        self.texture_view_format = (view_format != negotiated.format).then_some(view_format);
+        self.texture_view_format = (negotiated.resolved_transfer == DisplayTransfer::Srgb
+            && view_format != negotiated.format)
+            .then_some(view_format);
         self.configuration.view_formats = match self.texture_view_format {
             Some(format) => vec![format],
             None => vec![],
@@ -420,7 +437,7 @@ pub fn prepare_windows(
         match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
-                window.set_swapchain_texture(surface_texture);
+                window.set_swapchain_texture(surface_texture, surface_data.texture_view_format);
             }
             #[cfg(target_os = "linux")]
             wgpu::CurrentSurfaceTexture::Timeout if may_erroneously_timeout() => {
@@ -476,7 +493,7 @@ pub fn prepare_windows(
                         continue;
                     }
                 };
-                window.set_swapchain_texture(frame);
+                window.set_swapchain_texture(frame, surface_data.texture_view_format);
             }
             wgpu::CurrentSurfaceTexture::Occluded => {}
             other => {
@@ -566,9 +583,12 @@ fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<
     let preferred = PREFERRED.iter().copied().filter(|&format| {
         advertised_color_spaces(format_capabilities, format).contains(SurfaceColorSpaces::HDR10)
     });
+    // Formats that are themselves sRGB-encoded are excluded: their stores
+    // bake in the sRGB OETF, which would re-encode the already-PQ-encoded
+    // signal regardless of which view the blit writes through.
     let any = format_capabilities
         .iter()
-        .filter(|fc| fc.color_spaces.contains(SurfaceColorSpaces::HDR10))
+        .filter(|fc| fc.color_spaces.contains(SurfaceColorSpaces::HDR10) && !fc.format.is_srgb())
         .map(|fc| fc.format);
     preferred.chain(any).next().map(|format| NegotiatedSurface {
         format,
@@ -727,10 +747,12 @@ fn negotiate_surface_format(
             DisplayTransfer::Pq,
         ),
     ] {
-        if let Some(fc) = format_capabilities
-            .iter()
-            .find(|fc| fc.color_spaces.contains(flag))
-        {
+        if let Some(fc) = format_capabilities.iter().find(|fc| {
+            // An sRGB format's hardware encode would corrupt non-sRGB
+            // signal (scRGB-linear or PQ) on store.
+            fc.color_spaces.contains(flag)
+                && (resolved_transfer == DisplayTransfer::Srgb || !fc.format.is_srgb())
+        }) {
             warn_once!(
                 "This surface advertises no Auto-configurable formats; falling back to \
                 {:?} in the {color_space:?} color space (resolved transfer: \
@@ -789,15 +811,18 @@ pub fn create_surfaces(
                 window.display_target.transfer,
             );
 
-            // Non-sRGB 8-bit surface formats are rendered through an sRGB
-            // view so shaders always work in linear space. Formats without an
-            // sRGB pair (e.g. the Rgba16Float scRGB surface or the
-            // Rgb10a2Unorm HDR10 surface, where `add_srgb_suffix` is the
-            // identity) get no separate view format: the renderer's final
-            // blit writes (already-encoded) signal values to the surface
-            // format directly.
+            // Non-sRGB 8-bit surface formats on the plain sRGB transfer are
+            // rendered through an sRGB view so shaders always work in linear
+            // space. HDR transfers never get a view, even when a last-resort
+            // negotiation lands on an 8-bit format: the renderer's final
+            // blit writes already-encoded signal values, and a hardware sRGB
+            // encode on top would double-encode them. (Float/10-bit HDR
+            // formats have no sRGB pair to begin with — `add_srgb_suffix`
+            // is the identity.)
             let view_format = negotiated.format.add_srgb_suffix();
-            let texture_view_format = (view_format != negotiated.format).then_some(view_format);
+            let texture_view_format = (negotiated.resolved_transfer == DisplayTransfer::Srgb
+                && view_format != negotiated.format)
+                .then_some(view_format);
             let configuration = SurfaceConfiguration {
                 format: negotiated.format,
                 // The color space negotiated for the requested
