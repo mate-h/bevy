@@ -117,7 +117,13 @@ impl Plugin for TonemappingPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_view_tonemapping_pipelines.in_set(RenderSystems::Prepare),
+                    // Mutates `PipelineCache` (`block_on_render_pipeline`);
+                    // ordering ambiguities against other pipeline-cache
+                    // users are ignored, like the upscaling system
+                    // (see https://github.com/bevyengine/bevy/issues/14770).
+                    prepare_view_tonemapping_pipelines
+                        .in_set(RenderSystems::Prepare)
+                        .ambiguous_with_all(),
                     prepare_gt7_params_uniforms.in_set(RenderSystems::PrepareResources),
                 ),
             );
@@ -788,7 +794,7 @@ pub fn tonemap_output_gamut(
 
 pub fn prepare_view_tonemapping_pipelines(
     mut commands: Commands,
-    pipeline_cache: Res<PipelineCache>,
+    mut pipeline_cache: ResMut<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<TonemappingPipeline>>,
     upscaling_pipeline: Res<TonemappingPipeline>,
     view_targets: Query<(
@@ -973,6 +979,13 @@ pub fn prepare_view_tonemapping_pipelines(
             flags,
         };
         let pipeline = pipelines.specialize(&pipeline_cache, &upscaling_pipeline, key);
+
+        // The upscaling blit blocks on its own pipeline and presents
+        // whatever is in the main texture, so an unready tonemapping
+        // pipeline would present raw scene-linear frames (startup, operator
+        // or key changes). Block here too; this is O(1) once the pipeline
+        // is compiled.
+        pipeline_cache.block_on_render_pipeline(pipeline);
 
         commands.entity(entity).insert(ViewTonemappingPipeline {
             pipeline_id: pipeline,

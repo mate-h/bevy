@@ -99,7 +99,13 @@ impl Plugin for DisplayEncodingPlugin {
             .add_systems(RenderStartup, init_display_encoding_pipeline)
             .add_systems(
                 Render,
-                prepare_view_display_encoding_pipelines.in_set(RenderSystems::Prepare),
+                // Mutates `PipelineCache` (`block_on_render_pipeline`);
+                // ordering ambiguities against other pipeline-cache users
+                // are ignored, like the upscaling system
+                // (see https://github.com/bevyengine/bevy/issues/14770).
+                prepare_view_display_encoding_pipelines
+                    .in_set(RenderSystems::Prepare)
+                    .ambiguous_with_all(),
             );
     }
 }
@@ -443,7 +449,7 @@ pub struct ViewDisplayEncodingPipeline {
 /// scRGB signal) or when forced with [`DisplayGamutCompression::Always`].
 pub fn prepare_view_display_encoding_pipelines(
     mut commands: Commands,
-    pipeline_cache: Res<PipelineCache>,
+    mut pipeline_cache: ResMut<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<DisplayEncodingPipeline>>,
     encoding_pipeline: Res<DisplayEncodingPipeline>,
     views: Query<(
@@ -591,6 +597,14 @@ pub fn prepare_view_display_encoding_pipelines(
             out_of_gamut,
         };
         let pipeline_id = pipelines.specialize(&pipeline_cache, &encoding_pipeline, key);
+
+        // The pass-through upscaling blit for HDR transfers blocks on its
+        // own pipeline and presents the main texture as-is, so an unready
+        // encoder pipeline would present raw display-linear values — on a
+        // PQ swapchain those read as severely distorted signal. Block until
+        // the encoder is compiled; this is O(1) once it is, and only ever
+        // runs for HDR-transfer views.
+        pipeline_cache.block_on_render_pipeline(pipeline_id);
 
         commands
             .entity(entity)
