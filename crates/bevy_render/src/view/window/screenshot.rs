@@ -1,4 +1,4 @@
-use super::ExtractedWindows;
+use super::{display_target::ManualDisplayTargets, ExtractedWindows};
 use crate::{
     gpu_readback,
     render_asset::RenderAssets,
@@ -117,7 +117,9 @@ struct ScreenshotPreparedState {
     pub pipeline_id: CachedRenderPipelineId,
     pub size: Extent3d,
     /// True when the captured texture holds a PQ-encoded (SMPTE ST 2084)
-    /// signal — a window surface negotiated in the HDR10 color space. The
+    /// signal — a window surface negotiated in the HDR10 color space, or a
+    /// manual Image / TextureView target whose [`ManualDisplayTargets`]
+    /// entry requests PQ (or HLG, which the encoder fulfils as PQ). The
     /// readback is then decoded through the PQ EOTF to display-linear values
     /// before the image is handed to the main world (see
     /// [`decode_pq_screenshot`]).
@@ -316,6 +318,21 @@ fn extract_screenshots(
     system_state.apply(&mut main_world);
 }
 
+/// Whether a manual (Image / TextureView) render target carries a PQ-encoded
+/// signal: its registered [`ManualDisplayTargets`] entry requests PQ, or HLG
+/// (which the display encoder fulfils as PQ). Manual targets resolve to the
+/// requested transfer verbatim — there is no surface negotiation to downgrade
+/// them — so the encoder runs exactly when this returns true.
+fn manual_target_pq_encoded(
+    manual_display_targets: &ManualDisplayTargets,
+    target: &NormalizedRenderTarget,
+) -> bool {
+    matches!(
+        manual_display_targets.get(target).map(|t| t.transfer),
+        Some(DisplayTransfer::Pq | DisplayTransfer::Hlg)
+    )
+}
+
 fn prepare_screenshots(
     targets: Res<RenderScreenshotTargets>,
     mut prepared: ResMut<RenderScreenshotsPrepared>,
@@ -326,6 +343,7 @@ fn prepare_screenshots(
     mut pipelines: ResMut<SpecializedRenderPipelines<ScreenshotToScreenPipeline>>,
     images: Res<RenderAssets<GpuImage>>,
     manual_texture_views: Res<ManualTextureViews>,
+    manual_display_targets: Res<ManualDisplayTargets>,
     mut view_target_attachments: ResMut<ViewTargetAttachments>,
 ) {
     prepared.clear();
@@ -373,7 +391,7 @@ fn prepare_screenshots(
                     continue;
                 };
                 let view_format = gpu_image.view_format();
-                let (texture_view, state) = prepare_screenshot_state(
+                let (texture_view, mut state) = prepare_screenshot_state(
                     gpu_image.texture_descriptor.size,
                     view_format,
                     &render_device,
@@ -381,6 +399,7 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
+                state.pq_encoded = manual_target_pq_encoded(&manual_display_targets, target);
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
@@ -397,7 +416,7 @@ fn prepare_screenshots(
                 };
                 let view_format = manual_texture_view.view_format;
                 let size = manual_texture_view.size.to_extents();
-                let (texture_view, state) = prepare_screenshot_state(
+                let (texture_view, mut state) = prepare_screenshot_state(
                     size,
                     view_format,
                     &render_device,
@@ -405,6 +424,7 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
+                state.pq_encoded = manual_target_pq_encoded(&manual_display_targets, target);
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
