@@ -222,7 +222,10 @@ impl Luminance for LinearRgba {
             self.blue * adjustment,
         );
         let sdr = |c: f32| (0.0..=1.0).contains(&c);
-        if sdr(self.red) && sdr(self.green) && sdr(self.blue) && sdr(luminance) {
+        // The target check only excludes HDR targets (> 1.0): a negative
+        // target is nonphysical, not HDR, and keeps the clamp-to-black
+        // behavior (NaN targets fail the comparison and pass through).
+        if sdr(self.red) && sdr(self.green) && sdr(self.blue) && luminance <= 1.0 {
             Self {
                 red: red.clamp(0., 1.),
                 green: green.clamp(0., 1.),
@@ -531,6 +534,14 @@ mod tests {
         assert!((bright.red - 2.0).abs() < 1e-4);
         assert!((bright.green - 2.0).abs() < 1e-4);
         assert!((bright.blue - 2.0).abs() < 1e-4);
+
+        // A negative target is nonphysical, not HDR: an SDR input keeps the
+        // clamp-to-black behavior (consistent with `darker`), never negative
+        // components.
+        let crushed = gray.with_luminance(-0.5);
+        assert_eq!(crushed.red, 0.0);
+        assert_eq!(crushed.green, 0.0);
+        assert_eq!(crushed.blue, 0.0);
 
         // `lighter` on an SDR color still clamps at white...
         let almost_white = LinearRgba::new(0.9, 0.9, 0.9, 1.0);

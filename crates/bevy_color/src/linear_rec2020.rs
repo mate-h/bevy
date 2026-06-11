@@ -225,7 +225,10 @@ impl Luminance for LinearRec2020 {
             self.blue * adjustment,
         );
         let sdr = |c: f32| (0.0..=1.0).contains(&c);
-        if sdr(self.red) && sdr(self.green) && sdr(self.blue) && sdr(luminance) {
+        // The target check only excludes HDR targets (> 1.0): a negative
+        // target is nonphysical, not HDR, and keeps the clamp-to-black
+        // behavior (NaN targets fail the comparison and pass through).
+        if sdr(self.red) && sdr(self.green) && sdr(self.blue) && luminance <= 1.0 {
             Self {
                 red: red.clamp(0., 1.),
                 green: green.clamp(0., 1.),
