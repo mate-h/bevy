@@ -68,7 +68,15 @@ impl AssetLoader for ExrTextureLoader {
         // The `image` crate's OpenEXR decoder drops the header's color metadata
         // (image-0.25.9 `openexr.rs:189` TODOs the chromaticities attribute), so the
         // header is read directly with the `exr` crate the decoder itself uses.
-        let file_source_primaries = read_exr_chromaticities(&bytes);
+        // An explicit loader setting suppresses the header parse entirely
+        // (matching the Radiance HDR loader), so overriding a file with
+        // unsupported chromaticities does not log a misleading
+        // "assuming BT.709" warning for metadata that is not used.
+        let file_source_primaries = if settings.source_primaries.is_none() {
+            read_exr_chromaticities(&bytes)
+        } else {
+            None
+        };
 
         let decoder = image::codecs::openexr::OpenExrDecoder::with_alpha_preference(
             std::io::Cursor::new(bytes),
