@@ -479,7 +479,25 @@ pub fn prepare_view_display_encoding_pipelines(
         },
     ));
 
-    for (entity, view, camera, _, view_display_target, tonemapping) in &views {
+    for (entity, view, camera, view_target, view_display_target, tonemapping) in &views {
+        // Window surfaces only negotiate HDR transfers onto formats without
+        // a hardware sRGB encode, but manual Image/TextureView targets
+        // resolve their ManualDisplayTargets entry verbatim — the user owns
+        // the texture. Writing this pass's encoded signal through an sRGB
+        // view would encode it a second time.
+        if view_display_target.is_hdr_transfer()
+            && view_target
+                .out_texture_view_format()
+                .is_some_and(|format| format.is_srgb())
+        {
+            warn_once!(
+                "A render target registered in `ManualDisplayTargets` with an HDR transfer \
+                is backed by an sRGB texture format; the hardware sRGB encode will corrupt \
+                the encoded HDR signal. Use a non-sRGB format (e.g. `Rgba16Float`) for HDR \
+                render targets."
+            );
+        }
+
         if deferred.contains_key(&entity) {
             // The finalizing camera encodes the composed buffer; this view
             // must not run the pass. (Render-world entities are retained, so
