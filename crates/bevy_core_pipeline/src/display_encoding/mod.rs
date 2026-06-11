@@ -45,6 +45,7 @@
 use crate::FullscreenShader;
 use bevy_app::{App, Plugin};
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
+use bevy_camera::ClearColorConfig;
 use bevy_camera::CompositingSpace;
 use bevy_ecs::prelude::*;
 use bevy_log::{info_once, warn_once};
@@ -57,7 +58,7 @@ use bevy_render::{
         *,
     },
     renderer::RenderDevice,
-    view::{DisplayTargetUniform, ExtractedView, ViewDisplayTarget},
+    view::{DisplayTargetUniform, ExtractedView, ViewDisplayTarget, ViewTarget},
     working_color_space::WorkingColorSpace,
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
@@ -65,6 +66,7 @@ use bevy_shader::Shader;
 use bevy_utils::default;
 use bevy_window::{DisplayGamut, DisplayTransfer};
 
+use crate::camera_stack::{stack_deferred_views, StackView};
 use crate::tonemapping::{tonemap_output_gamut, Tonemapping};
 
 pub mod gamut_compression;
@@ -448,13 +450,39 @@ pub fn prepare_view_display_encoding_pipelines(
         Entity,
         &ExtractedView,
         &ExtractedCamera,
+        &ViewTarget,
         &ViewDisplayTarget,
         Option<&Tonemapping>,
     )>,
     working_color_space: Res<WorkingColorSpace>,
     gamut_compression: Res<DisplayGamutCompression>,
 ) {
-    for (entity, view, camera, view_display_target, tonemapping) in &views {
+    // Cameras stacked on a shared main texture encode once, on the last
+    // camera whose target needs the pass. Encoding per camera would make the
+    // later cameras' main passes and upscaling blits composite over (and
+    // alpha-blend with) already transfer-encoded signal, which is non-linear
+    // and visibly wrong for PQ.
+    let deferred = stack_deferred_views(views.iter().map(
+        |(entity, _, camera, view_target, view_display_target, _)| StackView {
+            entity,
+            texture: view_target.main_texture().id(),
+            sorted_index: camera.sorted_camera_index_for_target,
+            enabled: view_display_target.is_hdr_transfer(),
+            composites_fullscreen: matches!(camera.clear_color, ClearColorConfig::None)
+                && camera.viewport.is_none(),
+        },
+    ));
+
+    for (entity, view, camera, _, view_display_target, tonemapping) in &views {
+        if deferred.contains_key(&entity) {
+            // The finalizing camera encodes the composed buffer; this view
+            // must not run the pass. (Render-world entities are retained, so
+            // the component must be actively removed.)
+            commands
+                .entity(entity)
+                .remove::<ViewDisplayEncodingPipeline>();
+            continue;
+        }
         // D1 guidance: HDR display output reaches noticeably wider gamuts
         // when the scene is rendered in the Rec.2020 working space. This is
         // advisory only (the Rec.709 working space remains correct, just
