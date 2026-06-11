@@ -277,7 +277,7 @@ mod tests {
             let drift = hue_drift_degrees(rgb709, out);
             assert!(
                 drift < max_drift,
-                "{label}: hue drift {drift}° exceeds {max_drift}°"
+                "{label}: hue drift {drift} deg exceeds {max_drift} deg"
             );
         }
     }
@@ -309,7 +309,7 @@ mod tests {
             let drift = hue_drift_degrees(rgb, out);
             assert!(
                 drift < max_drift,
-                "{rgb}: hue drift {drift}° exceeds {max_drift}°"
+                "{rgb}: hue drift {drift} deg exceeds {max_drift} deg"
             );
         }
     }

@@ -403,7 +403,7 @@ fn watch_monitor_changes(
         } else {
             info!(
                 "Window {} moved to monitor {name}; its DisplayTarget calibration may no \
-                 longer match — recalibration recommended.",
+                 longer match - recalibration recommended.",
                 event.window
             );
             notice.seconds_remaining = 8.0;
@@ -462,7 +462,7 @@ fn update_ui(
 ) {
     let mut ui = String::new();
 
-    ui.push_str("HDR calibration (HGIG-style) — requires an HDR display\n\n");
+    ui.push_str("HDR calibration (HGIG-style) - requires an HDR display\n\n");
 
     ui.push_str("DisplayTarget (primary window):\n");
     ui.push_str(&format!(
@@ -526,14 +526,14 @@ fn update_ui(
     ui.push_str(&format!(
         "\n(G) Gran Turismo 7 preview: {}\n",
         if **tonemapping == Tonemapping::GranTurismo7 {
-            "ON — full HDR tone-mapping path; patterns are not exact while previewing"
+            "ON - full HDR tone-mapping path; patterns are not exact while previewing"
         } else {
-            "off — patterns are exact (Tonemapping::None)"
+            "off - patterns are exact (Tonemapping::None)"
         }
     ));
 
     if notice.seconds_remaining > 0.0 {
-        ui.push_str("\n*** Window moved to a different monitor — recalibration recommended. ***\n");
+        ui.push_str("\n*** Window moved to a different monitor - recalibration recommended. ***\n");
     }
 
     text.0 = ui;

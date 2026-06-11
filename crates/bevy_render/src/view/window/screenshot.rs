@@ -118,7 +118,7 @@ struct ScreenshotPreparedState {
     pub size: Extent3d,
     /// True when the captured texture holds a PQ-encoded (SMPTE ST 2084)
     /// signal — a window surface negotiated in the HDR10 color space, or a
-    /// manual Image / TextureView target whose [`ManualDisplayTargets`]
+    /// manual `Image` / `TextureView` target whose [`ManualDisplayTargets`]
     /// entry requests PQ (or HLG, which the encoder fulfils as PQ). The
     /// readback is then decoded through the PQ EOTF to display-linear values
     /// before the image is handed to the main world (see
@@ -318,7 +318,7 @@ fn extract_screenshots(
     system_state.apply(&mut main_world);
 }
 
-/// Whether a manual (Image / TextureView) render target carries a PQ-encoded
+/// Whether a manual (`Image` / `TextureView`) render target carries a PQ-encoded
 /// signal: its registered [`ManualDisplayTargets`] entry requests PQ, or HLG
 /// (which the display encoder fulfils as PQ). Manual targets resolve to the
 /// requested transfer verbatim — there is no surface negotiation to downgrade
@@ -929,7 +929,7 @@ mod tests {
         for channel in &values[0..3] {
             assert!(
                 (channel - 1.25).abs() < 0.01,
-                "expected ≈1.25, got {channel}"
+                "expected ~1.25, got {channel}"
             );
         }
         assert_eq!(values[3], 1.0);
