@@ -357,11 +357,16 @@ fn compute_histogram(
 
     // Accumulate the workgroup histogram into the global histogram.
     // Note that the global histogram was not cleared at the beginning,
-    // as it will be cleared in compute_average.
-    atomicAdd(
-        &histogram[local_invocation_index],
-        atomicLoad(&histogram_shared[local_invocation_index]),
-    );
+    // as it will be cleared in compute_average. The guard matches the clear
+    // above: the workgroup has 256 invocations but only 64 bins, and an
+    // unguarded flush would clamp lanes 64..255 onto bin 63 (naga's default
+    // bounds-check policy), inflating the brightest bin ~193x.
+    if local_invocation_index < 64u {
+        atomicAdd(
+            &histogram[local_invocation_index],
+            atomicLoad(&histogram_shared[local_invocation_index]),
+        );
+    }
 
     // Accumulate the workgroup chroma sums into the global accumulators,
     // converting from the workgroup fixed-point scale to the global one and
