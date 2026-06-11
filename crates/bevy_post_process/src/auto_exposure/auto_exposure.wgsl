@@ -253,8 +253,14 @@ fn awb_balance_matrix(adapted_xy: vec2<f32>) -> mat3x3<f32> {
 
 // For a given color, return the histogram bin index
 fn color_to_bin(hdr: vec3<f32>) -> u32 {
-    // Convert color to luminance
+    // Convert color to luminance, using the Y row that matches the working
+    // space the main texture holds (the same choice the white-balance
+    // measurement below makes).
+#ifdef WORKING_COLOR_SPACE_REC2020
+    let lum = dot(hdr, AWB_REC2020_TO_Y);
+#else
     let lum = dot(hdr, RGB_TO_LUM);
+#endif
 
     if lum < exp2(settings.min_log_lum) {
         return 0u;

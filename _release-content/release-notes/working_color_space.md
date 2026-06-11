@@ -74,6 +74,5 @@ What happens under `Rec2020`:
 
 Known caveats under `Rec2020`: `Tonemapping::None` cameras (the `Camera2d`
 default) skip the conversion and render oversaturated (a `warn_once` fires);
-`CompositingSpace::Oklab`, auto-exposure metering and bloom luminance weights
-remain Rec.709-fit; gizmos, UI and atmosphere-generated sky values are not
-converted.
+`CompositingSpace::Oklab` and bloom luminance weights remain Rec.709-fit;
+gizmos, UI and atmosphere-generated sky values are not converted.
