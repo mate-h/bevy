@@ -797,9 +797,10 @@ pub fn sort_cameras(
             ambiguities.insert(new_order_target.clone());
         }
         if let Some(target) = &sorted_camera.target {
-            let count = target_counts
-                .entry((target.clone(), sorted_camera.hdr))
-                .or_insert(0usize);
+            // Keyed by target alone: every camera sharing a render target gets a unique
+            // index, even when `hdr` differs, so downstream stack analyses and the
+            // upscaling auto-blend see a deterministic bottom-to-top order.
+            let count = target_counts.entry(target.clone()).or_insert(0usize);
             let (_, mut camera) = cameras.get_mut(sorted_camera.entity).unwrap();
             camera.sorted_camera_index_for_target = *count;
             *count += 1;
@@ -1208,5 +1209,64 @@ impl PendingQueues {
     /// order to clean up resources relating to views that no longer exist.
     pub fn expire_stale_views(&mut self, all_views: &HashSet<RetainedViewEntity>) {
         self.retain(|retained_view_entity, _| all_views.contains(retained_view_entity));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::Main;
+    use bevy_ecs::{schedule::ScheduleLabel, system::RunSystemOnce, world::World};
+
+    fn extracted_camera(
+        order: isize,
+        hdr: bool,
+        target: NormalizedRenderTarget,
+    ) -> ExtractedCamera {
+        ExtractedCamera {
+            target: Some(target),
+            physical_viewport_size: None,
+            physical_target_size: None,
+            viewport: None,
+            schedule: Main.intern(),
+            order,
+            output_mode: CameraOutputMode::default(),
+            msaa_writeback: MsaaWriteback::default(),
+            clear_color: ClearColorConfig::Default,
+            sorted_camera_index_for_target: 0,
+            exposure: 1.0,
+            hdr,
+            compositing_space: None,
+        }
+    }
+
+    /// Cameras sharing one render target must receive unique per-target indices
+    /// in camera-order sequence even when their `hdr` flags differ; downstream
+    /// stack analyses and the upscaling auto-blend rely on that ordering.
+    #[test]
+    fn sort_cameras_assigns_sequential_indices_for_mixed_hdr_shared_target() {
+        let mut world = World::new();
+        world.init_resource::<SortedCameras>();
+
+        let shared = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(0));
+        let other = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
+        // The upper camera is spawned first so the assigned indices prove that
+        // camera order, not spawn order, drives the sequence.
+        let upper = world.spawn(extracted_camera(1, true, shared.clone())).id();
+        let lower = world.spawn(extracted_camera(0, false, shared)).id();
+        let solo = world.spawn(extracted_camera(0, true, other)).id();
+
+        world.run_system_once(sort_cameras).unwrap();
+
+        let index = |entity: Entity| {
+            world
+                .entity(entity)
+                .get::<ExtractedCamera>()
+                .unwrap()
+                .sorted_camera_index_for_target
+        };
+        assert_eq!(index(lower), 0);
+        assert_eq!(index(upper), 1);
+        assert_eq!(index(solo), 0);
     }
 }
