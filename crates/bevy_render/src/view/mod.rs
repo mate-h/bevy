@@ -1,3 +1,4 @@
+pub mod composition;
 pub mod display_target_uniform;
 pub mod visibility;
 pub mod window;
@@ -7,6 +8,7 @@ use bevy_camera::{
     Exposure, MainPassResolutionOverride, NormalizedRenderTarget,
 };
 use bevy_diagnostic::FrameCount;
+pub use composition::*;
 pub use display_target_uniform::*;
 pub use visibility::*;
 pub use window::*;
@@ -183,6 +185,14 @@ impl Plugin for ViewPlugin {
             ));
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .init_resource::<ResolvedCompositionSpaces>()
+                .add_systems(
+                    Render,
+                    resolve_composition_spaces
+                        .in_set(RenderSystems::CreateViews)
+                        .after(crate::camera::sort_cameras),
+                );
             render_app.add_systems(
                 Render,
                 (
@@ -1210,12 +1220,31 @@ pub fn cleanup_view_targets_for_resize(
     }
 }
 
-type MainTextureKey = (
+/// The identity key of a camera's main-texture ping-pong. Cameras with equal
+/// keys share one ping-pong allocation in [`prepare_view_targets`]; the
+/// phase-1 composition resolver ([`resolve_composition_spaces`]) groups by
+/// the same key so space resolution and texture sharing can never disagree.
+pub(crate) type MainTextureKey = (
     Option<NormalizedRenderTarget>,
     TextureUsages,
     TextureFormat,
     Msaa,
 );
+
+/// Builds a camera view's [`MainTextureKey`].
+pub(crate) fn main_texture_key(
+    camera: &ExtractedCamera,
+    view: &ExtractedView,
+    texture_usage: &CameraMainTextureUsages,
+    msaa: Msaa,
+) -> MainTextureKey {
+    (
+        camera.target.clone(),
+        texture_usage.0,
+        view.target_format,
+        msaa,
+    )
+}
 
 pub fn prepare_view_targets(
     mut commands: Commands,
@@ -1307,12 +1336,7 @@ pub fn prepare_view_targets(
                 }
             });
 
-        let key: MainTextureKey = (
-            camera.target.clone(),
-            texture_usage.0,
-            main_texture_format,
-            *msaa,
-        );
+        let key = main_texture_key(camera, view, texture_usage, *msaa);
         let (a, b, sampled, main_texture) = textures.entry(key.clone()).or_insert_with(|| {
             let descriptor = TextureDescriptor {
                 label: None,
