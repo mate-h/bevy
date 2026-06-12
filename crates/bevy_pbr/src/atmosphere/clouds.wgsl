@@ -32,6 +32,7 @@ struct CloudLayer {
     multiscatter_scatter: f32,
     multiscatter_extinction: f32,
     multiscatter_phase: f32,
+    multiscatter_octaves: u32,
     powder_strength: f32,
     ambient_strength: f32,
     noise_offset: vec3<f32>,
@@ -272,10 +273,20 @@ fn sample_cloud_field_density_and_grad(r: f32, world_pos: vec3<f32>) -> vec2<f32
     return vec2(d0, grad_mag);
 }
 
-/// Returns (start_t, end_t, valid) for the segment of the ray inside the cloud layer shell.
-/// - start_t/end_t are distances along the ray direction (meters), relative to ray_origin.
-/// - valid is 1.0 if the segment exists, 0.0 otherwise.
-fn cloud_layer_segment(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> {
+/// Returns (start_t, end_t, valid, first_exit_t) for the span of the ray that can contain clouds.
+/// - start_t is the first entry into the cloud shell, end_t the *last* exit (meters along ray_dir).
+/// - valid is 1.0 if the span exists, 0.0 otherwise.
+/// - first_exit_t is the first exit from the shell after start_t: either dipping below the
+///   bottom sphere or leaving through the top sphere. For rays that graze under the bottom of
+///   the layer and re-enter it beyond the dip, [start_t, end_t] covers both cloud segments
+///   (the gap in between has zero cloud density), while [start_t, first_exit_t] covers only
+///   the first one.
+///
+/// Spanning to the last exit keeps the interval *continuous* as a ray crosses the bottom-shell
+/// tangent direction. Cutting the span at the first bottom-sphere entry (as Unreal-style single
+/// interval selection does) deletes all clouds beyond the dip and produces a hard band parallel
+/// to the horizon when viewed from inside or above the layer.
+fn cloud_layer_segment(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec4<f32> {
     // IMPORTANT: do the ray/sphere intersection math in kilometers to improve numerical stability.
     // In meters, `r` is ~6.3e6 and for grazing angles the discriminant can become ill-conditioned,
     // producing "banded" invalid intersections as the sun elevation changes.
@@ -290,37 +301,41 @@ fn cloud_layer_segment(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> {
     let bottom_radius_km = cloud_layer.cloud_layer_start * M_TO_KM;
     let top_radius_km = cloud_layer.cloud_layer_end * M_TO_KM;
 
-    // Unreal-style intersection selection:
-    // Compute intersections with the top and bottom spheres, then derive a single [TMin, TMax]
-    // interval from carefully selected roots. This avoids sign/branch issues at grazing angles.
     let t_top = ray_sphere_intersect(r_km, mu, top_radius_km);
-    if (t_top.x < 0.0 && t_top.y < 0.0) {
-        return vec3(0.0, 0.0, 0.0);
+    // The top sphere (which contains the whole shell) is missed or fully behind the origin.
+    if (t_top.y <= 0.0) {
+        return vec4(0.0);
     }
     let t_bottom = ray_sphere_intersect(r_km, mu, bottom_radius_km);
 
-    var t_min = t_top.x;
-    var t_max = t_top.y;
+    // Entry into the shell, by origin position:
+    // - above the layer: when crossing the top sphere
+    // - below the layer (inside the bottom sphere): when leaving the bottom sphere
+    // - inside the layer: immediately
+    var t_enter: f32;
+    if (r_km >= top_radius_km) {
+        t_enter = t_top.x;
+    } else if (r_km <= bottom_radius_km) {
+        t_enter = t_bottom.y;
+    } else {
+        t_enter = 0.0;
+    }
+    t_enter = max(0.0, t_enter);
 
-    // If we also intersect the bottom sphere, combine both.
-    if (!(t_bottom.x < 0.0 && t_bottom.y < 0.0)) {
-        // If we see both intersections in front of us, keep the min/closest, otherwise the max/furthest.
-        var temp_top = select(max(t_top.x, t_top.y), min(t_top.x, t_top.y), (t_top.x > 0.0) && (t_top.y > 0.0));
-        var temp_bottom = select(max(t_bottom.x, t_bottom.y), min(t_bottom.x, t_bottom.y), (t_bottom.x > 0.0) && (t_bottom.y > 0.0));
+    // The last exit is always through the top sphere.
+    let t_exit = t_top.y;
 
-        if ((t_bottom.x > 0.0) && (t_bottom.y > 0.0)) {
-            // If we can see the bottom of the layer, make sure we use the camera (0) or the closest top intersection.
-            temp_top = max(0.0, min(t_top.x, t_top.y));
-        }
-
-        t_min = min(temp_bottom, temp_top);
-        t_max = max(temp_bottom, temp_top);
+    // First exit after entry: dip into the bottom sphere if it lies ahead, else the top exit.
+    var t_first_exit = t_exit;
+    if (t_bottom.x > t_enter) {
+        t_first_exit = t_bottom.x;
     }
 
-    t_min = max(0.0, t_min);
-    t_max = max(0.0, t_max);
-    let valid = (t_max > t_min);
-
-    // Convert km back to meters for callers.
-    return vec3(t_min * KM_TO_M, t_max * KM_TO_M, select(0.0, 1.0, valid));
+    let valid = t_exit > t_enter;
+    return vec4(
+        t_enter * KM_TO_M,
+        t_exit * KM_TO_M,
+        select(0.0, 1.0, valid),
+        t_first_exit * KM_TO_M,
+    );
 }

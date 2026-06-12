@@ -380,6 +380,86 @@ fn sample_cloud_shadow_map_tau(world_pos: vec3<f32>, direction_to_light: vec3<f3
 fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, use_optical_depth_only: bool) -> f32 {
     return exp(-sample_cloud_shadow_map_tau(world_pos, direction_to_light, use_optical_depth_only));
 }
+
+/// Hemispherical average sky luminance estimate for cloud ambient lighting,
+/// sampled from the sky-view LUT (zenith + four mid-elevation directions in
+/// atmosphere space). The LUT contains both single- and multi-scattered air
+/// light in absolute luminance, so this stays correct at sunset where the
+/// multiscattering LUT alone collapses.
+///
+/// The LUT is anchored at the camera, which is a reasonable approximation for
+/// the nearby cloud field (Frostbite similarly lights clouds with a single
+/// global sky probe, see "Physically Based Sky..." section 5.5.1).
+fn sample_sky_ambient_luminance(r: f32) -> vec3<f32> {
+    const MU_MID: f32 = 0.35;
+    let s = sqrt(1.0 - MU_MID * MU_MID);
+    var sky = sample_sky_view_lut(r, vec3(0.0, 1.0, 0.0));
+    sky += sample_sky_view_lut(r, vec3(s, MU_MID, 0.0));
+    sky += sample_sky_view_lut(r, vec3(-s, MU_MID, 0.0));
+    sky += sample_sky_view_lut(r, vec3(0.0, MU_MID, s));
+    sky += sample_sky_view_lut(r, vec3(0.0, MU_MID, -s));
+    // Mean sky luminance, times 0.5: in-scattered radiance from a uniform
+    // upper hemisphere of luminance L is L/2 for a normalized phase function.
+    return sky * (0.5 / 5.0);
+}
+
+/// Secondary ray march toward the light for cloud self-shadowing (HZD / Frostbite).
+///
+/// Marches `settings.cloud_self_shadow_steps` jittered samples over
+/// `settings.cloud_self_shadow_distance` meters with exponentially increasing
+/// spacing (dense near the shaded point where detail matters most), then adds
+/// the distant occlusion past the march end from the cloud shadow map.
+/// There is no double counting: the shadow map sampled at the march end point
+/// only measures clouds sunward of it.
+///
+/// Returns the total optical depth toward the light.
+fn raymarch_cloud_light_tau(world_pos: vec3<f32>, direction_to_light: vec3<f32>, pixel_coords: vec2<f32>) -> f32 {
+    let seg = cloud_layer_segment(world_pos, direction_to_light);
+    if (seg.z < 0.5) {
+        // No cloud shell along the light ray; defer entirely to the shadow map.
+        return sample_cloud_shadow_map_tau(world_pos, direction_to_light, false);
+    }
+
+    let march_start = max(seg.x, 0.0);
+    let march_end = min(seg.y, march_start + settings.cloud_self_shadow_distance);
+    if (march_end <= march_start) {
+        return sample_cloud_shadow_map_tau(world_pos, direction_to_light, false);
+    }
+
+    let sigma_t_per_density = get_cloud_scattering_coeff() + get_cloud_absorption_coeff();
+    let march_distance = march_end - march_start;
+
+    // Exponential strata: stratum i covers a 2^i share of the march distance,
+    // normalized so the n strata exactly span [march_start, march_end].
+    let n = max(1u, settings.cloud_self_shadow_steps);
+    let total_weight = exp2(f32(n)) - 1.0;
+
+    // Fully occluded threshold (exp(-8) ~ 3e-4), matching the shadow map trace.
+    const MAX_TAU: f32 = 8.0;
+
+    var tau = 0.0;
+    var t0 = march_start;
+    for (var i = 0u; i < n; i += 1u) {
+        let frac1 = (exp2(f32(i + 1u)) - 1.0) / total_weight;
+        let t1 = march_start + frac1 * march_distance;
+        let dt = t1 - t0;
+
+        let j = interleaved_gradient_noise(pixel_coords, 3000u + i);
+        let t = mix(t0, t1, j);
+        let p = world_pos + direction_to_light * t;
+        let density = get_cloud_medium_density(length(p), p);
+        tau += density * sigma_t_per_density * dt;
+        if (tau >= MAX_TAU) {
+            return MAX_TAU;
+        }
+        t0 = t1;
+    }
+
+    // Distant occlusion beyond the local march, from the shadow map.
+    let q = world_pos + direction_to_light * march_end;
+    tau += sample_cloud_shadow_map_tau(q, direction_to_light, false);
+    return min(tau, MAX_TAU);
+}
 #endif
 
 /// evaluates L_scat, equation 3 in the paper, which gives the total single-order scattering towards the view at a single point
@@ -424,24 +504,48 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
 
         #ifdef CLOUDS_ENABLED
         // Optical depth through clouds toward this light, from the cloud shadow map
-        // (stable at grazing angles).
-        let cloud_tau = sample_cloud_shadow_map_tau(world_pos, (*light).direction_to_light, false);
+        // (stable at grazing angles). Always used to attenuate *air* in-scattering.
+        let cloud_tau_map = sample_cloud_shadow_map_tau(world_pos, (*light).direction_to_light, false);
 
         var cloud_inscatter = 0.0;
         if (cloud_sigma_s > 0.0) {
+            // Self-shadow optical depth for the cloud term. The secondary light march
+            // captures fine local detail the shadow map's linear approximation misses;
+            // the cheap path (or environment probes, which can't resolve the detail)
+            // reuses the shadow map tau.
+            var cloud_tau = cloud_tau_map;
+            // The shadow map's mean-extinction approximation underestimates local depth
+            // for thin wisps in front of the recorded shadow front, so the powder term
+            // adds a local extinction contribution. The marched tau measures it directly.
+            var tau_powder = cloud_tau_map + cloud_sigma_t * 100.0;
+#ifndef CLOUD_SELF_SHADOW_CHEAP
+            if (settings.cloud_self_shadow_raymarch == 1u) {
+                cloud_tau = raymarch_cloud_light_tau(
+                    world_pos,
+                    (*light).direction_to_light,
+                    pixel_coords,
+                );
+                tau_powder = cloud_tau;
+            }
+#endif
+
             let cos_theta = clamp(neg_LdotV, -1.0, 1.0);
 
-            // Multiple scattering octaves (Wrenninge et al., used by Frostbite with N=2):
+            // Multiple scattering octaves (Wrenninge et al., used by Frostbite with N=2-3):
             // each octave n attenuates scattering by a^n, light optical depth by b^n and
             // phase eccentricity by c^n. Energy conservation requires a <= b.
+            // Higher octave counts let light punch through high optical depths,
+            // brightening cloud interiors (Nubis uses effective extinction
+            // multipliers as low as 0.05-0.25 on its multiple-scattering term).
             let ms_b = saturate(cloud_layer.multiscatter_extinction);
             let ms_a = min(saturate(cloud_layer.multiscatter_scatter), ms_b);
             let ms_c = saturate(cloud_layer.multiscatter_phase);
+            let ms_octaves = clamp(cloud_layer.multiscatter_octaves, 1u, 8u);
 
             var oct_a = 1.0;
             var oct_b = 1.0;
             var oct_c = 1.0;
-            for (var n = 0u; n < 2u; n++) {
+            for (var n = 0u; n < ms_octaves; n++) {
                 let phase_n = dual_lobe_hg_phase(
                     cos_theta,
                     cloud_layer.phase_g_forward * oct_c,
@@ -456,9 +560,6 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
 
             // Powder / "dark edges" term (Schneider 2015): in-scattering probability
             // builds with depth into the cloud, so optically thin regions appear darker.
-            // Include a local extinction contribution so thin isolated wisps in front of
-            // the recorded shadow front still receive some darkening.
-            let tau_powder = cloud_tau + cloud_sigma_t * 100.0;
             let powder = 1.0 - exp(-2.0 * tau_powder);
             // View-dependent: strongest when looking away from the sun (cos_theta -> -1),
             // fading out toward the silver lining (cos_theta -> 1).
@@ -468,19 +569,11 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
             cloud_inscatter *= cloud_sigma_s;
         }
 
-        // Ambient sky contribution (NUBIS-style): approximate sky irradiance with the
-        // multiple-scattering LUT, attenuated toward cloud interiors by the dimensional
-        // profile and biased toward cloud tops (the sky dominates from above).
-        let cloud_ambient = psi_ms * cloud_sigma_s
-            * pow(1.0 - cloud.profile, 0.5)
-            * mix(0.4, 1.0, cloud.height)
-            * cloud_layer.ambient_strength;
-
         // Air in-scattering is shadowed by the full cloud optical depth; the cloud term
         // above handles its own per-octave self-shadowing, so only apply the spectral air
         // transmittance + ground occlusion to it.
-        let cloud_scattering_factor = shadow_factor * cloud_inscatter + cloud_ambient;
-        shadow_factor *= exp(-cloud_tau);
+        let cloud_scattering_factor = shadow_factor * cloud_inscatter;
+        shadow_factor *= exp(-cloud_tau_map);
         #endif
 
         // Transmittance from scattering event to light source
@@ -491,6 +584,23 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
 
         inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
     }
+
+    #ifdef CLOUDS_ENABLED
+    // Ambient sky contribution (Frostbite 5.5.1 / Nubis ambient scattering):
+    // the dominant light source for shadowed cloud interiors is the sky dome
+    // itself. The sky-view LUT already holds its luminance (all lights
+    // included), so this is added once, outside the light loop, and not
+    // multiplied by any light color. Attenuated toward cloud interiors by the
+    // dimensional profile (Nubis) and biased toward cloud tops with a
+    // ground-bounce floor (Frostbite's bottom-to-top ambient gradient).
+    if (cloud_sigma_s > 0.0) {
+        inscattering += cloud_sigma_s * sample_sky_ambient_luminance(local_r)
+            * pow(1.0 - cloud.profile, 0.5)
+            * mix(0.4, 1.0, cloud.height)
+            * cloud_layer.ambient_strength;
+    }
+    #endif
+
     return inscattering;
 }
 

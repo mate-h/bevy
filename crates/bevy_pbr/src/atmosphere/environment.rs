@@ -356,7 +356,12 @@ pub fn init_atmosphere_probe_pipeline(
         label: Some("environment_pipeline_clouds".into()),
         layout: vec![layouts.environment_clouds.clone()],
         shader: load_embedded_asset!(asset_server.as_ref(), "environment.wgsl"),
-        shader_defs: vec!["CLOUDS_ENABLED".into()],
+        // Probes are too low-resolution to resolve the secondary self-shadow march,
+        // so they always use the cheap shadow-map path.
+        shader_defs: vec![
+            "CLOUDS_ENABLED".into(),
+            "CLOUD_SELF_SHADOW_CHEAP".into(),
+        ],
         ..default()
     });
 

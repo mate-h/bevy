@@ -435,6 +435,25 @@ pub struct AtmosphereSettings {
     /// When the sun moves more than this angle, temporal accumulation is reset
     /// to avoid ghosting. Unreal uses 10°.
     pub cloud_shadow_temporal_light_rotation_cut_deg: f32,
+
+    /// Self-shadow clouds with a secondary ray march toward the sun instead of
+    /// sampling the cloud shadow map.
+    ///
+    /// The secondary march captures fine self-shadowed detail the shadow map's
+    /// linear approximation washes out, at the cost of
+    /// [`cloud_self_shadow_steps`](Self::cloud_self_shadow_steps) extra density
+    /// samples per raymarch step. Distant occlusion beyond
+    /// [`cloud_self_shadow_distance`](Self::cloud_self_shadow_distance) still
+    /// comes from the shadow map, which also keeps serving air shadowing,
+    /// ground luminance and environment probes.
+    pub cloud_self_shadow_raymarch: bool,
+
+    /// Number of samples for the secondary self-shadow ray march.
+    pub cloud_self_shadow_steps: u32,
+
+    /// Length of the secondary self-shadow ray march in meters. Occlusion past
+    /// this distance is taken from the cloud shadow map.
+    pub cloud_self_shadow_distance: f32,
 }
 
 impl Default for AtmosphereSettings {
@@ -462,6 +481,9 @@ impl Default for AtmosphereSettings {
             cloud_shadow_temporal_enabled: false,
             cloud_shadow_temporal_alpha: 0.15,
             cloud_shadow_temporal_light_rotation_cut_deg: 10.0,
+            cloud_self_shadow_raymarch: true,
+            cloud_self_shadow_steps: 6,
+            cloud_self_shadow_distance: 6_000.0,
         }
     }
 }
@@ -489,6 +511,9 @@ pub struct GpuAtmosphereSettings {
     pub cloud_shadow_temporal_enabled: u32,
     pub cloud_shadow_temporal_alpha: f32,
     pub cloud_shadow_temporal_light_rotation_cut_deg: f32,
+    pub cloud_self_shadow_raymarch: u32,
+    pub cloud_self_shadow_steps: u32,
+    pub cloud_self_shadow_distance: f32,
 }
 
 impl Default for GpuAtmosphereSettings {
@@ -522,6 +547,9 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             cloud_shadow_temporal_alpha: s.cloud_shadow_temporal_alpha,
             cloud_shadow_temporal_light_rotation_cut_deg: s
                 .cloud_shadow_temporal_light_rotation_cut_deg,
+            cloud_self_shadow_raymarch: s.cloud_self_shadow_raymarch as u32,
+            cloud_self_shadow_steps: s.cloud_self_shadow_steps,
+            cloud_self_shadow_distance: s.cloud_self_shadow_distance,
         }
     }
 }
@@ -636,6 +664,14 @@ pub struct CloudLayer {
     /// Multiple-scattering octave attenuation for phase eccentricity (`c` in Wrenninge et al.).
     pub multiscatter_phase: f32,
 
+    /// Number of multiple-scattering octaves (`N` in Wrenninge et al.), clamped to [1, 8].
+    ///
+    /// Each octave `n` scatters with extinction attenuated by
+    /// [`multiscatter_extinction`](Self::multiscatter_extinction)`^n`, letting light
+    /// punch deeper into the cloud. Frostbite ships 2-3; higher values brighten
+    /// cloud interiors (important at high optical depths and low sun angles).
+    pub multiscatter_octaves: u32,
+
     /// Strength of the powder ("dark edges") term in [0, 1].
     pub powder_strength: f32,
 
@@ -670,6 +706,7 @@ impl Default for CloudLayer {
             multiscatter_scatter: 0.5,
             multiscatter_extinction: 0.5,
             multiscatter_phase: 0.5,
+            multiscatter_octaves: 3,
             powder_strength: 1.0,
             ambient_strength: 1.0,
             noise_offset: Vec3::ZERO,

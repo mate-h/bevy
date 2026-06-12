@@ -153,8 +153,8 @@ impl Default for FreeCamera {
             axis_top: KeyCode::Numpad7,
             axis_right: KeyCode::Numpad3,
             axis_front: KeyCode::Numpad1,
-            walk_speed: 5.0,
-            run_speed: 15.0,
+            walk_speed: 500.0,
+            run_speed: 1500.0,
             // Approximation of ln(1.05)
             scroll_factor: 0.04879016,
             friction: 40.0,

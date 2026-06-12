@@ -135,6 +135,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_t_km = max_t * 0.001;
 
     // Intersect the ray with the cloud layer shell and clamp to our light volume depth.
+    // March only up to the *first* shell exit (seg.w): the map stores a single front
+    // depth + mean extinction, so spreading the fixed step budget over the below-layer
+    // gap and a possible distant re-entry would only dilute its resolution.
     let seg = cloud_layer_segment(ray_origin, trace_dir);
     if (seg.z < 0.5) {
         textureStore(out_cloud_shadow_map, vec2<i32>(gid.xy), vec4(max_t_km, 0.0, 0.0, 0.0));
@@ -142,7 +145,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let t_start = max(0.0, seg.x);
-    let t_end = min(seg.y, max_t);
+    let t_end = min(seg.w, max_t);
     if (t_end <= t_start) {
         textureStore(out_cloud_shadow_map, vec2<i32>(gid.xy), vec4(max_t_km, 0.0, 0.0, 0.0));
         return;
