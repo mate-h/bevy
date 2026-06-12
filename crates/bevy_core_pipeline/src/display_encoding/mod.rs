@@ -216,7 +216,7 @@ fn encoder_input_gamut(
 /// produce out-of-gamut (negative-component) colors, i.e. whether the source
 /// gamut is strictly wider than the display gamut
 /// (Rec.2020 ⊃ Display P3 ⊃ Rec.709).
-const fn is_gamut_contraction(source: DisplayGamut, display: DisplayGamut) -> bool {
+pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayGamut) -> bool {
     const fn coverage_rank(gamut: DisplayGamut) -> u8 {
         match gamut {
             DisplayGamut::Rec709 => 0,

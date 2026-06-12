@@ -7,7 +7,7 @@
 )]
 
 pub mod blit;
-mod camera_stack;
+pub mod camera_stack;
 pub mod core_2d;
 pub mod core_3d;
 pub mod deferred;
@@ -32,8 +32,8 @@ use crate::schedule::{
     camera_driver, handle_uncovered_swap_chains, submit_pending_command_buffers,
 };
 use crate::{
-    blit::BlitPlugin, core_2d::Core2dPlugin, core_3d::Core3dPlugin,
-    deferred::copy_lighting_id::CopyDeferredLightingIdPlugin,
+    blit::BlitPlugin, camera_stack::CameraStackPlugin, core_2d::Core2dPlugin,
+    core_3d::Core3dPlugin, deferred::copy_lighting_id::CopyDeferredLightingIdPlugin,
     display_encoding::DisplayEncodingPlugin, mip_generation::MipGenerationPlugin,
     prepass::BackgroundMotionVectorsPlugin, tonemapping::TonemappingPlugin,
     upscaling::UpscalingPlugin,
@@ -54,6 +54,7 @@ impl Plugin for CorePipelinePlugin {
         app.add_plugins((Core2dPlugin, Core3dPlugin, CopyDeferredLightingIdPlugin))
             .add_plugins((
                 BlitPlugin,
+                CameraStackPlugin,
                 TonemappingPlugin,
                 DisplayEncodingPlugin,
                 UpscalingPlugin,
