@@ -344,7 +344,7 @@ pub(crate) fn resolve_view_display_target(
 /// fresh — so later prepare systems (pipeline specialization, uniform
 /// preparation) can rely on the component being present.
 ///
-/// Resolution policy ([`resolve_view_display_target`]):
+/// Resolution policy (`resolve_view_display_target`):
 /// - **Window targets** go through surface negotiation; see
 ///   `resolve_window_display_target` (this module) for how the surface's
 ///   resolved transfer maps onto the requested target.

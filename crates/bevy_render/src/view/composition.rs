@@ -11,7 +11,7 @@
 //!
 //! Phase-1 groups are a superset of the phase-2 texture groups in
 //! `bevy_core_pipeline`: equal main-texture ids imply equal
-//! [`MainTextureKey`]s (`prepare_view_targets` dedups allocations on exactly
+//! `MainTextureKey`s (`prepare_view_targets` dedups allocations on exactly
 //! that key), so phase-2 groups never span phase-1 groups, and a shape
 //! divergence between the phases can only produce per-view resolution plus
 //! warnings, never a cross-group mismatch.
@@ -285,8 +285,8 @@ fn resolve_per_view<K>(
 /// Groups views by the shared-main-texture key and orders each group by
 /// `sorted_camera_index_for_target`, so it runs in
 /// [`RenderSystems::CreateViews`](crate::RenderSystems::CreateViews) after
-/// `sort_cameras`. The resolution rules live on [`resolve_spaces`],
-/// [`resolve_stack`], and [`resolve_per_view`]; this system feeds them and
+/// `sort_cameras`. The resolution rules live on `resolve_spaces`,
+/// `resolve_stack`, and `resolve_per_view`; this system feeds them and
 /// reports their diagnostics as `warn_once`s.
 ///
 /// The `Has<Camera2d>` term reads the render-world marker that

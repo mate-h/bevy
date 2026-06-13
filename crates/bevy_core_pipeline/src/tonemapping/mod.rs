@@ -279,7 +279,7 @@ impl Tonemapping {
 /// Render-world marker component: the view's white-balance matrix
 /// ([`ColorGradingUniform::balance`](bevy_render::view::ColorGradingUniform))
 /// is composed with an additional correction on the GPU, outside of the
-/// static [`ColorGrading`](bevy_render::view::ColorGrading) temperature/tint
+/// static [`ColorGrading`] temperature/tint
 /// values.
 ///
 /// The tonemapping pass normally enables its `WHITE_BALANCE` shader def only

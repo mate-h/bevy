@@ -201,7 +201,7 @@ pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayG
 /// gamut conversion to the resolved display primaries, paper-white luminance
 /// scaling, and the resolved transfer encoding. This is the CPU mirror of
 /// what the display-encoding pass ([`display_encoding.wgsl`]) does to rendered
-/// pixels, applied to the [`LoadOp::Clear`](bevy_render::render_resource::LoadOp::Clear)
+/// pixels, applied to the [`LoadOp::Clear`]
 /// value of the out texture so a finalizer's clear matches the encoded pixels
 /// it composites over (a viewport/letterboxed region no blit covers would
 /// otherwise present raw display-linear values as HDR signal).
@@ -209,12 +209,12 @@ pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayG
 /// The gamut stage follows from the resolved transfer (the coercion contract
 /// fixes the gamut per transfer): for [`DisplayTransfer::ScRgbLinear`] the
 /// gamut is Rec.709 (identity), so each channel is just
-/// [`scrgb_encode`](bevy_render::transfer_functions::scrgb_encode); for
+/// [`scrgb_encode`]; for
 /// [`DisplayTransfer::Pq`] the gamut is Rec.2020, so the RGB triple is first
-/// transformed through [`REC709_TO_REC2020`](bevy_render::working_color_space::REC709_TO_REC2020),
+/// transformed through [`REC709_TO_REC2020`],
 /// then each channel is clamped non-negative, scaled to absolute nits, and
 /// run through
-/// [`pq_inverse_eotf_from_nits`](bevy_render::transfer_functions::pq_inverse_eotf_from_nits).
+/// [`pq_inverse_eotf_from_nits`].
 /// Alpha passes through unchanged for the alpha-blended upscale path.
 ///
 /// `paper_white_nits` must be
