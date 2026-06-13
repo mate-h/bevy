@@ -18,7 +18,18 @@
 //! no consumer re-derives stack shape, deferral, buffer space, or encoder
 //! inputs on its own.
 //!
+//! The main-texture ping-pong persists across frames, so a stack whose first
+//! camera uses [`ClearColorConfig::None`] starts each frame from last frame's
+//! tone-mapped (and, on an HDR target, display-encoded) output and reprocesses
+//! it. Feedback/trail effects built that way drift over time; the resolver
+//! reports it as a diagnostic but does not change the behavior. Stable
+//! feedback accumulation needs [`Tonemapping::None`] on an SDR target so the
+//! main buffer stays scene-referred across frames. Keeping a scene-referred
+//! main buffer alongside a separate presentation chain is the follow-up
+//! posture.
+//!
 //! [`ClearColorConfig::None`]: bevy_camera::ClearColorConfig
+//! [`Tonemapping::None`]: crate::tonemapping::Tonemapping::None
 
 use bevy_app::{App, Plugin};
 use bevy_camera::{CameraOutputMode, ClearColorConfig, CompositingSpace};
@@ -262,6 +273,11 @@ pub(crate) struct ContractDiagnostics {
     /// A fullscreen `ClearColorConfig::None` member blits over regions whose
     /// passes ran per camera below it (double-processed presentation).
     pub fullscreen_blit_over_per_camera_passes: bool,
+    /// The stack's first member loads the previous buffer contents
+    /// (`ClearColorConfig::None`) while the stack runs a tonemapping or
+    /// display-encoding pass, so each frame reprocesses last frame's
+    /// already-processed output (feedback apps drift).
+    pub frame_start_loads_processed_output: bool,
     /// This deferred member's operator differs from its finalizer's.
     pub operator_mismatch: bool,
     /// This deferred member's grading/params/dither fingerprint differs from
@@ -395,6 +411,17 @@ fn resolve_group<K: Copy + Eq + Hash>(
 
     let encode_without_tonemap = encode_enabled_group && !stack_tonemaps;
 
+    // The ping-pong main texture persists across frames, so a stack whose
+    // first member loads the previous buffer (`ClearColorConfig::None`)
+    // starts the frame from last frame's tone-mapped (and, on HDR,
+    // display-encoded) output and reprocesses it. Feedback/trail apps that
+    // depend on this drift; the diagnostic only fires when a pass actually
+    // runs over the group (a stack that neither tone-maps nor encodes leaves
+    // the buffer scene-referred and accumulates stably).
+    let frame_start_loads_processed_output =
+        members.first().is_some_and(|first| first.loads_previous)
+            && (stack_tonemaps || encode_enabled_group);
+
     // A member is shape-breaking when its output does not composite over the
     // whole target: any viewport member, or a clearing member that is not
     // the group's first (the first member is expected to clear; viewport-ness
@@ -493,6 +520,7 @@ fn resolve_group<K: Copy + Eq + Hash>(
                     coherence_cancelled,
                     encode_without_tonemap,
                     fullscreen_blit_over_per_camera_passes,
+                    frame_start_loads_processed_output,
                     operator_mismatch,
                     aux_mismatch,
                 },
@@ -775,6 +803,16 @@ fn emit_contract_diagnostics(
             or clearing cameras whose tone-mapping or display-encoding passes run per \
             camera; its full-target blit re-presents their already-processed pixels \
             (double-processed). Give the overlay camera its own render target."
+        );
+    }
+    if diagnostics.frame_start_loads_processed_output {
+        warn_once!(
+            "The first camera rendering to a target uses `ClearColorConfig::None` while \
+            its stack runs a tone-mapping or display-encoding pass. The main texture \
+            persists across frames, so each frame starts from last frame's tone-mapped \
+            (and, on an HDR target, display-encoded) output and reprocesses it; \
+            feedback/trail effects built this way drift over time. Stable feedback \
+            accumulation needs `Tonemapping::None` on an SDR target."
         );
     }
     if diagnostics.operator_mismatch
@@ -1173,7 +1211,11 @@ mod contract_tests {
     // gamuts, silently.
     #[test]
     fn viewport_splitscreen_keeps_per_camera_passes() {
+        // The first split-screen camera establishes the frame by clearing its
+        // target; a `ClearColorConfig::None` first member would instead load
+        // last frame's processed output and trip the frame-start diagnostic.
         let mut left = viewport(1, 0);
+        left.loads_previous = false;
         left.tonemap_output_gamut = DisplayGamut::Rec709;
         let mut right = viewport(2, 1);
         right.tonemap_output_gamut = DisplayGamut::Rec2020;
@@ -1375,6 +1417,44 @@ mod contract_tests {
             assert_eq!(output(&outputs, raw).source_gamut, DisplayGamut::Rec709);
         }
         assert_eq!(output(&outputs, 3).encode, StackRole::Finalizer);
+    }
+
+    // E14: a solo camera that loads the previous buffer
+    // (`ClearColorConfig::None`) while running a tone-mapping pass reprocesses
+    // last frame's output every frame; the diagnostic fires.
+    #[test]
+    fn frame_start_load_with_tonemapping_is_flagged() {
+        let outputs = resolve_contracts(vec![compositing(1, 0)]);
+        let solo = output(&outputs, 1);
+        assert!(solo.diagnostics.frame_start_loads_processed_output);
+    }
+
+    // The same load-previous solo camera with display encoding (HDR target)
+    // but no tone-mapping pass still reprocesses last frame's encoded output.
+    #[test]
+    fn frame_start_load_with_encode_only_is_flagged() {
+        let outputs = resolve_contracts(vec![passthrough_hdr(compositing(1, 0))]);
+        let solo = output(&outputs, 1);
+        assert!(solo.diagnostics.frame_start_loads_processed_output);
+    }
+
+    // E14 negative: a solo camera that CLEARS its target starts each frame
+    // fresh, so the diagnostic stays quiet even with tone mapping enabled.
+    #[test]
+    fn clearing_solo_camera_does_not_flag_frame_start_load() {
+        let outputs = resolve_contracts(vec![clearing(1, 0)]);
+        let solo = output(&outputs, 1);
+        assert!(!solo.diagnostics.frame_start_loads_processed_output);
+    }
+
+    // A load-previous stack that neither tone-maps nor encodes leaves the
+    // buffer scene-referred, so feedback accumulates stably and the
+    // diagnostic stays quiet.
+    #[test]
+    fn frame_start_load_without_passes_is_silent() {
+        let outputs = resolve_contracts(vec![disabled(compositing(1, 0))]);
+        let solo = output(&outputs, 1);
+        assert!(!solo.diagnostics.frame_start_loads_processed_output);
     }
 
     // Views on different textures resolve independently.

@@ -160,6 +160,14 @@ pub struct TonemappingPipeline {
 }
 
 /// Optionally enables a tonemapping shader that attempts to map linear input stimulus into a perceptually uniform image for a given [`Camera`] entity.
+///
+/// Feedback and trail effects that load the previous frame's buffer (a camera
+/// with `ClearColorConfig::None` at the bottom of its stack) are only stable
+/// with [`Tonemapping::None`] on an SDR target. Any other operator (or an HDR
+/// target) reprocesses last frame's already tone-mapped and display-encoded
+/// output each frame, so the accumulated image drifts over time. See the
+/// camera-stack resolver (`bevy_core_pipeline::camera_stack`), which reports
+/// this configuration as a diagnostic.
 #[derive(
     Component, Debug, Hash, Clone, Copy, Reflect, Default, ExtractComponent, PartialEq, Eq,
 )]
