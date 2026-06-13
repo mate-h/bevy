@@ -1,12 +1,11 @@
 use crate::blit::{BlitPipeline, BlitPipelineKey};
+use crate::camera_stack::ViewStackContract;
 use bevy_app::prelude::*;
-use bevy_camera::CameraOutputMode;
+use bevy_camera::{CameraOutputMode, CompositingSpace};
 use bevy_ecs::prelude::*;
 use bevy_render::{
-    camera::ExtractedCamera,
-    render_resource::*,
-    view::{ViewDisplayTarget, ViewTarget},
-    Render, RenderApp, RenderStartup, RenderSystems,
+    camera::ExtractedCamera, render_resource::*, view::ViewTarget, Render, RenderApp,
+    RenderStartup, RenderSystems,
 };
 
 mod node;
@@ -47,6 +46,29 @@ fn clear_view_upscaling_pipelines(
     }
 }
 
+/// The compositing space the upscaling blit decodes from, derived from the
+/// view's [`ViewStackContract`].
+///
+/// When the display-encoding pass runs for the view's stack (the contract
+/// carries resolved encode parameters), the main texture holds an
+/// already-encoded signal (scRGB-linear or PQ): the blit must pass it through
+/// unchanged, and any compositing-space decode was already performed by the
+/// encoder. The blit and the encoder read the same contract field, so the two
+/// can never disagree. Encode parameters only resolve when surface selection
+/// actually negotiated a non-sRGB-view surface (e.g. `Rgba16Float` for
+/// scRGB-linear), where no hardware sRGB encode happens on store: the encoded
+/// signal reaches the display unchanged. Downgraded requests resolve to plain
+/// SDR (no encode parameters) and keep the normal
+/// decode-and-hardware-encode path.
+fn blit_source_space(contract: Option<&ViewStackContract>) -> Option<CompositingSpace> {
+    let contract = contract?;
+    if contract.encoding.is_some() {
+        None
+    } else {
+        contract.compositing_space
+    }
+}
+
 fn prepare_view_upscaling_pipelines(
     mut commands: Commands,
     mut pipeline_cache: ResMut<PipelineCache>,
@@ -57,10 +79,10 @@ fn prepare_view_upscaling_pipelines(
         &ViewTarget,
         Option<&ExtractedCamera>,
         Option<&ViewUpscalingPipeline>,
-        Option<&ViewDisplayTarget>,
+        Option<&ViewStackContract>,
     )>,
 ) {
-    for (entity, view_target, camera, maybe_pipeline, display_target) in view_targets.iter() {
+    for (entity, view_target, camera, maybe_pipeline, contract) in view_targets.iter() {
         let blend_state = if let Some(extracted_camera) = camera {
             match extracted_camera.output_mode {
                 CameraOutputMode::Skip => None,
@@ -89,25 +111,7 @@ fn prepare_view_upscaling_pipelines(
             continue;
         };
 
-        // When the display-encoding pass ran for this view (its resolved
-        // display target requests an HDR transfer), the main texture holds an
-        // already-encoded signal (scRGB-linear or PQ): the blit must pass it
-        // through unchanged, and any compositing-space decode was already
-        // performed by the encoder. The same predicate
-        // (`ViewDisplayTarget::is_hdr_transfer`) gates the encoding pass in
-        // `prepare_view_display_encoding_pipelines`, so the two can never
-        // disagree. Because the predicate reads the *resolved* transfer,
-        // it is only true when surface selection actually negotiated a
-        // non-sRGB-view surface (e.g. `Rgba16Float` for scRGB-linear), where
-        // `target_format` is the float surface format and no hardware sRGB
-        // encode happens on store: the encoded signal reaches the display
-        // unchanged. Downgraded requests resolve to plain SDR and keep the
-        // normal decode-and-hardware-encode path.
-        let source_space = if display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer) {
-            None
-        } else {
-            view_target.compositing_space
-        };
+        let source_space = blit_source_space(contract);
 
         let key = BlitPipelineKey {
             target_format,
@@ -127,5 +131,82 @@ fn prepare_view_upscaling_pipelines(
                 .entity(entity)
                 .insert(ViewUpscalingPipeline(pipeline, key));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::camera_stack::{BlitDisposition, ResolvedEncoding, StackRole};
+    use crate::display_encoding::OutOfGamutHandling;
+    use bevy_window::{DisplayGamut, DisplayTransfer};
+
+    /// A solo SDR view's contract: no encode parameters, no resolved space.
+    fn sdr_contract(compositing_space: Option<CompositingSpace>) -> ViewStackContract {
+        ViewStackContract {
+            tonemap: StackRole::Solo,
+            encode: StackRole::Solo,
+            blit: BlitDisposition::Run {
+                force_replace: false,
+            },
+            compositing_space,
+            source_gamut: DisplayGamut::Rec709,
+            encoding: None,
+            stack_tonemaps: true,
+        }
+    }
+
+    /// Key-derivation: a solo default camera blits with no source-space
+    /// decode — byte-identical to a hand-constructed key with
+    /// `source_space: None`.
+    #[test]
+    fn solo_sdr_default_keys_no_source_space() {
+        let contract = sdr_contract(None);
+        let key = BlitPipelineKey {
+            target_format: TextureFormat::Bgra8UnormSrgb,
+            blend_state: None,
+            samples: 1,
+            source_space: blit_source_space(Some(&contract)),
+        };
+        let expected = BlitPipelineKey {
+            target_format: TextureFormat::Bgra8UnormSrgb,
+            blend_state: None,
+            samples: 1,
+            source_space: None,
+        };
+        assert!(key == expected);
+    }
+
+    /// Key-derivation: an SDR view with a resolved space keys the blit's
+    /// decode for exactly that space.
+    #[test]
+    fn resolved_space_keys_the_blit_decode_on_sdr() {
+        assert_eq!(
+            blit_source_space(Some(&sdr_contract(Some(CompositingSpace::Oklab)))),
+            Some(CompositingSpace::Oklab)
+        );
+        assert_eq!(
+            blit_source_space(Some(&sdr_contract(Some(CompositingSpace::Srgb)))),
+            Some(CompositingSpace::Srgb)
+        );
+    }
+
+    /// When the stack resolves encode parameters, the encoder performs the
+    /// decode and the blit passes the encoded signal through unchanged.
+    #[test]
+    fn encoded_views_blit_without_decode() {
+        let mut contract = sdr_contract(Some(CompositingSpace::Srgb));
+        contract.encoding = Some(ResolvedEncoding {
+            transfer: DisplayTransfer::Pq,
+            gamut: DisplayGamut::Rec2020,
+            out_of_gamut: OutOfGamutHandling::Clip,
+        });
+        assert_eq!(blit_source_space(Some(&contract)), None);
+    }
+
+    /// Views without a contract blit with no decode.
+    #[test]
+    fn missing_contract_blits_without_decode() {
+        assert_eq!(blit_source_space(None), None);
     }
 }

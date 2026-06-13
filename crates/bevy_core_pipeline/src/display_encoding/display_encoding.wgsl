@@ -165,9 +165,9 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // receive a Rec.2020 → Rec.709 conversion at the pass entry), EXCEPT
     // `Tonemapping::GranTurismo7` on an HDR-transfer target, which emits its
     // native linear Rec.2020 (the `TONEMAP_OUTPUT_REC2020` path in
-    // gt7.wgsl). The prepare system resolves the per-view source gamut from
-    // the same predicate (`encoder_input_gamut` / `tonemap_output_gamut`)
-    // and keys exactly one of the defs below — or none for the identity
+    // gt7.wgsl). The stack contract resolver derives the per-view source
+    // gamut from the same predicate (`tonemap_output_gamut`) and prepare
+    // keys exactly one of the defs below — or none for the identity
     // stages (Rec.709 → scRGB, Rec.2020 → PQ/Rec.2020).
 #ifdef DISPLAY_GAMUT_REC2020
     rgb = REC_709_TO_REC_2020 * rgb;
@@ -177,7 +177,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Rec.709-coordinate scRGB signal): can produce out-of-gamut (negative)
     // components, for which prepare keys in the out-of-gamut compression
     // below (`DISPLAY_GAMUT_COMPRESSION`; see `DisplayGamutCompression` and
-    // `encoder_input_gamut` in mod.rs).
+    // `is_gamut_contraction` in mod.rs).
     rgb = REC_2020_TO_REC_709 * rgb;
 #endif
 

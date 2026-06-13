@@ -2,7 +2,7 @@ use bevy_app::prelude::*;
 use bevy_asset::{
     embedded_asset, load_embedded_asset, AssetServer, Assets, Handle, RenderAssetUsages,
 };
-use bevy_camera::{Camera, ClearColorConfig, CompositingSpace, TonemappingEnabled};
+use bevy_camera::{Camera, CompositingSpace, TonemappingEnabled};
 use bevy_ecs::prelude::*;
 use bevy_image::{CompressedImageFormats, Image, ImageSampler, ImageType};
 #[cfg(not(feature = "tonemapping_luts"))]
@@ -10,7 +10,6 @@ use bevy_log::error;
 use bevy_log::warn_once;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
-    camera::ExtractedCamera,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
@@ -20,7 +19,10 @@ use bevy_render::{
     },
     renderer::RenderDevice,
     texture::{FallbackImage, GpuImage},
-    view::{DisplayTargetUniform, ExtractedView, ViewDisplayTarget, ViewTarget, ViewUniform},
+    view::{
+        ColorGrading, DisplayTargetUniform, ExtractedView, ViewDisplayTarget, ViewTarget,
+        ViewUniform,
+    },
     working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
@@ -41,7 +43,7 @@ pub use gt7::{
 pub use node::tonemapping;
 
 use crate::{
-    camera_stack::{stack_deferred_views, StackView},
+    camera_stack::{StackRole, ViewStackContract},
     FullscreenShader,
 };
 
@@ -781,15 +783,19 @@ pub fn gt7_params_uniform_active(
 /// operators receive a Rec.2020 → Rec.709 conversion at the pass entry under
 /// the Rec.2020 working space; see `tonemapping_shared.wgsl`).
 ///
-/// This function is the **single source of truth** for that predicate:
-/// `prepare_view_tonemapping_pipelines` (the def push) and the display
-/// encoder's `prepare_view_display_encoding_pipelines` (via
-/// `encoder_input_gamut`) both derive from it, reading the same extracted
-/// [`Tonemapping`] component and the same [`ViewDisplayTarget`] prepared in
-/// `PrepareViews`, so the two pipelines can never disagree about the
-/// post-tonemap buffer's primaries within a frame. Pass the view's
-/// **authored** operator; the substitution is applied internally so both
-/// callers stay in lockstep with the pipeline that actually runs.
+/// This function is the **single source of truth** for that predicate. It
+/// has exactly two callers: `prepare_view_tonemapping_pipelines` (the def
+/// push, keyed off the view's own authored operator) and the phase-2 stack
+/// resolver
+/// (`resolve_camera_stack_contracts`), which derives the display encoder's
+/// per-view source gamut
+/// ([`ViewStackContract::source_gamut`](crate::camera_stack::ViewStackContract))
+/// from it. Both read the same extracted [`Tonemapping`] component and the
+/// same [`ViewDisplayTarget`] prepared in `PrepareViews`, so the tonemapping
+/// and display-encoding pipelines can never disagree about the post-tonemap
+/// buffer's primaries within a frame. Pass the view's **authored** operator;
+/// the substitution is applied internally so all callers stay in lockstep
+/// with the pipeline that actually runs.
 ///
 /// A missing [`ViewDisplayTarget`] is treated as the plain SDR default
 /// (matching the component's documented fallback), and a missing or
@@ -808,47 +814,128 @@ pub fn tonemap_output_gamut(
     }
 }
 
+/// Derives a view's [`TonemappingPipelineKeyFlags`] from its color grading,
+/// resolved compositing space (the phase-1 value carried on the view's
+/// `ViewStackContract`), authored operator, and resolved display target.
+///
+/// `compositing_space` must be the RESOLVED space, never the camera's raw
+/// request: stack members share one main texture, so the decode / re-encode
+/// flags must match the one space the whole stack composites in.
+fn tonemapping_key_flags(
+    color_grading: &ColorGrading,
+    external_white_balance: bool,
+    compositing_space: Option<CompositingSpace>,
+    requested_tonemapping: Tonemapping,
+    view_display_target: Option<&ViewDisplayTarget>,
+    has_gt7_params: bool,
+) -> TonemappingPipelineKeyFlags {
+    // As an optimization, we omit parts of the shader that are unneeded.
+    let mut flags = TonemappingPipelineKeyFlags::empty();
+    flags.set(
+        TonemappingPipelineKeyFlags::HUE_ROTATE,
+        color_grading.global.hue != 0.0,
+    );
+    // The white-balance path is also kept compiled in when a GPU-side
+    // producer (e.g. auto white balance) composes into the view's balance
+    // matrix; see [`ExternalWhiteBalance`].
+    flags.set(
+        TonemappingPipelineKeyFlags::WHITE_BALANCE,
+        color_grading.global.temperature != 0.0
+            || color_grading.global.tint != 0.0
+            || external_white_balance,
+    );
+    flags.set(
+        TonemappingPipelineKeyFlags::SECTIONAL_COLOR_GRADING,
+        color_grading
+            .all_sections()
+            .any(|section| *section != default()),
+    );
+
+    // Views compositing in an encoded space need the pass to decode /
+    // re-encode around the operator (see the flag docs). Scene-linear
+    // views (`CompositingSpace::Linear` or no component) set neither
+    // flag, so they all share one key with no compositing-space flags.
+    flags.set(
+        TonemappingPipelineKeyFlags::SRGB_COMPOSITING,
+        compositing_space == Some(CompositingSpace::Srgb),
+    );
+    flags.set(
+        TonemappingPipelineKeyFlags::OKLAB_COMPOSITING,
+        compositing_space == Some(CompositingSpace::Oklab),
+    );
+
+    // The GT7 params uniform is active exactly when the effective
+    // operator is GT7 and either the camera opted in with a
+    // `GranTurismo7Params` component or the view renders to an
+    // HDR-transfer target — GT7's HDR mode is selected inside the
+    // prepared uniform (`prepare_gt7_params_uniforms` uses the same
+    // shared predicate).
+    let gt7_uniform_active = gt7_params_uniform_active(
+        effective_tonemapping(Some(&requested_tonemapping), view_display_target),
+        has_gt7_params,
+        view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
+    );
+    // The display-target uniform is bound for views whose resolved
+    // display target is not the plain SDR default, and whenever an
+    // operator needs it (currently: the GT7 params uniform path, which
+    // keeps binding 5 occupied so the params binding index is stable).
+    // Views on default SDR targets push neither flag, so all plain-SDR
+    // views share one pipeline key, layout, and shader with no
+    // display-target bindings.
+    let display_target_uniform_active = gt7_uniform_active
+        || view_display_target
+            .is_some_and(|view_display_target| !view_display_target.is_plain_sdr_srgb());
+    flags.set(
+        TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM,
+        display_target_uniform_active,
+    );
+    flags.set(
+        TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM,
+        gt7_uniform_active,
+    );
+    // GT7 on an HDR-transfer target (authored or substituted) emits
+    // its native Rec.2020 output for the display encoder. This def stays
+    // keyed off the view's OWN authored operator — it describes what THIS
+    // view's pass emits. `tonemap_output_gamut` is the single source of
+    // truth shared with the phase-2 stack resolver, which derives the
+    // encoder's source gamut from the same function, so def push and
+    // encoder key agree whenever the view is its own encode source.
+    flags.set(
+        TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020,
+        tonemap_output_gamut(Some(&requested_tonemapping), view_display_target)
+            == DisplayGamut::Rec2020,
+    );
+    flags
+}
+
 pub fn prepare_view_tonemapping_pipelines(
     mut commands: Commands,
     mut pipeline_cache: ResMut<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<TonemappingPipeline>>,
     upscaling_pipeline: Res<TonemappingPipeline>,
-    view_targets: Query<(
-        Entity,
-        &ExtractedView,
-        &ViewTarget,
-        Option<&ExtractedCamera>,
-        Option<&Tonemapping>,
-        Option<&DebandDither>,
-        Option<&ViewDisplayTarget>,
-        Option<&GranTurismo7Params>,
-        Has<ExternalWhiteBalance>,
-    )>,
+    view_targets: Query<
+        (
+            Entity,
+            &ExtractedView,
+            &ViewStackContract,
+            Option<&Tonemapping>,
+            Option<&DebandDither>,
+            Option<&ViewDisplayTarget>,
+            Option<&GranTurismo7Params>,
+            Has<ExternalWhiteBalance>,
+        ),
+        // `ViewStackContract` is overwritten in place and never removed, so a
+        // view whose `ViewTarget` was dropped keeps a stale contract. This
+        // filter is the liveness gate that makes stale contracts unreachable;
+        // it must stay even though no `ViewTarget` field is read here.
+        With<ViewTarget>,
+    >,
     working_color_space: Res<WorkingColorSpace>,
 ) {
-    // Cameras stacked on a shared main texture tone-map once, on the last
-    // camera with an active operator, so the earlier cameras' pixels are not
-    // tone-mapped a second time when the later camera's fullscreen pass runs
-    // over the composed buffer.
-    let deferred = stack_deferred_views(view_targets.iter().filter_map(
-        |(entity, _, view_target, camera, tonemapping, _, view_display_target, ..)| {
-            let camera = camera?;
-            Some(StackView {
-                entity,
-                texture: view_target.main_texture().id(),
-                sorted_index: camera.sorted_camera_index_for_target,
-                enabled: effective_tonemapping(tonemapping, view_display_target).is_enabled(),
-                composites_fullscreen: matches!(camera.clear_color, ClearColorConfig::None)
-                    && camera.viewport.is_none(),
-            })
-        },
-    ));
-
     for (
         entity,
         view,
-        view_target,
-        _,
+        contract,
         tonemapping,
         dither,
         view_display_target,
@@ -856,24 +943,14 @@ pub fn prepare_view_tonemapping_pipelines(
         external_white_balance,
     ) in view_targets.iter()
     {
-        if let Some(finalizer) = deferred.get(&entity) {
-            // Render-world entities are retained, so the component must be
-            // actively removed when a view newly joins a stack.
+        // Cameras stacked on a shared main texture tone-map once, on the
+        // stack's finalizer, so the earlier cameras' pixels are not
+        // tone-mapped a second time when the finalizer's fullscreen pass runs
+        // over the composed buffer. (Render-world entities are retained, so
+        // the component must be actively removed when a view newly joins a
+        // stack.)
+        if matches!(contract.tonemap, StackRole::Deferred(_)) {
             commands.entity(entity).remove::<ViewTonemappingPipeline>();
-            let own = effective_tonemapping(tonemapping, view_display_target);
-            let finalizing = view_targets.get(*finalizer).ok().map(
-                |(_, _, _, _, tonemapping, _, view_display_target, ..)| {
-                    effective_tonemapping(tonemapping, view_display_target)
-                },
-            );
-            if finalizing.is_some_and(|finalizing| finalizing != own) {
-                warn_once!(
-                    "Stacked cameras rendering to the same target use different tone-mapping \
-                    operators ({own:?} and {finalizing:?}). The stack is composed in scene-linear \
-                    space and tone-mapped once, by the last camera, so its operator applies to \
-                    the whole stack."
-                );
-            }
             continue;
         }
         let requested_tonemapping = *tonemapping.unwrap_or(&Tonemapping::None);
@@ -911,81 +988,13 @@ pub fn prepare_view_tonemapping_pipelines(
             );
         }
 
-        // As an optimization, we omit parts of the shader that are unneeded.
-        let mut flags = TonemappingPipelineKeyFlags::empty();
-        flags.set(
-            TonemappingPipelineKeyFlags::HUE_ROTATE,
-            view.color_grading.global.hue != 0.0,
-        );
-        // The white-balance path is also kept compiled in when a GPU-side
-        // producer (e.g. auto white balance) composes into the view's balance
-        // matrix; see [`ExternalWhiteBalance`].
-        flags.set(
-            TonemappingPipelineKeyFlags::WHITE_BALANCE,
-            view.color_grading.global.temperature != 0.0
-                || view.color_grading.global.tint != 0.0
-                || external_white_balance,
-        );
-        flags.set(
-            TonemappingPipelineKeyFlags::SECTIONAL_COLOR_GRADING,
-            view.color_grading
-                .all_sections()
-                .any(|section| *section != default()),
-        );
-
-        // Views compositing in an encoded space need the pass to decode /
-        // re-encode around the operator (see the flag docs). Scene-linear
-        // views (`CompositingSpace::Linear` or no component) set neither
-        // flag, so they all share one key with no compositing-space flags.
-        flags.set(
-            TonemappingPipelineKeyFlags::SRGB_COMPOSITING,
-            view_target.compositing_space == Some(CompositingSpace::Srgb),
-        );
-        flags.set(
-            TonemappingPipelineKeyFlags::OKLAB_COMPOSITING,
-            view_target.compositing_space == Some(CompositingSpace::Oklab),
-        );
-
-        // The GT7 params uniform is active exactly when the effective
-        // operator is GT7 and either the camera opted in with a
-        // `GranTurismo7Params` component or the view renders to an
-        // HDR-transfer target — GT7's HDR mode is selected inside the
-        // prepared uniform (`prepare_gt7_params_uniforms` uses the same
-        // shared predicate).
-        let gt7_uniform_active = gt7_params_uniform_active(
-            tonemapping,
+        let flags = tonemapping_key_flags(
+            &view.color_grading,
+            external_white_balance,
+            contract.compositing_space,
+            requested_tonemapping,
+            view_display_target,
             gt7_params.is_some(),
-            view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
-        );
-        // The display-target uniform is bound for views whose resolved
-        // display target is not the plain SDR default, and whenever an
-        // operator needs it (currently: the GT7 params uniform path, which
-        // keeps binding 5 occupied so the params binding index is stable).
-        // Views on default SDR targets push neither flag, so all plain-SDR
-        // views share one pipeline key, layout, and shader with no
-        // display-target bindings.
-        let display_target_uniform_active = gt7_uniform_active
-            || view_display_target
-                .is_some_and(|view_display_target| !view_display_target.is_plain_sdr_srgb());
-        flags.set(
-            TonemappingPipelineKeyFlags::DISPLAY_TARGET_UNIFORM,
-            display_target_uniform_active,
-        );
-        flags.set(
-            TonemappingPipelineKeyFlags::GT7_PARAMS_UNIFORM,
-            gt7_uniform_active,
-        );
-        // GT7 on an HDR-transfer target (authored or substituted) emits
-        // its native Rec.2020 output for the display encoder.
-        // `tonemap_output_gamut` is the single source of truth shared with
-        // the encoder's input-gamut contract (`encoder_input_gamut` in
-        // display_encoding); both read the same extracted/prepared components
-        // (and both pass the authored operator), so def push and encoder key
-        // always agree.
-        flags.set(
-            TonemappingPipelineKeyFlags::TONEMAP_OUTPUT_REC2020,
-            tonemap_output_gamut(Some(&requested_tonemapping), view_display_target)
-                == DisplayGamut::Rec2020,
         );
 
         let key = TonemappingPipelineKey {
@@ -1354,5 +1363,58 @@ mod tests {
             assert!(!gt7_params_uniform_active(operator, false, false));
             assert!(!gt7_params_uniform_active(operator, true, true));
         }
+    }
+
+    /// Key-derivation: a solo default camera (default grading, no resolved
+    /// compositing space, plain SDR target) keys an empty flag set, for any
+    /// authored operator — byte-identical to a hand-constructed empty value.
+    #[test]
+    fn solo_sdr_default_keys_empty_flags() {
+        for operator in ALL_OPERATORS {
+            for view_display_target in [None, Some(sdr_view_display_target())] {
+                let flags = tonemapping_key_flags(
+                    &ColorGrading::default(),
+                    false,
+                    None,
+                    operator,
+                    view_display_target.as_ref(),
+                    false,
+                );
+                assert_eq!(
+                    flags,
+                    TonemappingPipelineKeyFlags::empty(),
+                    "flags must be empty for {operator:?} on a plain SDR target"
+                );
+            }
+        }
+    }
+
+    /// Key-derivation: the resolved compositing space sets exactly the
+    /// matching decode / re-encode flag; `Some(Linear)` keys like no space.
+    #[test]
+    fn resolved_compositing_space_sets_exactly_its_flag() {
+        let flags_for = |space: Option<CompositingSpace>| {
+            tonemapping_key_flags(
+                &ColorGrading::default(),
+                false,
+                space,
+                Tonemapping::None,
+                Some(&sdr_view_display_target()),
+                false,
+            )
+        };
+        assert_eq!(
+            flags_for(Some(CompositingSpace::Oklab)),
+            TonemappingPipelineKeyFlags::OKLAB_COMPOSITING
+        );
+        assert_eq!(
+            flags_for(Some(CompositingSpace::Srgb)),
+            TonemappingPipelineKeyFlags::SRGB_COMPOSITING
+        );
+        assert_eq!(
+            flags_for(Some(CompositingSpace::Linear)),
+            TonemappingPipelineKeyFlags::empty()
+        );
+        assert_eq!(flags_for(None), TonemappingPipelineKeyFlags::empty());
     }
 }

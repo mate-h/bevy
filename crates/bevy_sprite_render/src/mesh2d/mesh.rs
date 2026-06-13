@@ -25,7 +25,6 @@ use bevy_ecs::{
 use bevy_math::{Affine3, Affine3Ext, Vec4};
 use bevy_mesh::{Mesh, Mesh2d, MeshAttributeCompressionFlags, MeshTag, MeshVertexBufferLayoutRef};
 use bevy_render::prelude::Msaa;
-use bevy_render::RenderSystems::PrepareAssets;
 use bevy_render::{
     batching::{
         gpu_preprocessing::IndirectParametersCpuMetadata,
@@ -45,8 +44,8 @@ use bevy_render::{
     renderer::RenderDevice,
     sync_world::{MainEntity, MainEntityHashMap},
     view::{
-        texture_format_from_code, texture_format_to_code, ExtractedView, ViewUniform,
-        ViewUniformOffset, ViewUniforms,
+        resolve_composition_spaces, texture_format_from_code, texture_format_to_code,
+        ExtractedView, ResolvedCompositionSpaces, ViewUniform, ViewUniformOffset, ViewUniforms,
     },
     Extract, ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
@@ -99,7 +98,14 @@ impl Plugin for Mesh2dRenderPlugin {
                     Render,
                     (
                         prepare_pending_mesh_material2d_queues.in_set(RenderSystems::Specialize),
-                        check_views_need_specialization.in_set(PrepareAssets),
+                        // Reads the phase-1 resolved compositing spaces, so
+                        // it must run after the resolver; both `ViewKeyCache`
+                        // consumers (`specialize_material2d_meshes`,
+                        // `specialize_wireframes`) run in `Specialize`, after
+                        // this set.
+                        check_views_need_specialization
+                            .in_set(RenderSystems::CreateViews)
+                            .after(resolve_composition_spaces),
                         batch_and_prepare_binned_render_phase::<Opaque2d, Mesh2dPipeline>
                             .in_set(RenderSystems::PrepareResources),
                         batch_and_prepare_binned_render_phase::<AlphaMask2d, Mesh2dPipeline>
@@ -125,24 +131,17 @@ pub struct ViewKeyCache(MainEntityHashMap<Mesh2dPipelineKey>);
 pub fn check_views_need_specialization(
     mut view_key_cache: ResMut<ViewKeyCache>,
     mut dirty_specializations: ResMut<DirtySpecializations>,
-    cameras: Query<(&MainEntity, &ExtractedView, &ExtractedCamera, &Msaa)>,
+    cameras: Query<(Entity, &MainEntity, &ExtractedView, &ExtractedCamera, &Msaa)>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
 ) {
-    for (view_entity, view, camera, msaa) in &cameras {
-        let mut view_key = Mesh2dPipelineKey::from_msaa_samples(msaa.samples())
-            | Mesh2dPipelineKey::from_target_format(view.target_format);
-
-        if camera
-            .compositing_space
-            .is_some_and(|s| s == CompositingSpace::Srgb)
-        {
-            view_key |= Mesh2dPipelineKey::SRGB_COMPOSITING;
-        }
-        if camera
-            .compositing_space
-            .is_some_and(|s| s == CompositingSpace::Oklab)
-        {
-            view_key |= Mesh2dPipelineKey::OKLAB_COMPOSITING;
-        }
+    for (entity, view_entity, view, camera, msaa) in &cameras {
+        // `ResolvedCompositionSpaces` is keyed by the render-world view
+        // entity; `ViewKeyCache` stays `MainEntity`-keyed.
+        let view_key = Mesh2dPipelineKey::from_msaa_samples(msaa.samples())
+            | Mesh2dPipelineKey::from_target_format(view.target_format)
+            | Mesh2dPipelineKey::from_compositing_space(
+                resolved_spaces.get(entity, camera.compositing_space),
+            );
 
         if !view_key_cache
             .get_mut(view_entity)
@@ -523,6 +522,19 @@ impl Mesh2dPipelineKey {
             & Self::COLOR_TARGET_FORMAT_MASK_BITS) as u8;
         texture_format_from_code(code)
             .expect("Unknown bits in `COLOR_TARGET_FORMAT_MASK_BITS` of the pipeline key")
+    }
+
+    /// Key bits for a view's RESOLVED [`CompositingSpace`] (the phase-1
+    /// `ResolvedCompositionSpaces` value, never the camera's raw request):
+    /// `Some(Srgb)` / `Some(Oklab)` select the matching writer-encode bit;
+    /// linear views (`Some(Linear)` or no space) set no bits.
+    #[inline]
+    pub fn from_compositing_space(space: Option<CompositingSpace>) -> Self {
+        match space {
+            Some(CompositingSpace::Srgb) => Self::SRGB_COMPOSITING,
+            Some(CompositingSpace::Oklab) => Self::OKLAB_COMPOSITING,
+            Some(CompositingSpace::Linear) | None => Self::NONE,
+        }
     }
 
     pub fn msaa_samples(&self) -> u32 {
@@ -944,5 +956,61 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh2d {
             }
         }
         RenderCommandResult::Success
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Key-derivation: a solo default camera's view key carries no
+    /// compositing bits — byte-identical to a hand-constructed key without
+    /// the compositing-space term.
+    #[test]
+    fn solo_sdr_default_view_key_has_no_compositing_bits() {
+        let view_key = Mesh2dPipelineKey::from_msaa_samples(4)
+            | Mesh2dPipelineKey::from_target_format(TextureFormat::Rgba8UnormSrgb)
+            | Mesh2dPipelineKey::from_compositing_space(None);
+        assert_eq!(
+            view_key,
+            Mesh2dPipelineKey::from_msaa_samples(4)
+                | Mesh2dPipelineKey::from_target_format(TextureFormat::Rgba8UnormSrgb)
+        );
+    }
+
+    /// Key-derivation: the resolved space selects exactly its writer-encode
+    /// bit (fixed positions 1 << 4 / 1 << 5); `Some(Linear)` keys like no
+    /// space.
+    #[test]
+    fn resolved_space_selects_exactly_its_bit() {
+        assert_eq!(
+            Mesh2dPipelineKey::from_compositing_space(Some(CompositingSpace::Srgb)),
+            Mesh2dPipelineKey::SRGB_COMPOSITING
+        );
+        assert_eq!(
+            Mesh2dPipelineKey::from_compositing_space(Some(CompositingSpace::Oklab)),
+            Mesh2dPipelineKey::OKLAB_COMPOSITING
+        );
+        assert_eq!(
+            Mesh2dPipelineKey::from_compositing_space(Some(CompositingSpace::Linear)),
+            Mesh2dPipelineKey::NONE
+        );
+        assert_eq!(
+            Mesh2dPipelineKey::from_compositing_space(None),
+            Mesh2dPipelineKey::NONE
+        );
+    }
+
+    /// Key-derivation: an Oklab 2d solo view (fp16 main texture) keys the
+    /// Oklab writer-encode bit alongside its format and msaa bits.
+    #[test]
+    fn oklab_solo_view_key_sets_the_oklab_bit() {
+        let view_key = Mesh2dPipelineKey::from_msaa_samples(4)
+            | Mesh2dPipelineKey::from_target_format(TextureFormat::Rgba16Float)
+            | Mesh2dPipelineKey::from_compositing_space(Some(CompositingSpace::Oklab));
+        assert!(view_key.contains(Mesh2dPipelineKey::OKLAB_COMPOSITING));
+        assert!(!view_key.contains(Mesh2dPipelineKey::SRGB_COMPOSITING));
+        assert_eq!(view_key.target_format(), TextureFormat::Rgba16Float);
+        assert_eq!(view_key.msaa_samples(), 4);
     }
 }

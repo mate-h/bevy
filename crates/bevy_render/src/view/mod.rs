@@ -726,8 +726,6 @@ pub struct ViewTarget {
     main_texture: Arc<AtomicUsize>,
     /// The final output attachment this view will present to, if available.
     out_texture: Option<OutputColorAttachment>,
-    /// Color space of values stored in the main texture (for blit conversion to output)
-    pub compositing_space: Option<CompositingSpace>,
 }
 
 /// Contains [`OutputColorAttachment`] used for each target present on any view in the current
@@ -1260,6 +1258,7 @@ pub fn prepare_view_targets(
         &Msaa,
     )>,
     view_target_attachments: Res<ViewTargetAttachments>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
     mut main_texture_atomics: Local<HashMap<MainTextureKey, Weak<AtomicUsize>>>,
 ) {
     main_texture_atomics.retain(|_, weak| weak.strong_count() > 0);
@@ -1305,8 +1304,13 @@ pub fn prepare_view_targets(
         // perceptual blending of Rec.2020 values is approximate (documented
         // caveat: `CompositingSpace::Oklab` degrades under
         // `WorkingColorSpace::Rec2020`).
+        //
+        // The phase-1 resolved space — not the camera's raw request — decides
+        // the buffer convention: stack members share one main texture, so the
+        // cleared pixels must use the one space the whole stack resolves to.
+        let resolved_space = resolved_spaces.get(entity, camera.compositing_space);
         let converted_clear_color: Option<WgpuColor> =
-            clear_color.map(|color| match camera.compositing_space {
+            clear_color.map(|color| match resolved_space {
                 // If main texture stores Oklab or Srgb, convert Color to it for correct clear.
                 // Keep the direct conversion for Rec.709 (bit-for-bit with
                 // the pre-working-space behavior); only Rec.2020 routes
@@ -1411,7 +1415,6 @@ pub fn prepare_view_targets(
             main_textures,
             main_texture_format,
             out_texture: out_attachment.cloned(),
-            compositing_space: camera.compositing_space,
         });
     }
 }

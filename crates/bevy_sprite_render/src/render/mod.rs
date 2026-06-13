@@ -2,7 +2,7 @@ use core::ops::Range;
 
 use crate::ComputedTextureSlices;
 use bevy_asset::{load_embedded_asset, AssetEvent, AssetId, AssetServer, Assets, Handle};
-use bevy_camera::{visibility::ViewVisibility, Camera2d};
+use bevy_camera::{visibility::ViewVisibility, Camera2d, CompositingSpace};
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_core_pipeline::core_2d::{Transparent2d, CORE_2D_DEPTH_FORMAT};
 use bevy_derive::{Deref, DerefMut};
@@ -17,7 +17,7 @@ use bevy_mesh::VertexBufferLayout;
 use bevy_platform::collections::HashMap;
 use bevy_render::{
     camera::ExtractedCamera,
-    view::{RenderVisibleEntities, RetainedViewEntity},
+    view::{RenderVisibleEntities, ResolvedCompositionSpaces, RetainedViewEntity},
 };
 use bevy_render::{
     render_asset::RenderAssets,
@@ -139,6 +139,19 @@ impl SpritePipelineKey {
             & Self::COLOR_TARGET_FORMAT_MASK_BITS) as u8;
         texture_format_from_code(code)
             .expect("Unknown bits in `COLOR_TARGET_FORMAT_MASK_BITS` of the pipeline key")
+    }
+
+    /// Key bits for a view's RESOLVED [`CompositingSpace`] (the phase-1
+    /// [`ResolvedCompositionSpaces`] value, never the camera's raw request):
+    /// `Some(Srgb)` / `Some(Oklab)` select the matching writer-encode bit;
+    /// linear views (`Some(Linear)` or no space) set no bits.
+    #[inline]
+    pub fn from_compositing_space(space: Option<CompositingSpace>) -> Self {
+        match space {
+            Some(CompositingSpace::Srgb) => Self::SRGB_COMPOSITING,
+            Some(CompositingSpace::Oklab) => Self::OKLAB_COMPOSITING,
+            Some(CompositingSpace::Linear) | None => Self::NONE,
+        }
     }
 }
 
@@ -457,35 +470,27 @@ pub fn queue_sprites(
     extracted_sprites: Res<ExtractedSprites>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
     mut cameras: Query<(
+        Entity,
         &RenderVisibleEntities,
         &ExtractedCamera,
         &ExtractedView,
         &Msaa,
     )>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
 ) {
     let draw_sprite_function = draw_functions.read().id::<DrawSprite>();
 
-    for (visible_entities, camera, view, msaa) in &mut cameras {
+    for (entity, visible_entities, camera, view, msaa) in &mut cameras {
         let Some(transparent_phase) = transparent_render_phases.get_mut(&view.retained_view_entity)
         else {
             continue;
         };
 
-        let msaa_key = SpritePipelineKey::from_msaa_samples(msaa.samples());
-        let mut view_key = SpritePipelineKey::from_target_format(view.target_format) | msaa_key;
-
-        if camera
-            .compositing_space
-            .is_some_and(|s| s == bevy_camera::CompositingSpace::Srgb)
-        {
-            view_key |= SpritePipelineKey::SRGB_COMPOSITING;
-        }
-        if camera
-            .compositing_space
-            .is_some_and(|s| s == bevy_camera::CompositingSpace::Oklab)
-        {
-            view_key |= SpritePipelineKey::OKLAB_COMPOSITING;
-        }
+        let view_key = SpritePipelineKey::from_target_format(view.target_format)
+            | SpritePipelineKey::from_msaa_samples(msaa.samples())
+            | SpritePipelineKey::from_compositing_space(
+                resolved_spaces.get(entity, camera.compositing_space),
+            );
 
         let pipeline = pipelines.specialize(&pipeline_cache, &sprite_pipeline, view_key);
 
@@ -977,5 +982,60 @@ fn apply_scaling(
                 *quad_size = new_quad;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Key-derivation: a solo default camera's view key carries no
+    /// compositing bits — byte-identical to a hand-constructed key without
+    /// the compositing-space term.
+    #[test]
+    fn solo_sdr_default_view_key_has_no_compositing_bits() {
+        let view_key = SpritePipelineKey::from_target_format(TextureFormat::Rgba8UnormSrgb)
+            | SpritePipelineKey::from_msaa_samples(4)
+            | SpritePipelineKey::from_compositing_space(None);
+        assert_eq!(
+            view_key,
+            SpritePipelineKey::from_target_format(TextureFormat::Rgba8UnormSrgb)
+                | SpritePipelineKey::from_msaa_samples(4)
+        );
+    }
+
+    /// Key-derivation: the resolved space selects exactly its writer-encode
+    /// bit; `Some(Linear)` keys like no space.
+    #[test]
+    fn resolved_space_selects_exactly_its_bit() {
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Srgb)),
+            SpritePipelineKey::SRGB_COMPOSITING
+        );
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Oklab)),
+            SpritePipelineKey::OKLAB_COMPOSITING
+        );
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Linear)),
+            SpritePipelineKey::NONE
+        );
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(None),
+            SpritePipelineKey::NONE
+        );
+    }
+
+    /// Key-derivation: an Oklab 2d solo view (fp16 main texture) keys the
+    /// Oklab writer-encode bit alongside its format and msaa bits.
+    #[test]
+    fn oklab_solo_view_key_sets_the_oklab_bit() {
+        let view_key = SpritePipelineKey::from_target_format(TextureFormat::Rgba16Float)
+            | SpritePipelineKey::from_msaa_samples(4)
+            | SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Oklab));
+        assert!(view_key.contains(SpritePipelineKey::OKLAB_COMPOSITING));
+        assert!(!view_key.contains(SpritePipelineKey::SRGB_COMPOSITING));
+        assert_eq!(view_key.target_format(), TextureFormat::Rgba16Float);
+        assert_eq!(view_key.msaa_samples(), 4);
     }
 }
