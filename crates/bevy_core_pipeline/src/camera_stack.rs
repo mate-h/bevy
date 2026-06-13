@@ -541,7 +541,7 @@ fn resolve_group<K: Copy + Eq + Hash>(
 /// main-texture keys (`prepare_view_targets` dedups allocations on exactly
 /// that key).
 ///
-/// The stack rules live on [`resolve_contracts`]; this system feeds it,
+/// The stack rules live on `resolve_contracts`; this system feeds it,
 /// resolves the encode parameters per group (the coercion chain over the
 /// group's shared `ViewDisplayTarget`), reports the diagnostics as
 /// `warn_once`s, and inserts the contracts. A missing [`ViewDisplayTarget`]
@@ -598,11 +598,19 @@ pub fn resolve_camera_stack_contracts(
     // `ViewDisplayTarget` (it resolves per render target, and the target is
     // part of the texture grouping key), so transfer and gamut are uniform
     // across a group; only the out-of-gamut handling varies per view with
-    // its `source_gamut`.
+    // its `source_gamut`. Resolving from the first-iterated member's
+    // `ViewDisplayTarget` therefore matches the per-member `encode_enabled`
+    // used by `resolve_contracts` (both read `is_hdr_transfer()` off the same
+    // shared target). The shared-target invariant holds in every supported
+    // configuration; it can break only in the pathological plugin order where
+    // a camera view momentarily lacks its `ViewDisplayTarget` (treated as
+    // plain SDR, out of scope per the spec). The `debug_assert!` makes that
+    // divergence loud in debug builds rather than letting it silently mix an
+    // encoded group with an unencoded out-texture clear.
     let mut group_encodings: HashMap<TextureId, Option<(DisplayTransfer, DisplayGamut)>> =
         HashMap::default();
     for (_, _, _, view_target, view_display_target, ..) in &views {
-        group_encodings
+        let encoding = *group_encodings
             .entry(view_target.main_texture().id())
             .or_insert_with(|| {
                 resolve_group_encode_parameters(
@@ -611,6 +619,11 @@ pub fn resolve_camera_stack_contracts(
                     *working_color_space,
                 )
             });
+        debug_assert_eq!(
+            encoding.is_some(),
+            view_display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
+            "every member of a texture group must agree on display-encode enablement"
+        );
     }
 
     for (entity, _, _, view_target, ..) in &views {
@@ -702,9 +715,14 @@ fn resolve_group_encode_parameters(
     }
 
     let target = view_display_target.resolved;
-    let mut transfer = target.transfer;
+    let transfer = target.transfer;
     let mut gamut = target.gamut;
 
+    // Mirror the coercion in `coerce_display_encode` to report each arm it
+    // takes. The coerced value comes from that pure helper; only the
+    // diagnostics live here. The running `gamut` tracks the sequential
+    // coercion so a later arm's condition (and message) sees the value the
+    // earlier arms produced, exactly as the helper does.
     if transfer == DisplayTransfer::Hlg {
         warn_once!(
             "A resolved `DisplayTransfer::Hlg` reached the display encoder (a manual \
@@ -712,8 +730,10 @@ fn resolve_group_encode_parameters(
             scene-referred (encoding tone-mapped output with the HLG OETF would \
             double-tone-map); encoding with PQ instead."
         );
-        transfer = DisplayTransfer::Pq;
     }
+    // HLG and PQ both canonicalize to Rec.2020 (HLG coerces to PQ first), so
+    // the gamut arms apply to either transfer.
+    let transfer_after_hlg = coerce_hlg_transfer(transfer);
     if gamut == DisplayGamut::DisplayP3 {
         warn_once!(
             "`DisplayGamut::DisplayP3` output is not supported yet (the display \
@@ -722,7 +742,7 @@ fn resolve_group_encode_parameters(
         );
         gamut = DisplayGamut::Rec709;
     }
-    if transfer == DisplayTransfer::ScRgbLinear && gamut != DisplayGamut::Rec709 {
+    if transfer_after_hlg == DisplayTransfer::ScRgbLinear && gamut != DisplayGamut::Rec709 {
         // scRGB-linear (IEC 61966-2-2) is *definitionally* encoded against
         // Rec.709/sRGB primaries: every backend that negotiates the
         // Rgba16Float surface declares it as extended-sRGB-linear, and the
@@ -739,15 +759,48 @@ fn resolve_group_encode_parameters(
         );
         gamut = DisplayGamut::Rec709;
     }
-    if transfer == DisplayTransfer::Pq && gamut != DisplayGamut::Rec2020 {
+    if transfer_after_hlg == DisplayTransfer::Pq && gamut != DisplayGamut::Rec2020 {
         warn_once!(
             "PQ display targets are canonically Rec.2020 (ITU-R BT.2100); coercing \
             `DisplayTarget::gamut` from {gamut:?} to Rec2020 for encoding."
         );
-        gamut = DisplayGamut::Rec2020;
     }
 
-    Some((transfer, gamut))
+    Some(coerce_display_encode(transfer, target.gamut))
+}
+
+/// HLG coerces to PQ for encoding (HLG is scene-referred; encoding tone-mapped
+/// output with the HLG OETF would double-tone-map).
+fn coerce_hlg_transfer(transfer: DisplayTransfer) -> DisplayTransfer {
+    match transfer {
+        DisplayTransfer::Hlg => DisplayTransfer::Pq,
+        other => other,
+    }
+}
+
+/// The prepare-time display-encode coercion chain as a pure function of the
+/// resolved transfer and gamut: HLG -> PQ, then `DisplayP3` -> Rec709, then
+/// scRGB forces Rec709, then PQ forces Rec2020. The order is load bearing
+/// (HLG must coerce to PQ before the PQ-forces-Rec2020 arm, and the P3 -> 709
+/// arm runs before the transfer-specific gamut arms), so the chain is tested
+/// directly. The diagnostics in `resolve_group_encode_parameters` mirror these
+/// arms.
+fn coerce_display_encode(
+    transfer: DisplayTransfer,
+    gamut: DisplayGamut,
+) -> (DisplayTransfer, DisplayGamut) {
+    let transfer = coerce_hlg_transfer(transfer);
+    let mut gamut = gamut;
+    if gamut == DisplayGamut::DisplayP3 {
+        gamut = DisplayGamut::Rec709;
+    }
+    if transfer == DisplayTransfer::ScRgbLinear && gamut != DisplayGamut::Rec709 {
+        gamut = DisplayGamut::Rec709;
+    }
+    if transfer == DisplayTransfer::Pq && gamut != DisplayGamut::Rec2020 {
+        gamut = DisplayGamut::Rec2020;
+    }
+    (transfer, gamut)
 }
 
 /// Resolves the encoder's out-of-gamut handling for one view from the global
@@ -1467,5 +1520,88 @@ mod contract_tests {
         assert_eq!(output(&outputs, 2).tonemap, StackRole::Solo);
         assert_eq!(output(&outputs, 1).blit, RUN);
         assert_eq!(output(&outputs, 2).blit, RUN);
+    }
+}
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+
+    // scRGB-linear with the canonical Rec.709 gamut passes through unchanged.
+    #[test]
+    fn scrgb_rec709_is_unchanged() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::ScRgbLinear, DisplayGamut::Rec709),
+            (DisplayTransfer::ScRgbLinear, DisplayGamut::Rec709)
+        );
+    }
+
+    // scRGB-linear forces Rec.709 because the signal is definitionally
+    // expressed in extended Rec.709/sRGB coordinates.
+    #[test]
+    fn scrgb_forces_rec709() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::ScRgbLinear, DisplayGamut::Rec2020),
+            (DisplayTransfer::ScRgbLinear, DisplayGamut::Rec709)
+        );
+    }
+
+    // PQ forces Rec.2020 (canonically Rec.2020 / ITU-R BT.2100).
+    #[test]
+    fn pq_forces_rec2020() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::Pq, DisplayGamut::Rec709),
+            (DisplayTransfer::Pq, DisplayGamut::Rec2020)
+        );
+    }
+
+    // PQ with its canonical Rec.2020 gamut passes through unchanged.
+    #[test]
+    fn pq_rec2020_is_unchanged() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::Pq, DisplayGamut::Rec2020),
+            (DisplayTransfer::Pq, DisplayGamut::Rec2020)
+        );
+    }
+
+    // DisplayP3 collapses to Rec.709 (no P3 gamut matrix ships); the scRGB
+    // transfer is left intact.
+    #[test]
+    fn display_p3_collapses_to_rec709() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::ScRgbLinear, DisplayGamut::DisplayP3),
+            (DisplayTransfer::ScRgbLinear, DisplayGamut::Rec709)
+        );
+    }
+
+    // HLG coerces to PQ; the gamut then follows the PQ rule to Rec.2020. The
+    // HLG -> PQ arm must run before the PQ-forces-Rec2020 arm, so an HLG
+    // request with a non-Rec.2020 gamut ends Rec.2020.
+    #[test]
+    fn hlg_coerces_to_pq_then_rec2020() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::Hlg, DisplayGamut::Rec709),
+            (DisplayTransfer::Pq, DisplayGamut::Rec2020)
+        );
+    }
+
+    // HLG with DisplayP3: P3 collapses to Rec.709 first, then the PQ rule
+    // promotes it to Rec.2020 - the coercions compose in order.
+    #[test]
+    fn hlg_with_display_p3_ends_pq_rec2020() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::Hlg, DisplayGamut::DisplayP3),
+            (DisplayTransfer::Pq, DisplayGamut::Rec2020)
+        );
+    }
+
+    // The sRGB transfer never reaches the chain via an HDR target, but the
+    // pure coercion leaves a non-HDR transfer untouched.
+    #[test]
+    fn srgb_is_unchanged() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::Srgb, DisplayGamut::Rec709),
+            (DisplayTransfer::Srgb, DisplayGamut::Rec709)
+        );
     }
 }
