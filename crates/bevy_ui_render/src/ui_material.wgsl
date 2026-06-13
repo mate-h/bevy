@@ -3,6 +3,12 @@
     globals::Globals,
 }
 #import bevy_ui::ui_vertex_output::UiVertexOutput
+#ifdef SRGB_OUTPUT
+#import bevy_render::color_operations::linear_to_srgb
+#endif
+#ifdef OKLAB_OUTPUT
+#import bevy_render::color_operations::linear_rgb_to_oklab
+#endif
 
 @group(0) @binding(0)
 var<uniform> view: View;
@@ -28,5 +34,20 @@ fn vertex(
 
 @fragment
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0);
+    var color = vec4<f32>(1.0);
+
+    // Writer-side compositing encode: UI runs after tone mapping, so a view
+    // whose resolved CompositingSpace is Srgb or Oklab holds the main texture in
+    // that encoded space and the straight-alpha fragment output must be encoded
+    // to match. Default and Linear views compile this out. Custom UI materials
+    // that supply their own fragment shader opt in by emitting these defs
+    // themselves; the display-gamut axis for such materials is a follow-up.
+#ifdef SRGB_OUTPUT
+    color = vec4(linear_to_srgb(color.rgb), color.a);
+#endif
+#ifdef OKLAB_OUTPUT
+    color = vec4(linear_rgb_to_oklab(color.rgb), color.a);
+#endif
+
+    return color;
 }

@@ -139,6 +139,11 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct UiTextureSlicePipelineKey {
     pub target_format: TextureFormat,
+    /// Resolved [`CompositingSpace`](bevy_camera::CompositingSpace) of the view
+    /// this slice renders into, driving the writer-side encode of the fragment
+    /// output (see
+    /// [`push_compositing_space_defs`](crate::pipeline::push_compositing_space_defs)).
+    pub compositing_space: Option<bevy_camera::CompositingSpace>,
 }
 
 impl SpecializedRenderPipeline for UiTextureSlicePipeline {
@@ -164,7 +169,8 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
                 VertexFormat::Float32x4,
             ],
         );
-        let shader_defs = Vec::new();
+        let mut shader_defs = Vec::new();
+        push_compositing_space_defs(&mut shader_defs, key.compositing_space);
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -318,6 +324,7 @@ pub fn queue_ui_slices(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut render_views: Query<&UiCameraView, With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
 ) {
@@ -343,6 +350,8 @@ pub fn queue_ui_slices(
             &ui_slicer_pipeline,
             UiTextureSlicePipelineKey {
                 target_format: view.target_format,
+                compositing_space: resolved_spaces
+                    .get(extracted_slicer.extracted_camera_entity, None),
             },
         );
 

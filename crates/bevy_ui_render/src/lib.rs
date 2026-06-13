@@ -56,7 +56,7 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
     sync_world::{MainEntity, RenderEntity, TemporaryRenderEntity},
     texture::GpuImage,
-    view::{ExtractedView, RetainedViewEntity, ViewUniforms},
+    view::{ExtractedView, ResolvedCompositionSpaces, RetainedViewEntity, ViewUniforms},
     Extract, ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_sprite::BorderRect;
@@ -1526,6 +1526,7 @@ pub fn queue_uinodes(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     render_views: Query<(&UiCameraView, Option<&UiAntiAlias>), With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
 ) {
@@ -1561,6 +1562,8 @@ pub fn queue_uinodes(
             UiPipelineKey {
                 target_format: view.target_format,
                 anti_alias: matches!(ui_anti_alias, None | Some(UiAntiAlias::On)),
+                compositing_space: resolved_spaces
+                    .get(extracted_uinode.extracted_camera_entity, None),
             },
         );
 

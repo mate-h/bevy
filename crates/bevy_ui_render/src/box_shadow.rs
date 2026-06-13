@@ -128,6 +128,11 @@ pub struct BoxShadowPipelineKey {
     pub target_format: TextureFormat,
     /// Number of samples, a higher value results in better quality shadows.
     pub samples: u32,
+    /// Resolved [`CompositingSpace`](bevy_camera::CompositingSpace) of the view
+    /// this shadow renders into, driving the writer-side encode of the fragment
+    /// output (see
+    /// [`push_compositing_space_defs`](crate::pipeline::push_compositing_space_defs)).
+    pub compositing_space: Option<bevy_camera::CompositingSpace>,
 }
 
 impl SpecializedRenderPipeline for BoxShadowPipeline {
@@ -153,7 +158,8 @@ impl SpecializedRenderPipeline for BoxShadowPipeline {
                 VertexFormat::Float32x2,
             ],
         );
-        let shader_defs = vec![ShaderDefVal::UInt("SHADOW_SAMPLES".into(), key.samples)];
+        let mut shader_defs = vec![ShaderDefVal::UInt("SHADOW_SAMPLES".into(), key.samples)];
+        crate::pipeline::push_compositing_space_defs(&mut shader_defs, key.compositing_space);
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -301,6 +307,7 @@ pub fn queue_shadows(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut render_views: Query<(&UiCameraView, Option<&BoxShadowSamples>), With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
 ) {
@@ -328,6 +335,8 @@ pub fn queue_shadows(
             BoxShadowPipelineKey {
                 target_format: view.target_format,
                 samples: shadow_samples.copied().unwrap_or_default().0,
+                compositing_space: resolved_spaces
+                    .get(extracted_shadow.extracted_camera_entity, None),
             },
         );
 

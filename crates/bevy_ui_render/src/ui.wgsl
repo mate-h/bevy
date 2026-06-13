@@ -1,6 +1,12 @@
 #define_import_path bevy_ui::ui_node
 
 #import bevy_render::view::View
+#ifdef SRGB_OUTPUT
+#import bevy_render::color_operations::linear_to_srgb
+#endif
+#ifdef OKLAB_OUTPUT
+#import bevy_render::color_operations::linear_rgb_to_oklab
+#endif
 
 const TEXTURED = 1u;
 const RIGHT_VERTEX = 2u;
@@ -143,6 +149,21 @@ fn nearest_border_active(point_vs_mid: vec2<f32>, size: vec2<f32>, width: vec4<f
         (enabled(flags, BORDER_BOTTOM) && min_dist == bottom);
 }
 
+// Writer-side compositing encode: UI runs after tone mapping, so a view whose
+// resolved CompositingSpace is Srgb or Oklab holds the main texture in that
+// encoded space and the straight-alpha fragment output must be encoded to match
+// (the terminal decode reverses it). Default and Linear views compile this to a
+// pass-through. The alpha channel is left untouched.
+fn encode_output(color: vec4<f32>) -> vec4<f32> {
+#ifdef SRGB_OUTPUT
+    return vec4(linear_to_srgb(color.rgb), color.a);
+#else ifdef OKLAB_OUTPUT
+    return vec4(linear_rgb_to_oklab(color.rgb), color.a);
+#else
+    return color;
+#endif
+}
+
 // get alpha for antialiasing for sdf
 fn antialias(distance: f32) -> f32 {
     // Using the fwidth(distance) was causing artifacts, so just use the distance.
@@ -220,9 +241,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // This allows us to draw both textured and untextured shapes together in the same batch.
     let color = select(in.color, in.color * texture_color, enabled(in.flags, TEXTURED));
 
+    var out: vec4<f32>;
     if enabled(in.flags, BORDER_ANY) {
-        return draw_uinode_border(color, in.point, in.size, in.radius, in.border, in.flags);
+        out = draw_uinode_border(color, in.point, in.size, in.radius, in.border, in.flags);
     } else {
-        return draw_uinode_background(color, in.point, in.size, in.radius, in.border, in.flags);
+        out = draw_uinode_background(color, in.point, in.size, in.radius, in.border, in.flags);
     }
+    return encode_output(out);
 }

@@ -1,5 +1,11 @@
 #import bevy_render::view::View;
 #import bevy_render::globals::Globals;
+#ifdef SRGB_OUTPUT
+#import bevy_render::color_operations::linear_to_srgb
+#endif
+#ifdef OKLAB_OUTPUT
+#import bevy_render::color_operations::linear_rgb_to_oklab
+#endif
 
 const PI: f32 = 3.14159265358979323846;
 const SAMPLES: i32 = #SHADOW_SAMPLES;
@@ -91,7 +97,20 @@ fn fragment(
     in: BoxShadowVertexOutput,
 ) -> @location(0) vec4<f32> {
     let g = in.color.a * roundedBoxShadow(-0.5 * in.size, 0.5 * in.size, in.point, max(in.blur, 0.01), in.radius);
-    return vec4(in.color.rgb, g);
+    var color = vec4(in.color.rgb, g);
+
+    // Writer-side compositing encode: UI runs after tone mapping, so a view
+    // whose resolved CompositingSpace is Srgb or Oklab holds the main texture in
+    // that encoded space and the straight-alpha fragment output must be encoded
+    // to match. Default and Linear views compile this out.
+#ifdef SRGB_OUTPUT
+    color = vec4(linear_to_srgb(color.rgb), color.a);
+#endif
+#ifdef OKLAB_OUTPUT
+    color = vec4(linear_rgb_to_oklab(color.rgb), color.a);
+#endif
+
+    return color;
 }
 
 

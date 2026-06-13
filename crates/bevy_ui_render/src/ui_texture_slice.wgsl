@@ -1,5 +1,11 @@
 #import bevy_render::view::View;
 #import bevy_render::globals::Globals;
+#ifdef SRGB_OUTPUT
+#import bevy_render::color_operations::linear_to_srgb
+#endif
+#ifdef OKLAB_OUTPUT
+#import bevy_render::color_operations::linear_rgb_to_oklab
+#endif
 
 @group(0) @binding(0)
 var<uniform> view: View;
@@ -123,5 +129,18 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     // map the slice coords to texture coords
     let atlas_uv = in.atlas_rect.xy + uv * (in.atlas_rect.zw - in.atlas_rect.xy);
 
-    return in.color * textureSample(sprite_texture, sprite_sampler, atlas_uv);
+    var color = in.color * textureSample(sprite_texture, sprite_sampler, atlas_uv);
+
+    // Writer-side compositing encode: UI runs after tone mapping, so a view
+    // whose resolved CompositingSpace is Srgb or Oklab holds the main texture in
+    // that encoded space and the straight-alpha fragment output must be encoded
+    // to match. Default and Linear views compile this out.
+#ifdef SRGB_OUTPUT
+    color = vec4(linear_to_srgb(color.rgb), color.a);
+#endif
+#ifdef OKLAB_OUTPUT
+    color = vec4(linear_rgb_to_oklab(color.rgb), color.a);
+#endif
+
+    return color;
 }

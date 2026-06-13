@@ -142,7 +142,8 @@ where
                 VertexFormat::Float32x4,
             ],
         );
-        let shader_defs = Vec::new();
+        let mut shader_defs = Vec::new();
+        push_compositing_space_defs(&mut shader_defs, key.compositing_space);
 
         let mut descriptor = RenderPipelineDescriptor {
             vertex: VertexState {
@@ -601,6 +602,7 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut render_views: Query<&UiCameraView, With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
 {
@@ -632,6 +634,8 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
             UiMaterialKey {
                 target_format: view.target_format,
                 bind_group_data: material.key.clone(),
+                compositing_space: resolved_spaces
+                    .get(extracted_uinode.extracted_camera_entity, None),
             },
         );
         if transparent_phase.items.capacity() < extracted_uinodes.uinodes.len() {
