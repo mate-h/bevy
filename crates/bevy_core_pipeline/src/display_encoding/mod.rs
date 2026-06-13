@@ -48,7 +48,9 @@ use crate::FullscreenShader;
 use bevy_app::{App, Plugin};
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
 use bevy_camera::CompositingSpace;
+use bevy_color::LinearRgba;
 use bevy_ecs::prelude::*;
+use bevy_math::Vec3;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -57,14 +59,16 @@ use bevy_render::{
         *,
     },
     renderer::RenderDevice,
+    transfer_functions::{pq_inverse_eotf_from_nits, scrgb_encode},
     view::{DisplayTargetUniform, ExtractedView, ViewTarget},
+    working_color_space::REC709_TO_REC2020,
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::Shader;
 use bevy_utils::default;
 use bevy_window::{DisplayGamut, DisplayTransfer};
 
-use crate::camera_stack::{StackRole, ViewStackContract};
+use crate::camera_stack::{ResolvedEncoding, StackRole, ViewStackContract};
 
 pub mod gamut_compression;
 mod node;
@@ -190,6 +194,79 @@ pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayG
         }
     }
     coverage_rank(source) > coverage_rank(display)
+}
+
+/// Encodes a Rec.709 display-linear, paper-white-relative clear color
+/// (1.0 = paper white) into the signal values an HDR out texture stores:
+/// gamut conversion to the resolved display primaries, paper-white luminance
+/// scaling, and the resolved transfer encoding. This is the CPU mirror of
+/// what the display-encoding pass ([`display_encoding.wgsl`]) does to rendered
+/// pixels, applied to the [`LoadOp::Clear`](bevy_render::render_resource::LoadOp::Clear)
+/// value of the out texture so a finalizer's clear matches the encoded pixels
+/// it composites over (a viewport/letterboxed region no blit covers would
+/// otherwise present raw display-linear values as HDR signal).
+///
+/// The gamut stage follows from the resolved transfer (the coercion contract
+/// fixes the gamut per transfer): for [`DisplayTransfer::ScRgbLinear`] the
+/// gamut is Rec.709 (identity), so each channel is just
+/// [`scrgb_encode`](bevy_render::transfer_functions::scrgb_encode); for
+/// [`DisplayTransfer::Pq`] the gamut is Rec.2020, so the RGB triple is first
+/// transformed through [`REC709_TO_REC2020`](bevy_render::working_color_space::REC709_TO_REC2020),
+/// then each channel is clamped non-negative, scaled to absolute nits, and
+/// run through
+/// [`pq_inverse_eotf_from_nits`](bevy_render::transfer_functions::pq_inverse_eotf_from_nits).
+/// Alpha passes through unchanged for the alpha-blended upscale path.
+///
+/// `paper_white_nits` must be
+/// [`DisplayTarget::sanitized_paper_white_nits`](bevy_window::DisplayTarget::sanitized_paper_white_nits),
+/// never the raw authored field: the GPU side folds the sanitized value, so
+/// the encoded clear must use it too for the two to match on degenerate
+/// authored paper whites.
+///
+/// [`WorkingColorSpace`](bevy_render::working_color_space::WorkingColorSpace)
+/// is deliberately NOT consulted: the authored clear color is a display-referred
+/// Rec.709 intent, not a scene-referred working-space buffer value, so it is
+/// not subject to the working-space 709 -> 2020 conversion that scene colors
+/// receive.
+///
+/// Only the two reachable HDR transfers are handled; [`DisplayTransfer::Srgb`]
+/// (hardware-encoded on the blit, no pass) and [`DisplayTransfer::Hlg`]
+/// (coerced to PQ at prepare time) are `unreachable!`, the same contract as
+/// the encoder's [`specialize`](DisplayEncodingPipeline::specialize).
+///
+/// [`display_encoding.wgsl`]: crate::display_encoding
+pub fn encode_out_texture_clear_color(
+    color: LinearRgba,
+    encoding: &ResolvedEncoding,
+    paper_white_nits: f32,
+) -> LinearRgba {
+    let rgb = match encoding.transfer {
+        DisplayTransfer::ScRgbLinear => Vec3::new(
+            scrgb_encode(color.red, paper_white_nits),
+            scrgb_encode(color.green, paper_white_nits),
+            scrgb_encode(color.blue, paper_white_nits),
+        ),
+        DisplayTransfer::Pq => {
+            let rec2020 = REC709_TO_REC2020 * Vec3::new(color.red, color.green, color.blue);
+            Vec3::new(
+                pq_inverse_eotf_from_nits(rec2020.x.max(0.0) * paper_white_nits),
+                pq_inverse_eotf_from_nits(rec2020.y.max(0.0) * paper_white_nits),
+                pq_inverse_eotf_from_nits(rec2020.z.max(0.0) * paper_white_nits),
+            )
+        }
+        // sRGB never reaches this helper (hardware encode on the blit); HLG is
+        // coerced to PQ at prepare time. Same contract as the encoder's
+        // specialize transfer arm.
+        DisplayTransfer::Srgb | DisplayTransfer::Hlg => {
+            unreachable!("only HDR transfers (scRGB / PQ) encode an out-texture clear color")
+        }
+    };
+    LinearRgba {
+        red: rgb.x,
+        green: rgb.y,
+        blue: rgb.z,
+        alpha: color.alpha,
+    }
 }
 
 /// Render-world resource holding the display-encoding pass's bind group
@@ -660,6 +737,135 @@ mod tests {
         assert_eq!(
             display_encoding_key(TextureFormat::Rgba16Float, &solo),
             None
+        );
+    }
+
+    use bevy_render::transfer_functions::{pq_inverse_eotf_from_nits, scrgb_encode};
+    use bevy_render::working_color_space::REC709_TO_REC2020;
+    use bevy_window::DisplayTarget;
+
+    /// Builds a [`ResolvedEncoding`] with the given transfer; the gamut and
+    /// out-of-gamut fields are unused by [`encode_out_texture_clear_color`]
+    /// (the gamut follows from the transfer per the coercion contract).
+    fn encoding(transfer: DisplayTransfer) -> ResolvedEncoding {
+        ResolvedEncoding {
+            transfer,
+            gamut: match transfer {
+                DisplayTransfer::ScRgbLinear => DisplayGamut::Rec709,
+                _ => DisplayGamut::Rec2020,
+            },
+            out_of_gamut: OutOfGamutHandling::Clip,
+        }
+    }
+
+    /// PQ white at paper-white 100 encodes each channel as
+    /// `pq_inverse_eotf_from_nits(100.0)` (~0.5081).
+    #[test]
+    fn pq_white_at_paper_white_encodes_each_channel() {
+        let out = encode_out_texture_clear_color(
+            LinearRgba::WHITE,
+            &encoding(DisplayTransfer::Pq),
+            100.0,
+        );
+        // Rec.709 white maps to Rec.2020 white (the matrix rows sum to 1), so
+        // every channel is 100 nits through PQ.
+        let expected = pq_inverse_eotf_from_nits(100.0);
+        assert!((expected - 0.5081).abs() < 1e-3, "{expected}");
+        assert_eq!(out.red.to_bits(), expected.to_bits());
+        assert_eq!(out.green.to_bits(), expected.to_bits());
+        assert_eq!(out.blue.to_bits(), expected.to_bits());
+    }
+
+    /// PQ red gamut-converts through `REC709_TO_REC2020` before the per-channel
+    /// transfer encode.
+    #[test]
+    fn pq_red_gamut_converts_before_encoding() {
+        let out =
+            encode_out_texture_clear_color(LinearRgba::RED, &encoding(DisplayTransfer::Pq), 100.0);
+        let rec2020 = REC709_TO_REC2020 * Vec3::new(1.0, 0.0, 0.0);
+        assert_eq!(
+            out.red.to_bits(),
+            pq_inverse_eotf_from_nits(rec2020.x.max(0.0) * 100.0).to_bits()
+        );
+        assert_eq!(
+            out.green.to_bits(),
+            pq_inverse_eotf_from_nits(rec2020.y.max(0.0) * 100.0).to_bits()
+        );
+        assert_eq!(
+            out.blue.to_bits(),
+            pq_inverse_eotf_from_nits(rec2020.z.max(0.0) * 100.0).to_bits()
+        );
+    }
+
+    /// scRGB scales each channel by `paper_white / 80` (identity gamut).
+    #[test]
+    fn scrgb_scales_by_paper_white_over_80() {
+        let color = LinearRgba::new(0.5, 0.25, 1.0, 1.0);
+        let out =
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ScRgbLinear), 100.0);
+        assert_eq!(out.red.to_bits(), scrgb_encode(0.5, 100.0).to_bits());
+        assert_eq!(out.green.to_bits(), scrgb_encode(0.25, 100.0).to_bits());
+        assert_eq!(out.blue.to_bits(), scrgb_encode(1.0, 100.0).to_bits());
+        // 100 / 80 = 1.25.
+        assert_eq!(out.red.to_bits(), 0.625f32.to_bits());
+    }
+
+    /// Alpha passes through unchanged for both transfers.
+    #[test]
+    fn alpha_passes_through() {
+        let color = LinearRgba::new(0.3, 0.6, 0.9, 0.42);
+        assert_eq!(
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::Pq), 100.0).alpha,
+            0.42
+        );
+        assert_eq!(
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ScRgbLinear), 100.0)
+                .alpha,
+            0.42
+        );
+    }
+
+    /// Negative channels clamp to zero before the PQ transfer (a negative base
+    /// under the non-integer PQ exponent would be `NaN`); scRGB leaves them
+    /// signed (the signal is unbounded).
+    #[test]
+    fn negative_channels_clamp_before_pq() {
+        let color = LinearRgba::new(-0.5, 0.0, 1.0, 1.0);
+        let pq = encode_out_texture_clear_color(color, &encoding(DisplayTransfer::Pq), 100.0);
+        // After the 709 -> 2020 mix the red channel is still negative; it must
+        // clamp to the encode of zero nits, never `NaN`.
+        let rec2020 = REC709_TO_REC2020 * Vec3::new(-0.5, 0.0, 1.0);
+        assert!(rec2020.x < 0.0);
+        assert!(pq.red.is_finite());
+        assert_eq!(pq.red.to_bits(), pq_inverse_eotf_from_nits(0.0).to_bits());
+
+        // scRGB carries the negative through unclamped.
+        let scrgb =
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ScRgbLinear), 100.0);
+        assert_eq!(scrgb.red.to_bits(), scrgb_encode(-0.5, 100.0).to_bits());
+        assert!(scrgb.red < 0.0);
+    }
+
+    /// An authored `paper_white_nits` of `0.0` sanitizes to 100 nits, so the
+    /// caller (which passes `sanitized_paper_white_nits()`) encodes white as
+    /// 100 nits rather than blacking out the clear.
+    #[test]
+    fn degenerate_paper_white_encodes_as_100_nits() {
+        let sanitized = DisplayTarget {
+            paper_white_nits: 0.0,
+            ..DisplayTarget::SDR_SRGB
+        }
+        .sanitized_paper_white_nits();
+        assert_eq!(sanitized, 100.0);
+
+        let out = encode_out_texture_clear_color(
+            LinearRgba::WHITE,
+            &encoding(DisplayTransfer::Pq),
+            sanitized,
+        );
+        assert_eq!(
+            out.red.to_bits(),
+            pq_inverse_eotf_from_nits(100.0).to_bits()
         );
     }
 }
