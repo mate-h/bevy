@@ -1,5 +1,5 @@
 use crate::blit::{BlitPipeline, BlitPipelineKey};
-use crate::camera_stack::ViewStackContract;
+use crate::camera_stack::{BlitDisposition, ViewStackContract};
 use bevy_app::prelude::*;
 use bevy_camera::{CameraOutputMode, CompositingSpace};
 use bevy_ecs::prelude::*;
@@ -69,6 +69,25 @@ fn blit_source_space(contract: Option<&ViewStackContract>) -> Option<Compositing
     }
 }
 
+/// The blend state of a camera whose upscaling blit auto-detects its blend
+/// (`CameraOutputMode::Write { blend_state: None }`).
+///
+/// The first camera to render to an output (`sorted_index == 0`) replaces;
+/// later cameras alpha-blend so they composite over earlier cameras instead of
+/// overwriting them. `force_replace` upgrades the auto-detected blend of a
+/// stack finalizer to replace: it is the lowest surviving blit of a stack
+/// whose earlier blits were skipped, so it carries the whole composition and
+/// must not blend over the cleared out texture. An explicit user `blend_state`
+/// is handled by the caller and is never routed through here, so
+/// `force_replace` never overrides it.
+fn auto_blit_blend_state(force_replace: bool, sorted_index: usize) -> Option<BlendState> {
+    if force_replace || sorted_index == 0 {
+        None
+    } else {
+        Some(BlendState::ALPHA_BLENDING)
+    }
+}
+
 fn prepare_view_upscaling_pipelines(
     mut commands: Commands,
     mut pipeline_cache: ResMut<PipelineCache>,
@@ -83,25 +102,31 @@ fn prepare_view_upscaling_pipelines(
     )>,
 ) {
     for (entity, view_target, camera, maybe_pipeline, contract) in view_targets.iter() {
+        // A view ordered below its stack's finalizer must not blit: its main
+        // texture holds the not-yet-finalized buffer (un-tonemapped, and
+        // un-encoded on HDR), and as the lowest surviving blit it would steal
+        // the finalizer's replace. Removing the pipeline keeps the node from
+        // running (its `ViewQuery` hard-requires the component), so the out
+        // texture stays untouched until the finalizer's first blit.
+        let force_replace = match contract.map(|contract| contract.blit) {
+            Some(BlitDisposition::SkipDeferred) => {
+                commands.entity(entity).remove::<ViewUpscalingPipeline>();
+                continue;
+            }
+            Some(BlitDisposition::Run { force_replace }) => force_replace,
+            None => false,
+        };
+
         let blend_state = if let Some(extracted_camera) = camera {
             match extracted_camera.output_mode {
                 CameraOutputMode::Skip => None,
-                CameraOutputMode::Write { blend_state, .. } => {
-                    match blend_state {
-                        None => {
-                            // Auto-detect: the first camera to render to this output
-                            // (sorted_camera_index_for_target == 0) uses replace mode;
-                            // subsequent cameras default to alpha blending so they don't
-                            // accidentally overwrite earlier cameras' output.
-                            if extracted_camera.sorted_camera_index_for_target > 0 {
-                                Some(BlendState::ALPHA_BLENDING)
-                            } else {
-                                None
-                            }
-                        }
-                        _ => blend_state,
-                    }
-                }
+                CameraOutputMode::Write { blend_state, .. } => match blend_state {
+                    None => auto_blit_blend_state(
+                        force_replace,
+                        extracted_camera.sorted_camera_index_for_target,
+                    ),
+                    _ => blend_state,
+                },
             }
         } else {
             None
@@ -137,7 +162,7 @@ fn prepare_view_upscaling_pipelines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera_stack::{BlitDisposition, ResolvedEncoding, StackRole};
+    use crate::camera_stack::{ResolvedEncoding, StackRole};
     use crate::display_encoding::OutOfGamutHandling;
     use bevy_window::{DisplayGamut, DisplayTransfer};
 
@@ -208,5 +233,31 @@ mod tests {
     #[test]
     fn missing_contract_blits_without_decode() {
         assert_eq!(blit_source_space(None), None);
+    }
+
+    /// The first camera to render to an output replaces (no auto blend) and
+    /// later cameras alpha-blend so they composite over earlier output.
+    #[test]
+    fn auto_blend_is_replace_for_first_camera_and_alpha_for_later() {
+        assert_eq!(auto_blit_blend_state(false, 0), None);
+        assert_eq!(
+            auto_blit_blend_state(false, 1),
+            Some(BlendState::ALPHA_BLENDING)
+        );
+        assert_eq!(
+            auto_blit_blend_state(false, 2),
+            Some(BlendState::ALPHA_BLENDING)
+        );
+    }
+
+    /// `force_replace` upgrades a stack finalizer's auto-detected blend to
+    /// replace even when the finalizer's own sorted index is above zero: it is
+    /// the lowest surviving blit and carries the whole composition.
+    #[test]
+    fn force_replace_upgrades_later_finalizer_to_replace() {
+        assert_eq!(auto_blit_blend_state(true, 1), None);
+        assert_eq!(auto_blit_blend_state(true, 2), None);
+        // A first-camera finalizer already replaces; force_replace is a no-op.
+        assert_eq!(auto_blit_blend_state(true, 0), None);
     }
 }
