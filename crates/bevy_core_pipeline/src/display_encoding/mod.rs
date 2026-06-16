@@ -294,7 +294,8 @@ pub fn init_display_encoding_pipeline(
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 sampler(SamplerBindingType::NonFiltering),
                 // The per-view display-target calibration (paper white, peak),
-                // shared with the tonemapping pass via `DisplayTargetUniforms`.
+                // written by `prepare_display_target_uniforms` (bevy_render);
+                // this pass is its only binder.
                 uniform_buffer::<DisplayTargetUniform>(true),
             ),
         ),

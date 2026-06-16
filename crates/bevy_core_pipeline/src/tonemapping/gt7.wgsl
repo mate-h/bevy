@@ -53,7 +53,7 @@ struct Gt7Params {
 // camera has a `GranTurismo7Params` component or the view renders to an
 // HDR-transfer target (see `gt7_params_uniform_active` in tonemapping/mod.rs).
 // The binding index is pushed as a shader def so other bind groups can rebind
-// it elsewhere (6 in the tonemapping pass).
+// it elsewhere (5 in the tonemapping pass).
 @group(0) @binding(#GT7_PARAMS_BINDING_INDEX) var<uniform> gt7_params_uniform: Gt7Params;
 #endif
 

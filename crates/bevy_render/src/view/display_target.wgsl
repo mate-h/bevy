@@ -2,9 +2,9 @@
 //
 // Mirrors `DisplayTargetUniform` in
 // `bevy_render::view::display_target_uniform` (Rust); the two must stay
-// field-for-field in sync. The uniform is bound conditionally: passes declare
-// the binding only under the `DISPLAY_TARGET_UNIFORM` shader def, so pipelines
-// for plain-SDR views never reference this module.
+// field-for-field in sync. Only the display-encoding pass binds and reads the
+// uniform, and only on HDR-transfer targets; SDR pipelines never reference
+// this module.
 
 #define_import_path bevy_render::display_target
 

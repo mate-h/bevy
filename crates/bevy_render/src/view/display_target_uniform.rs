@@ -27,12 +27,11 @@
 //!    [`ViewUniforms`](super::ViewUniforms) /
 //!    [`ViewUniformOffset`](super::ViewUniformOffset) work).
 //!
-//! Passes bind the uniform **conditionally**: the binding (and the
-//! `DISPLAY_TARGET_UNIFORM` shader def guarding it) is only added to a
-//! pipeline when the view's display target is not the plain
-//! [`DisplayTarget::SDR_SRGB`] default, or when an active operator needs it.
-//! Views on default SDR targets specialize to pipelines that carry no
-//! display-target bindings.
+//! Only the display-encoding pass binds the uniform and reads it to drive the
+//! transfer OETF, and that pass is scheduled only for HDR-transfer targets.
+//! The tone-mapping pass does not read display calibration — GT7's HDR
+//! parameters are baked on the CPU into a separate per-camera uniform — so
+//! plain-SDR pipelines carry no display-target binding at all.
 //!
 //! The matching WGSL struct lives in `display_target.wgsl` and is importable as
 //! `bevy_render::display_target`.
@@ -102,17 +101,6 @@ impl ViewDisplayTarget {
             requested: target,
             resolved: target,
         }
-    }
-
-    /// Returns `true` if this view's **resolved** display target is exactly
-    /// the default [`DisplayTarget::SDR_SRGB`].
-    ///
-    /// This is the negative of the `DISPLAY_TARGET_UNIFORM` shader-def
-    /// predicate: plain-SDR views (including views whose HDR request was
-    /// downgraded at surface negotiation) push no new shader defs, so their
-    /// pipelines carry no display-target bindings.
-    pub fn is_plain_sdr_srgb(&self) -> bool {
-        self.resolved == DisplayTarget::SDR_SRGB
     }
 
     /// Returns `true` if the **resolved** transfer function is a high dynamic
@@ -466,17 +454,15 @@ mod tests {
     }
 
     #[test]
-    fn view_display_target_predicates() {
+    fn view_display_target_is_hdr_transfer() {
         let sdr = ViewDisplayTarget::fulfilled(DisplayTarget::SDR_SRGB);
-        assert!(sdr.is_plain_sdr_srgb());
         assert!(!sdr.is_hdr_transfer());
 
-        // Any field deviation makes the target non-plain.
+        // A non-transfer field change does not flip the HDR predicate.
         let brighter = ViewDisplayTarget::fulfilled(DisplayTarget {
             paper_white_nits: 203.0,
             ..DisplayTarget::SDR_SRGB
         });
-        assert!(!brighter.is_plain_sdr_srgb());
         assert!(!brighter.is_hdr_transfer());
 
         for transfer in [
@@ -488,7 +474,6 @@ mod tests {
                 transfer,
                 ..DisplayTarget::SDR_SRGB
             });
-            assert!(!hdr.is_plain_sdr_srgb());
             assert!(hdr.is_hdr_transfer());
         }
     }
@@ -568,7 +553,6 @@ mod tests {
             },
             resolved: DisplayTarget::SDR_SRGB,
         };
-        assert!(downgraded.is_plain_sdr_srgb());
         assert!(!downgraded.is_hdr_transfer());
         assert_eq!(
             DisplayTargetUniform::from(downgraded.resolved),
