@@ -113,8 +113,9 @@ pub enum BlitDisposition {
 }
 
 /// Resolved display-encoding parameters for a view, after the prepare-time
-/// transfer/gamut coercion chain (HLG -> PQ, P3 -> Rec709, scRGB forces
-/// Rec709, PQ forces Rec2020).
+/// transfer/gamut coercion chain (HLG -> PQ, P3 -> Rec709 except under
+/// `ExtendedSrgb`, scRGB forces Rec709, `ExtendedSrgb` forces Rec2020 -> Rec709,
+/// PQ forces Rec2020).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ResolvedEncoding {
     /// The resolved display transfer function.
@@ -666,8 +667,13 @@ pub fn resolve_camera_stack_contracts(
 ///   HLG OETF would double-tone-map. Window surfaces fulfil HLG requests as
 ///   PQ/HDR10 at negotiation, so this arm is only reachable through manual
 ///   (non-window) targets.
-/// * [`DisplayGamut::DisplayP3`] -> [`DisplayGamut::Rec709`]: no P3 gamut
-///   matrix ships yet, and P3 surfaces are not negotiated.
+/// * [`DisplayGamut::DisplayP3`] -> [`DisplayGamut::Rec709`] for every transfer
+///   except [`DisplayTransfer::ExtendedSrgb`]: P3 is a real encoder gamut only
+///   for the encoded extended-range sRGB transfer (wgpu's `ExtendedDisplayP3`);
+///   no other transfer negotiates a P3 surface.
+/// * [`DisplayTransfer::ExtendedSrgb`] with a Rec.2020 gamut ->
+///   [`DisplayGamut::Rec709`]: there is no encoded-extended Rec.2020 surface
+///   (only `ExtendedSrgb` / `ExtendedDisplayP3`).
 /// * scRGB-linear with a non-Rec.709 gamut -> [`DisplayGamut::Rec709`]:
 ///   scRGB (IEC 61966-2-2) is definitionally encoded against Rec.709/sRGB
 ///   primaries. Only the encoding is coerced; `DisplayTarget::gamut` itself
@@ -734,11 +740,20 @@ fn resolve_group_encode_parameters(
     // HLG and PQ both canonicalize to Rec.2020 (HLG coerces to PQ first), so
     // the gamut arms apply to either transfer.
     let transfer_after_hlg = coerce_hlg_transfer(transfer);
-    if gamut == DisplayGamut::DisplayP3 {
+    if gamut == DisplayGamut::DisplayP3 && transfer_after_hlg != DisplayTransfer::ExtendedSrgb {
         warn_once!(
-            "`DisplayGamut::DisplayP3` output is not supported yet (the display \
-            encoder ships no P3 gamut matrices, so P3 surfaces are not negotiated); \
-            leaving colors in Rec.709 primaries."
+            "`DisplayGamut::DisplayP3` output is only supported with \
+            `DisplayTransfer::ExtendedSrgb` (wgpu's `ExtendedDisplayP3` surface \
+            color space); the {transfer_after_hlg:?} transfer ships no P3 surface, \
+            so leaving colors in Rec.709 primaries."
+        );
+        gamut = DisplayGamut::Rec709;
+    }
+    if transfer_after_hlg == DisplayTransfer::ExtendedSrgb && gamut == DisplayGamut::Rec2020 {
+        warn_once!(
+            "Encoded extended-range sRGB (`DisplayTransfer::ExtendedSrgb`) has no \
+            Rec.2020 surface (only `ExtendedSrgb` / `ExtendedDisplayP3`); coercing \
+            `DisplayTarget::gamut` from Rec2020 to Rec709 for encoding."
         );
         gamut = DisplayGamut::Rec709;
     }
@@ -779,8 +794,10 @@ fn coerce_hlg_transfer(transfer: DisplayTransfer) -> DisplayTransfer {
 }
 
 /// The prepare-time display-encode coercion chain as a pure function of the
-/// resolved transfer and gamut: HLG -> PQ, then `DisplayP3` -> Rec709, then
-/// scRGB forces Rec709, then PQ forces Rec2020. The order is load bearing
+/// resolved transfer and gamut: HLG -> PQ, then `DisplayP3` -> Rec709 for every
+/// transfer except `ExtendedSrgb` (which keeps P3 — wgpu's `ExtendedDisplayP3`),
+/// then scRGB forces Rec709, then `ExtendedSrgb` forces Rec2020 -> Rec709 (no
+/// extended Rec.2020 surface), then PQ forces Rec2020. The order is load bearing
 /// (HLG must coerce to PQ before the PQ-forces-Rec2020 arm, and the P3 -> 709
 /// arm runs before the transfer-specific gamut arms), so the chain is tested
 /// directly. The diagnostics in `resolve_group_encode_parameters` mirror these
@@ -791,10 +808,19 @@ fn coerce_display_encode(
 ) -> (DisplayTransfer, DisplayGamut) {
     let transfer = coerce_hlg_transfer(transfer);
     let mut gamut = gamut;
-    if gamut == DisplayGamut::DisplayP3 {
+    // Display-P3 is a real encoder gamut only for the encoded extended-range
+    // sRGB transfer (wgpu's `ExtendedDisplayP3` surface color space); every
+    // other transfer ships no P3 surface and collapses it to Rec.709.
+    if gamut == DisplayGamut::DisplayP3 && transfer != DisplayTransfer::ExtendedSrgb {
         gamut = DisplayGamut::Rec709;
     }
     if transfer == DisplayTransfer::ScRgbLinear && gamut != DisplayGamut::Rec709 {
+        gamut = DisplayGamut::Rec709;
+    }
+    // Encoded extended-range sRGB has no Rec.2020 surface (only `ExtendedSrgb`
+    // / `ExtendedDisplayP3`), so a Rec.2020 gamut falls back to Rec.709; a
+    // Display-P3 gamut is kept (handled above).
+    if transfer == DisplayTransfer::ExtendedSrgb && gamut == DisplayGamut::Rec2020 {
         gamut = DisplayGamut::Rec709;
     }
     if transfer == DisplayTransfer::Pq && gamut != DisplayGamut::Rec2020 {
@@ -1602,6 +1628,36 @@ mod coercion_tests {
         assert_eq!(
             coerce_display_encode(DisplayTransfer::Srgb, DisplayGamut::Rec709),
             (DisplayTransfer::Srgb, DisplayGamut::Rec709)
+        );
+    }
+
+    // The encoded extended-range sRGB transfer is the one transfer that keeps a
+    // Display-P3 gamut (wgpu's `ExtendedDisplayP3` surface color space): the
+    // P3 -> Rec.709 collapse is gated off for it.
+    #[test]
+    fn extended_srgb_keeps_display_p3() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::ExtendedSrgb, DisplayGamut::DisplayP3),
+            (DisplayTransfer::ExtendedSrgb, DisplayGamut::DisplayP3)
+        );
+    }
+
+    // Extended-range sRGB at Rec.709 is already canonical and untouched.
+    #[test]
+    fn extended_srgb_keeps_rec709() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::ExtendedSrgb, DisplayGamut::Rec709),
+            (DisplayTransfer::ExtendedSrgb, DisplayGamut::Rec709)
+        );
+    }
+
+    // There is no encoded-extended Rec.2020 surface, so a Rec.2020 gamut under
+    // the extended-sRGB transfer falls back to Rec.709.
+    #[test]
+    fn extended_srgb_rec2020_falls_back_to_rec709() {
+        assert_eq!(
+            coerce_display_encode(DisplayTransfer::ExtendedSrgb, DisplayGamut::Rec2020),
+            (DisplayTransfer::ExtendedSrgb, DisplayGamut::Rec709)
         );
     }
 }

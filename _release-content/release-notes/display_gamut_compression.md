@@ -28,11 +28,13 @@ default — compress only when the gamut stage can actually produce out-of-gamut
 colors), `Always` (force it on), or `Clip` (the old hue-shifting per-channel
 clip, kept as a debug fallback for A/B comparison).
 
-Under `Auto`, compression kicks in for exactly one configuration: a
-`Tonemapping::GranTurismo7` camera presenting to an scRGB HDR target, where the
-operator's wide Rec.2020 output has to be fit into the Rec.709-coordinate scRGB
-signal. Every other reachable path can't produce out-of-gamut colors, so it
-keeps the plain clip (a no-op there).
+Under `Auto`, compression kicks in for the gamut *contractions* a
+`Tonemapping::GranTurismo7` camera produces, where the operator's wide Rec.2020
+output has to be fit into a narrower display signal: the Rec.709-coordinate
+scRGB / extended-sRGB signal, or the Display-P3 `ExtendedDisplayP3` signal
+(Display P3 is narrower than Rec.2020). Every other reachable path is an
+identity or an expansion that can't produce out-of-gamut colors, so it keeps
+the plain clip (a no-op there).
 
 SDR rendering is untouched: views on sRGB display targets never run the
 display-encoding pass at all.

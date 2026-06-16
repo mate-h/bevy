@@ -22,13 +22,15 @@ reads the view's `DisplayTarget` calibration and performs, in order:
 
 - a full-precision gamut transform from the tone-map operator's output
   primaries to the display signal's primaries (for example, a Rec.2020 →
-  Rec.709 contraction when `Tonemapping::GranTurismo7` drives an scRGB signal);
+  Rec.709 contraction when `Tonemapping::GranTurismo7` drives an scRGB signal,
+  or a Rec.709 → Display-P3 expansion for an `ExtendedDisplayP3` signal);
 - out-of-gamut handling: smooth, ACES-RGC-style perceptual gamut compression
   when the transform can push colors outside the display gamut, so wide-gamut
   colors compress gracefully instead of clipping (see the display gamut
   compression release note);
-- the display transfer function — scRGB-linear or PQ (SMPTE ST 2084) — selected
-  by the target's `DisplayTransfer`.
+- the display transfer function — scRGB-linear, PQ (SMPTE ST 2084), or the
+  encoded extended-range sRGB OETF (the `ExtendedSrgb` / `ExtendedDisplayP3`
+  color spaces) — selected by the target's `DisplayTransfer`.
 
 This also rounds out a cleaner tone-mapping path: tone mapping always runs as
 the post-process tonemapping pass now, so every camera with an active
@@ -36,16 +38,17 @@ the post-process tonemapping pass now, so every camera with an active
 blends transparents in linear light, and tone-maps once. See the migration
 guides for the visual implications on previously-SDR cameras.
 
-The transfer functions themselves — the exact piecewise sRGB OETF/EOTF, scRGB
-scaling, PQ inverse-EOTF/EOTF, and the HLG OETF — live in a new importable WGSL
-library, `bevy_render::transfer_functions`, with CPU mirrors (and parity tests)
-in the matching Rust module, so you can reuse them in your own shaders.
+The transfer functions themselves — the exact piecewise sRGB OETF/EOTF, the
+odd-symmetric extended-range sRGB OETF/EOTF, scRGB scaling, PQ
+inverse-EOTF/EOTF, and the HLG OETF — live in a new importable WGSL library,
+`bevy_render::transfer_functions`, with CPU mirrors (and parity tests) in the
+matching Rust module, so you can reuse them in your own shaders.
 
 **Nothing changes for SDR rendering.** Views on the default
 `DisplayTarget::SDR_SRGB` (or any sRGB-transfer target) never run the pass — it
 records no GPU work, and the exact sRGB encode remains the free hardware
 conversion on the swapchain writeback, byte-identical to previous releases. The
 pass only activates for display targets whose resolved transfer is HDR
-(`ScRgbLinear` or `Pq`), which is exactly when surface selection has configured
-a matching HDR swapchain — see the scRGB HDR output release note (including its
-note on the currently required wgpu patch).
+(`ScRgbLinear`, `Pq`, or `ExtendedSrgb`), which is exactly when surface
+selection has configured a matching HDR swapchain — see the scRGB HDR output
+release note (including its note on the currently required wgpu patch).

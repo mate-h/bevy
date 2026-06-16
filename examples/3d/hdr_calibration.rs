@@ -345,10 +345,12 @@ fn adjust_display_target(
     }
 }
 
-/// Cycles the requested transfer: sRGB → scRGB-linear → PQ (HDR10) → sRGB.
-/// The surface is renegotiated the same frame; if the backend cannot provide
-/// the matching color space the request degrades (PQ → scRGB → plain SDR)
-/// with a one-time warning in the log for each step.
+/// Cycles the requested transfer: sRGB → scRGB-linear → extended-sRGB (encoded,
+/// the web HDR path) → PQ (HDR10) → sRGB. The surface is renegotiated the same
+/// frame; if the backend cannot provide the matching color space the request
+/// degrades to plain SDR with a one-time warning in the log. The gamut is left
+/// at its default Rec.709 (the encoder coerces it per transfer); the
+/// `tonemapping` example demonstrates the wide-gamut Display-P3 path.
 fn toggle_transfer(
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
@@ -356,7 +358,8 @@ fn toggle_transfer(
     if keys.just_pressed(KeyCode::KeyT) {
         display_target.transfer = match display_target.transfer {
             DisplayTransfer::Srgb => DisplayTransfer::ScRgbLinear,
-            DisplayTransfer::ScRgbLinear => DisplayTransfer::Pq,
+            DisplayTransfer::ScRgbLinear => DisplayTransfer::ExtendedSrgb,
+            DisplayTransfer::ExtendedSrgb => DisplayTransfer::Pq,
             _ => DisplayTransfer::Srgb,
         };
     }
@@ -478,7 +481,7 @@ fn update_ui(
         display_target.min_luminance_nits
     ));
     ui.push_str(&format!(
-        "  transfer (requested): {:?}  (T cycles sRGB -> scRGB -> PQ, R resets)\n",
+        "  transfer (requested): {:?}  (T cycles sRGB -> scRGB -> extended-sRGB -> PQ, R resets)\n",
         display_target.transfer
     ));
     // The *resolved* transfer (post surface negotiation) currently lives only

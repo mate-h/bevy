@@ -342,6 +342,7 @@ fn toggle_tonemapping_method(
 }
 
 /// Cycles the primary window's HDR output: SDR sRGB → scRGB-linear →
+/// extended-sRGB (Rec.709) → extended-sRGB (Display-P3, wide-gamut HDR) →
 /// PQ (HDR10) → back to SDR (and switches the operator to GranTurismo7,
 /// currently the only HDR-aware one, when leaving SDR).
 ///
@@ -352,11 +353,12 @@ fn toggle_tonemapping_method(
 ///
 /// NOTE: seeing actual HDR output requires an HDR-capable display and a
 /// backend advertising the matching surface color space: scRGB-linear on
-/// macOS/iOS (Metal), Windows (Vulkan/DX12), or Wayland (Vulkan); PQ (HDR10)
-/// on Vulkan/DX12/Metal with the OS HDR setting enabled. The UI shows the
-/// *requested* transfer; if the surface cannot carry it, Bevy logs a warning
-/// and degrades (PQ falls back to scRGB, then to plain SDR) — read the
-/// `WindowResolvedTransfer` component on the window to see the outcome.
+/// macOS/iOS (Metal), Windows (Vulkan/DX12), or Wayland (Vulkan); encoded
+/// extended-range sRGB / Display-P3 on Metal, Vulkan, and browser WebGPU;
+/// PQ (HDR10) on Vulkan/DX12/Metal with the OS HDR setting enabled. The UI
+/// shows the *requested* transfer; if the surface cannot carry it, Bevy logs a
+/// warning and degrades to plain SDR — read the `WindowResolvedTransfer`
+/// component on the window to see the outcome.
 fn toggle_hdr_output(
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
@@ -373,7 +375,18 @@ fn toggle_hdr_output(
                 };
                 **tonemapping = Tonemapping::GranTurismo7;
             }
+            // scRGB-linear -> encoded extended-range sRGB (the web HDR path),
+            // Rec.709 gamut (wgpu's `ExtendedSrgb` color space).
             DisplayTransfer::ScRgbLinear => {
+                display_target.transfer = DisplayTransfer::ExtendedSrgb;
+                display_target.gamut = DisplayGamut::Rec709;
+            }
+            // Encoded extended-range sRGB at Rec.709 -> Display-P3 (wide-gamut
+            // HDR, wgpu's `ExtendedDisplayP3` color space).
+            DisplayTransfer::ExtendedSrgb if display_target.gamut != DisplayGamut::DisplayP3 => {
+                display_target.gamut = DisplayGamut::DisplayP3;
+            }
+            DisplayTransfer::ExtendedSrgb => {
                 // PQ is canonically Rec.2020; set the gamut to match (the
                 // encoder coerces PQ targets to a Rec.2020 encode anyway).
                 display_target.transfer = DisplayTransfer::Pq;
@@ -486,9 +499,10 @@ fn update_ui(
     let scn = current_scene.0;
     text.push_str("(H) Hide UI\n");
     text.push_str(&format!(
-        "(O) Cycle HDR output: sRGB -> scRGB -> PQ/HDR10 (requested: {:?}; requires an \
-        HDR-capable display, falls back with a log warning)\n\n",
-        display_target.transfer
+        "(O) Cycle HDR output: sRGB -> scRGB -> extended-sRGB (709/P3) -> PQ/HDR10 \
+        (requested: {:?} {:?}; requires an HDR-capable display, falls back with a log \
+        warning)\n\n",
+        display_target.transfer, display_target.gamut
     ));
     text.push_str("Test Scene: \n");
     text.push_str(&format!(

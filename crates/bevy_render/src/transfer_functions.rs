@@ -63,6 +63,50 @@ pub fn srgb_eotf(signal: f32) -> f32 {
     }
 }
 
+/// `f32::signum` but matching WGSL `sign`: returns `0.0` (not `±1.0`) at
+/// `±0.0`, so the extended-sRGB parity tests agree bit-for-bit with the shader
+/// even when fed exactly `±0.0`.
+fn wgsl_sign(x: f32) -> f32 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// The odd-symmetric ("encoded extended range") sRGB OETF: the sRGB transfer
+/// continued past `[0, 1]` by mirroring the full curve through the origin, so
+/// `srgb_oetf_extended(-c) == -srgb_oetf_extended(c)`.
+///
+/// `V = sign(c) · ( |c|·12.92` for `|c| ≤ 0.0031308`, `1.055·|c|^(1/2.4) −
+/// 0.055` otherwise `)`. This is the transfer the
+/// [`ExtendedSrgb`](bevy_window::DisplayTransfer::ExtendedSrgb) display target
+/// encodes for (wgpu's `ExtendedSrgb` / `ExtendedDisplayP3` surface color
+/// spaces).
+///
+/// Unlike [`srgb_oetf`], which extends only the linear segment below zero, this
+/// applies the full gamma curve to the magnitude of negative (wide-gamut /
+/// out-of-gamut) components and preserves their sign — `abs` keeps `powf` away
+/// from a negative base, so the result is finite for every finite input.
+pub fn srgb_oetf_extended(c: f32) -> f32 {
+    let a = c.abs();
+    let lo = a * 12.92;
+    let hi = 1.055 * ops::powf(a, 1.0 / 2.4) - 0.055;
+    wgsl_sign(c) * if a <= 0.003_130_8 { lo } else { hi }
+}
+
+/// The odd-symmetric extended sRGB EOTF: encoded signal → display-linear.
+/// Exact inverse of [`srgb_oetf_extended`], sign preserved (the screenshot
+/// readback path decodes an extended-sRGB capture with it).
+pub fn srgb_eotf_extended(s: f32) -> f32 {
+    let a = s.abs();
+    let lo = a / 12.92;
+    let hi = ops::powf((a + 0.055) / 1.055, 2.4);
+    wgsl_sign(s) * if a <= 0.04045 { lo } else { hi }
+}
+
 /// Encodes paper-white-relative display-linear color (1.0 = paper white at
 /// the tone-map operator output) as scRGB-linear signal (1.0 = 80 nits):
 /// `V = L × paper_white_nits / 80`.
@@ -220,6 +264,56 @@ mod tests {
         // Negatives use the linear extension (no NaN).
         assert_eq!(srgb_oetf(-0.5), 12.92 * -0.5);
         assert_eq!(srgb_eotf(-0.5), -0.5 / 12.92);
+    }
+
+    #[test]
+    fn srgb_oetf_extended_is_odd_symmetric_and_anchored() {
+        // SDR reference white (scRGB 1.0 = 80 nits) maps to encoded 1.0 (to
+        // within one f32 ULP — `1.055 - 0.055` rounds to 0.99999994, exactly as
+        // the plain `srgb_oetf(1.0)` does): an 80-nit paper white round-trips
+        // SDR through the extended path.
+        assert!((srgb_oetf_extended(1.0) - 1.0).abs() < 1e-6);
+        assert_eq!(srgb_oetf_extended(0.0), 0.0);
+        // Odd symmetry: f(-c) == -f(c) for representative magnitudes (negatives
+        // carry wide-gamut / out-of-gamut residue).
+        for c in [0.001, 0.0031308, 0.05, 0.18, 0.625, 1.0, 1.25, 2.0] {
+            assert!(
+                (srgb_oetf_extended(-c) + srgb_oetf_extended(c)).abs() < 1e-6,
+                "not odd-symmetric at {c}"
+            );
+        }
+        // Continuity at the piecewise breakpoint.
+        let below = srgb_oetf_extended(0.0031308);
+        let above = srgb_oetf_extended(0.0031309);
+        assert!((below - above).abs() < 1e-5);
+        // Below the SDR ceiling the extended OETF coincides with the plain sRGB
+        // OETF (it is a superset, not a different curve, on [0, 1]).
+        for l in [0.0031308, 0.05, 0.18, 0.5, 1.0] {
+            assert!(
+                (srgb_oetf_extended(l) - srgb_oetf(l)).abs() < 1e-6,
+                "diverges at {l}"
+            );
+        }
+        // f64-evaluated reference fixtures (the encoder feeds color*paper_white/80
+        // into this curve): scrgb 0.625 (=0.5 at pw100), 1.25 (=1.0 at pw100,
+        // brighter-than-SDR), -0.125, and 18% gray at pw80.
+        assert!((srgb_oetf_extended(0.625) - 0.812_366).abs() < 1e-4);
+        assert!((srgb_oetf_extended(1.25) - 1.102_795).abs() < 1e-4);
+        assert!((srgb_oetf_extended(-0.125) + 0.388_573).abs() < 1e-4);
+        assert!((srgb_oetf_extended(0.18) - 0.461_356).abs() < 1e-4);
+        // Large negatives stay finite (no NaN from a negative pow base).
+        assert!(srgb_oetf_extended(-1e30).is_finite());
+    }
+
+    #[test]
+    fn srgb_oetf_extended_round_trips() {
+        for c in [-2.0, -1.0, -0.125, -0.001, 0.0, 0.001, 0.18, 1.0, 1.25, 3.0] {
+            let back = srgb_eotf_extended(srgb_oetf_extended(c));
+            assert!((back - c).abs() < 1e-4, "round trip at {c}: got {back}");
+        }
+        // Exact sign handling at ±0.0 (the wgsl_sign(0.0)==0.0 contract).
+        assert_eq!(srgb_oetf_extended(0.0), 0.0);
+        assert_eq!(srgb_eotf_extended(0.0), 0.0);
     }
 
     #[test]

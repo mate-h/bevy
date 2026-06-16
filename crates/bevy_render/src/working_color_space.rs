@@ -118,6 +118,53 @@ pub const REC2020_TO_REC709: Mat3 = Mat3::from_cols(
     Vec3::new(-0.072_849_86, -0.008_349_422, 1.118_729_7),
 );
 
+/// Full-precision (f64-derived) linear Rec.709 (sRGB) → Display-P3 conversion
+/// matrix (both D65). Display-P3 uses the DCI-P3 primaries with a D65 white,
+/// matching [`bevy_color::RgbPrimaries::DISPLAY_P3`]; its blue primary
+/// coincides with Rec.709's, so the third column's off-diagonal entries are
+/// exactly zero.
+///
+/// Used by the display-encoding pass to carry Rec.709 tone-map output into the
+/// P3-gamut [`ExtendedDisplayP3`](bevy_window::DisplayTransfer::ExtendedSrgb)
+/// signal. The Rust literals are bit-identical to `REC_709_TO_DISPLAY_P3` in
+/// `display_encoding.wgsl`; both round to the same `f32` as the f64 derivation
+/// and agree with `bevy_color::rgb_to_rgb_matrix(BT709, DISPLAY_P3)` within a
+/// few ULP (verified by test).
+pub const REC709_TO_DISPLAYP3: Mat3 = Mat3::from_cols(
+    Vec3::new(0.822_461_96, 0.033_194_2, 0.017_082_632),
+    Vec3::new(0.177_538_04, 0.966_805_8, 0.072_397_44),
+    Vec3::new(0.0, 0.0, 0.910_519_96),
+);
+
+/// Full-precision (f64-derived) linear Display-P3 → Rec.709 (sRGB) conversion
+/// matrix (both D65). Inverse of [`REC709_TO_DISPLAYP3`]; used to decode a
+/// Display-P3 screenshot readback back into Rec.709 display-linear.
+pub const DISPLAYP3_TO_REC709: Mat3 = Mat3::from_cols(
+    Vec3::new(1.224_940_2, -0.042_056_955, -0.019_637_555),
+    Vec3::new(-0.224_940_18, 1.042_056_9, -0.078_636_04),
+    Vec3::new(0.0, 0.0, 1.098_273_6),
+);
+
+/// Full-precision (f64-derived) linear Rec.2020 → Display-P3 conversion matrix
+/// (both D65). Used by the display-encoding pass for the GT7-on-HDR path,
+/// whose tone-map output is native Rec.2020, onto a P3-gamut signal (a gamut
+/// *contraction*: Display-P3 ⊂ Rec.2020). Bit-identical to
+/// `REC_2020_TO_DISPLAY_P3` in `display_encoding.wgsl`.
+pub const REC2020_TO_DISPLAYP3: Mat3 = Mat3::from_cols(
+    Vec3::new(1.343_578_2, -0.065_297_455, 0.002_821_787_3),
+    Vec3::new(-0.282_179_68, 1.075_787_9, -0.019_598_495),
+    Vec3::new(-0.061_398_58, -0.010_490_463, 1.016_776_7),
+);
+
+/// Full-precision (f64-derived) linear Display-P3 → Rec.2020 conversion matrix
+/// (both D65). Inverse of [`REC2020_TO_DISPLAYP3`], kept for symmetry and the
+/// mutual-inverse test.
+pub const DISPLAYP3_TO_REC2020: Mat3 = Mat3::from_cols(
+    Vec3::new(0.753_833_06, 0.045_743_85, -0.001_210_340_3),
+    Vec3::new(0.198_597_37, 0.941_777_2, 0.017_601_717),
+    Vec3::new(0.047_569_595, 0.012_478_931, 0.983_608_6),
+);
+
 /// Converts a linear Rec.709 color into the given working color space.
 ///
 /// This is THE shared CPU seam helper for the working-space axis: every
@@ -165,7 +212,17 @@ mod tests {
         let a = a.to_cols_array();
         let b = b.to_cols_array();
         for (index, (lhs, rhs)) in a.iter().zip(b.iter()).enumerate() {
-            let rel = (lhs - rhs).abs() / lhs.abs().max(rhs.abs());
+            // Entries that are both effectively zero (a shared primary makes
+            // some off-diagonals exact zero in closed form — we lock those
+            // literals to `0.0`, while the runtime derivation leaves ~1e-17
+            // floating-point noise) compare by absolute, not relative, error:
+            // 0 vs 1e-17 is a 100% *relative* difference but a 0% real one.
+            let scale = lhs.abs().max(rhs.abs());
+            let rel = if scale < 1e-6 {
+                0.0
+            } else {
+                (lhs - rhs).abs() / scale
+            };
             assert!(
                 rel <= max_rel,
                 "{context}: entry {index} differs by relative {rel:e}: {lhs:?} ({:#010x}) vs {rhs:?} ({:#010x})",
@@ -197,6 +254,64 @@ mod tests {
             1e-5,
             "REC2020_TO_REC709 vs rgb_to_rgb_matrix(BT2020, BT709)",
         );
+        // Display-P3 shares the D65 white point with both BT.709 and BT.2020,
+        // so (unlike the BT.2087 Rec.2020 constants) there is no
+        // tabulated-white divergence — the literals agree with the runtime
+        // derivation to the same tight tolerance.
+        assert_mat3_rel_eq(
+            REC709_TO_DISPLAYP3,
+            rgb_to_rgb_matrix(RgbPrimaries::BT709, RgbPrimaries::DISPLAY_P3),
+            1e-5,
+            "REC709_TO_DISPLAYP3 vs rgb_to_rgb_matrix(BT709, DISPLAY_P3)",
+        );
+        assert_mat3_rel_eq(
+            DISPLAYP3_TO_REC709,
+            rgb_to_rgb_matrix(RgbPrimaries::DISPLAY_P3, RgbPrimaries::BT709),
+            1e-5,
+            "DISPLAYP3_TO_REC709 vs rgb_to_rgb_matrix(DISPLAY_P3, BT709)",
+        );
+        assert_mat3_rel_eq(
+            REC2020_TO_DISPLAYP3,
+            rgb_to_rgb_matrix(RgbPrimaries::BT2020, RgbPrimaries::DISPLAY_P3),
+            1e-5,
+            "REC2020_TO_DISPLAYP3 vs rgb_to_rgb_matrix(BT2020, DISPLAY_P3)",
+        );
+        assert_mat3_rel_eq(
+            DISPLAYP3_TO_REC2020,
+            rgb_to_rgb_matrix(RgbPrimaries::DISPLAY_P3, RgbPrimaries::BT2020),
+            1e-5,
+            "DISPLAYP3_TO_REC2020 vs rgb_to_rgb_matrix(DISPLAY_P3, BT2020)",
+        );
+    }
+
+    /// The Display-P3 matrices are gray-preserving (rows sum to 1, shared D65
+    /// white) and mutual inverses with their Rec.709 / Rec.2020 counterparts.
+    #[test]
+    fn display_p3_matrices_are_gray_preserving_inverses() {
+        let white = Vec3::ONE;
+        for m in [
+            REC709_TO_DISPLAYP3,
+            DISPLAYP3_TO_REC709,
+            REC2020_TO_DISPLAYP3,
+            DISPLAYP3_TO_REC2020,
+        ] {
+            let mapped = m * white;
+            assert!(
+                (mapped - white).abs().max_element() < 1e-6,
+                "white drifted: {mapped}"
+            );
+        }
+        let sample = Vec3::new(0.25, 0.5, 0.75);
+        for (fwd, inv) in [
+            (REC709_TO_DISPLAYP3, DISPLAYP3_TO_REC709),
+            (REC2020_TO_DISPLAYP3, DISPLAYP3_TO_REC2020),
+        ] {
+            let round_trip = inv * (fwd * sample);
+            assert!(
+                (round_trip - sample).abs().max_element() < 1e-5,
+                "round trip drifted: {round_trip}"
+            );
+        }
     }
 
     /// Both matrices are gray-preserving (rows sum to 1) and mutual inverses.

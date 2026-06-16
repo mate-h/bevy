@@ -249,6 +249,13 @@ pub enum DisplayGamut {
     /// Display P3 primaries (DCI-P3 primaries with a D65 white point), as
     /// used by most Apple displays and many wide-gamut monitors. Wider than
     /// Rec.709, narrower than Rec.2020.
+    ///
+    /// Realized as wide-gamut HDR output by pairing with
+    /// [`DisplayTransfer::ExtendedSrgb`] (wgpu's `ExtendedDisplayP3` surface
+    /// color space); the [`Srgb`](DisplayTransfer::Srgb),
+    /// [`ScRgbLinear`](DisplayTransfer::ScRgbLinear), and
+    /// [`Pq`](DisplayTransfer::Pq) transfers coerce it to their canonical
+    /// gamut (Rec.709 or Rec.2020) for encoding.
     DisplayP3,
     /// ITU-R BT.2020 primaries, the wide gamut used by HDR10 and most HDR
     /// video standards. Physical displays typically cover only part of this
@@ -263,19 +270,21 @@ pub enum DisplayGamut {
 /// color (already tone-mapped and gamut-mapped) into the non-linear (or
 /// scaled linear) signal values the display expects.
 ///
-/// Backend support varies and depends on wgpu's surface color-space API
-/// (tracked upstream under
-/// [wgpu#2920](https://github.com/gfx-rs/wgpu/issues/2920)): [`Srgb`] is
-/// available everywhere; [`ScRgbLinear`] on macOS/iOS (Metal), Windows
-/// (Vulkan/DX12), Wayland (Vulkan), and browser WebGPU on HDR-capable
-/// displays; [`Pq`] (HDR10) on Vulkan, DX12, and Metal when the OS has HDR
-/// output enabled. [`Hlg`] requests are fulfilled as PQ (see the variant
+/// Backend support varies and depends on wgpu's surface color-space API:
+/// [`Srgb`] is available everywhere; [`ScRgbLinear`] (linear scRGB) on
+/// macOS/iOS (Metal), Windows (Vulkan/DX12), and Wayland (Vulkan) — it is
+/// **native-only**, as browser WebGPU cannot express a linear-transfer canvas;
+/// [`ExtendedSrgb`] (encoded extended-range sRGB) on Metal, Vulkan
+/// (Rec.709 gamut only), and browser WebGPU on HDR-capable displays — this is
+/// the web HDR path; [`Pq`] (HDR10) on Vulkan, DX12, and Metal when the OS has
+/// HDR output enabled. [`Hlg`] requests are fulfilled as PQ (see the variant
 /// docs). Unfulfillable requests degrade with a warning.
 ///
 /// [`Srgb`]: DisplayTransfer::Srgb
 /// [`ScRgbLinear`]: DisplayTransfer::ScRgbLinear
 /// [`Pq`]: DisplayTransfer::Pq
 /// [`Hlg`]: DisplayTransfer::Hlg
+/// [`ExtendedSrgb`]: DisplayTransfer::ExtendedSrgb
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "bevy_reflect",
@@ -298,6 +307,12 @@ pub enum DisplayTransfer {
     /// below `0.0`) are valid. Used with `Rgba16Float` surfaces. The encoder
     /// scales by `paper_white_nits / 80` so that scene paper white lands on
     /// the display's configured paper white.
+    ///
+    /// This is the linear extended-range transfer and is **native-only**
+    /// (Metal, Vulkan, DX12); browser WebGPU cannot express a linear-transfer
+    /// canvas, so on the web request
+    /// [`ExtendedSrgb`](Self::ExtendedSrgb) — the encoded sibling — for HDR
+    /// output instead.
     ///
     /// scRGB signals are always expressed in (extended) **Rec.709/sRGB
     /// coordinates**, whatever the physical gamut of the panel: the OS
@@ -328,12 +343,43 @@ pub enum DisplayTransfer {
     /// double-tone-map. A correct HLG output path would need a
     /// scene-referred encoder input, which Bevy does not have.
     Hlg,
+    /// Extended-range sRGB (IEC 61966-2-2, **encoded** form): the sRGB transfer
+    /// function continued past `[0, 1]` by mirroring the curve through the
+    /// origin (odd-symmetric, sign-preserving), an HDR signal where `1.0` is
+    /// SDR reference white and values above `1.0` (and below `0.0`) carry
+    /// brighter-than-SDR and out-of-gamut color.
+    ///
+    /// This is the *encoded* (gamma) sibling of [`ScRgbLinear`](Self::ScRgbLinear):
+    /// the renderer applies the same `paper_white_nits / 80` scRGB
+    /// normalization, then the extended sRGB OETF (`srgb_oetf_extended` in
+    /// `bevy_render::transfer_functions`) instead of
+    /// leaving the signal linear. An 80-nit paper white therefore round-trips
+    /// SDR through this transfer (the OETF coincides with the plain sRGB curve
+    /// on `[0, 1]`).
+    ///
+    /// Unlike `ScRgbLinear`, this transfer is **not** gamut-agnostic — it pairs
+    /// with [`DisplayTarget::gamut`] to select the surface color space:
+    /// - [`DisplayGamut::Rec709`] → wgpu `ExtendedSrgb` (Vulkan
+    ///   `EXTENDED_SRGB_NONLINEAR_EXT`, Metal `kCGColorSpaceExtendedSRGB`,
+    ///   browser WebGPU `srgb` canvas + `toneMapping: "extended"`);
+    /// - [`DisplayGamut::DisplayP3`] → wgpu `ExtendedDisplayP3` (Metal
+    ///   `kCGColorSpaceExtendedDisplayP3`, browser WebGPU `display-p3` canvas +
+    ///   `toneMapping: "extended"`); the encoder converts Rec.709/Rec.2020
+    ///   tone-map output into P3 primaries before the OETF.
+    ///
+    /// [`DisplayGamut::Rec2020`] has no encoded-extended surface and is coerced
+    /// to Rec.709 for this transfer. Not available on DX12 (DXGI has no
+    /// encoded-extended-range swapchain color space); the P3 variant is also
+    /// unavailable on Vulkan. This is the **web HDR path**: browser WebGPU
+    /// cannot express a linear-transfer canvas, so `ScRgbLinear` is native-only
+    /// and the web reaches HDR through this transfer.
+    ExtendedSrgb,
 }
 
 impl DisplayTransfer {
     /// Returns `true` if this is a high-dynamic-range transfer function
-    /// ([`ScRgbLinear`](Self::ScRgbLinear), [`Pq`](Self::Pq), or
-    /// [`Hlg`](Self::Hlg)).
+    /// ([`ScRgbLinear`](Self::ScRgbLinear), [`Pq`](Self::Pq),
+    /// [`Hlg`](Self::Hlg), or [`ExtendedSrgb`](Self::ExtendedSrgb)).
     ///
     /// This is the single-sourced predicate the display pipeline uses to
     /// decide whether a target takes the HDR path (shader-side transfer
@@ -342,7 +388,10 @@ impl DisplayTransfer {
     /// at surface negotiation (see [`Hlg`](Self::Hlg)): an HLG *request* is
     /// an HDR request.
     pub const fn is_hdr(&self) -> bool {
-        matches!(self, Self::ScRgbLinear | Self::Pq | Self::Hlg)
+        matches!(
+            self,
+            Self::ScRgbLinear | Self::Pq | Self::Hlg | Self::ExtendedSrgb
+        )
     }
 }
 
@@ -482,5 +531,6 @@ mod tests {
         assert!(DisplayTransfer::ScRgbLinear.is_hdr());
         assert!(DisplayTransfer::Pq.is_hdr());
         assert!(DisplayTransfer::Hlg.is_hdr());
+        assert!(DisplayTransfer::ExtendedSrgb.is_hdr());
     }
 }

@@ -9,6 +9,7 @@ use crate::{
     renderer::RenderDevice,
     texture::{GpuImage, ManualTextureViews, OutputColorAttachment},
     view::{prepare_view_attachments, prepare_view_targets, ViewTargetAttachments, WindowSurfaces},
+    working_color_space::DISPLAYP3_TO_REC709,
     ExtractSchedule, GpuResourceAppExt, MainWorld, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use alloc::{borrow::Cow, sync::Arc};
@@ -28,12 +29,13 @@ use bevy_material::{
         VertexState,
     },
 };
+use bevy_math::Vec3;
 use bevy_platform::collections::HashSet;
 use bevy_reflect::Reflect;
 use bevy_shader::Shader;
 use bevy_tasks::AsyncComputeTaskPool;
 use bevy_utils::default;
-use bevy_window::{DisplayTransfer, PrimaryWindow, WindowRef};
+use bevy_window::{DisplayGamut, DisplayTransfer, PrimaryWindow, WindowRef};
 use core::ops::Deref;
 use std::{
     path::Path,
@@ -116,14 +118,31 @@ struct ScreenshotPreparedState {
     pub bind_group: BindGroup,
     pub pipeline_id: CachedRenderPipelineId,
     pub size: Extent3d,
-    /// True when the captured texture holds a PQ-encoded (SMPTE ST 2084)
-    /// signal — a window surface negotiated in the HDR10 color space, or a
-    /// manual `Image` / `TextureView` target whose [`ManualDisplayTargets`]
-    /// entry requests PQ (or HLG, which the encoder fulfils as PQ). The
-    /// readback is then decoded through the PQ EOTF to display-linear values
-    /// before the image is handed to the main world (see
+    /// How the captured texture's signal is decoded back to display-linear
+    /// values (at the scRGB scale, `1.0` = 80 nits) before the image is handed
+    /// to the main world. See [`ScreenshotDecode`].
+    pub decode: ScreenshotDecode,
+}
+
+/// How a captured HDR screenshot's signal is decoded back to display-linear
+/// values at the scRGB scale (`1.0` = 80 nits), matching the transfer the
+/// display-encoding pass applied to the surface it was captured from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScreenshotDecode {
+    /// The captured values are already display-linear: an SDR sRGB-view format
+    /// (the hardware decode happens on read), or a
+    /// [`DisplayTransfer::ScRgbLinear`] swapchain (linear by construction). No
+    /// decode.
+    Linear,
+    /// HDR10 ([`DisplayTransfer::Pq`]): decode through the PQ EOTF (see
     /// [`decode_pq_screenshot`]).
-    pub pq_encoded: bool,
+    Pq,
+    /// Encoded extended-range sRGB ([`DisplayTransfer::ExtendedSrgb`]): decode
+    /// through the extended sRGB EOTF (see [`decode_extended_srgb_screenshot`]).
+    /// `display_p3` is true for the `ExtendedDisplayP3` surface, whose decoded
+    /// linear values are converted back to Rec.709 so every HDR screenshot
+    /// shares one Rec.709, scRGB-scale convention.
+    ExtendedSrgb { display_p3: bool },
 }
 
 #[derive(Resource, Deref, DerefMut)]
@@ -141,11 +160,15 @@ struct RenderScreenshotsSender(Sender<(Entity, Image)>);
 /// Saves the captured screenshot to disk at the provided path.
 ///
 /// Screenshots of HDR surfaces decode to floating-point images holding
-/// display-linear values at the scRGB scale (`1.0` = 80 nits): `Rgba16Float`
-/// scRGB-linear swapchains (`DisplayTransfer::ScRgbLinear`) are read back
-/// as-is (their signal is already linear at that scale), and HDR10 swapchains
-/// (`DisplayTransfer::Pq`) are decoded from the PQ signal through the PQ EOTF
-/// to the same scale (see `decode_pq_screenshot`). They are written
+/// display-linear Rec.709 values at the scRGB scale (`1.0` = 80 nits):
+/// `Rgba16Float` scRGB-linear swapchains (`DisplayTransfer::ScRgbLinear`) are
+/// read back as-is (their signal is already linear at that scale), HDR10
+/// swapchains (`DisplayTransfer::Pq`) are decoded from the PQ signal through the
+/// PQ EOTF (see `decode_pq_screenshot`), and the encoded extended-range sRGB
+/// swapchains (`DisplayTransfer::ExtendedSrgb`, i.e. wgpu `ExtendedSrgb` /
+/// `ExtendedDisplayP3`) are decoded through the extended sRGB EOTF — converting
+/// Display-P3 back to Rec.709 — to the same scale (see
+/// `decode_extended_srgb_screenshot`). They are written
 /// losslessly when the path's container supports floating point (`OpenEXR`
 /// `.exr`, Radiance `.hdr` — note these require the corresponding `image`
 /// crate codec to be enabled, e.g. Bevy's `exr` feature); for 8-bit
@@ -318,19 +341,26 @@ fn extract_screenshots(
     system_state.apply(&mut main_world);
 }
 
-/// Whether a manual (`Image` / `TextureView`) render target carries a PQ-encoded
-/// signal: its registered [`ManualDisplayTargets`] entry requests PQ, or HLG
-/// (which the display encoder fulfils as PQ). Manual targets resolve to the
-/// requested transfer verbatim — there is no surface negotiation to downgrade
-/// them — so the encoder runs exactly when this returns true.
-fn manual_target_pq_encoded(
+/// How a manual (`Image` / `TextureView`) render target's signal must be
+/// decoded, from its registered [`ManualDisplayTargets`] entry. Manual targets
+/// resolve to the requested transfer verbatim — there is no surface
+/// negotiation to downgrade them — so this mirrors the encoder's own coercion:
+/// HLG is fulfilled as PQ, and `ExtendedSrgb` keeps a Display-P3 gamut while
+/// coercing every other gamut to Rec.709.
+fn manual_target_decode(
     manual_display_targets: &ManualDisplayTargets,
     target: &NormalizedRenderTarget,
-) -> bool {
-    matches!(
-        manual_display_targets.get(target).map(|t| t.transfer),
-        Some(DisplayTransfer::Pq | DisplayTransfer::Hlg)
-    )
+) -> ScreenshotDecode {
+    match manual_display_targets
+        .get(target)
+        .map(|t| (t.transfer, t.gamut))
+    {
+        Some((DisplayTransfer::Pq | DisplayTransfer::Hlg, _)) => ScreenshotDecode::Pq,
+        Some((DisplayTransfer::ExtendedSrgb, gamut)) => ScreenshotDecode::ExtendedSrgb {
+            display_p3: gamut == DisplayGamut::DisplayP3,
+        },
+        _ => ScreenshotDecode::Linear,
+    }
 }
 
 fn prepare_screenshots(
@@ -375,10 +405,19 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
-                // HDR10 surfaces hold a PQ-encoded signal (the display
-                // encoder's PQ OETF output); flag it so the readback is
-                // decoded back to display-linear values.
-                state.pq_encoded = surface_data.resolved_transfer == DisplayTransfer::Pq;
+                // HDR surfaces hold an encoded signal (the display encoder's
+                // OETF output); record how to decode the readback back to
+                // display-linear values. The surface's configured color space
+                // distinguishes the Rec.709 `ExtendedSrgb` from the P3
+                // `ExtendedDisplayP3`.
+                state.decode = match surface_data.resolved_transfer {
+                    DisplayTransfer::Pq => ScreenshotDecode::Pq,
+                    DisplayTransfer::ExtendedSrgb => ScreenshotDecode::ExtendedSrgb {
+                        display_p3: surface_data.configuration.color_space
+                            == wgpu::SurfaceColorSpace::ExtendedDisplayP3,
+                    },
+                    _ => ScreenshotDecode::Linear,
+                };
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
@@ -399,7 +438,7 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
-                state.pq_encoded = manual_target_pq_encoded(&manual_display_targets, target);
+                state.decode = manual_target_decode(&manual_display_targets, target);
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
@@ -424,7 +463,7 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
-                state.pq_encoded = manual_target_pq_encoded(&manual_display_targets, target);
+                state.decode = manual_target_decode(&manual_display_targets, target);
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
@@ -480,7 +519,7 @@ fn prepare_screenshot_state(
             bind_group,
             pipeline_id,
             size,
-            pq_encoded: false,
+            decode: ScreenshotDecode::Linear,
         },
     )
 }
@@ -726,7 +765,7 @@ pub(crate) fn collect_screenshots(world: &mut World) {
         let Ok(pixel_size) = texture_format.pixel_size() else {
             continue;
         };
-        let pq_encoded = prepared.pq_encoded;
+        let decode = prepared.decode;
         let buffer = prepared.buffer.clone();
 
         let finish = async move {
@@ -764,10 +803,12 @@ pub(crate) fn collect_screenshots(world: &mut World) {
                 result.truncate(initial_row_bytes * height as usize);
             }
 
-            let (result, texture_format) = if pq_encoded {
-                decode_pq_screenshot(result, texture_format)
-            } else {
-                (result, texture_format)
+            let (result, texture_format) = match decode {
+                ScreenshotDecode::Linear => (result, texture_format),
+                ScreenshotDecode::Pq => decode_pq_screenshot(result, texture_format),
+                ScreenshotDecode::ExtendedSrgb { display_p3 } => {
+                    decode_extended_srgb_screenshot(result, texture_format, display_p3)
+                }
             };
 
             if let Err(e) = sender.send((
@@ -861,9 +902,65 @@ fn decode_pq_screenshot(data: Vec<u8>, format: TextureFormat) -> (Vec<u8>, Textu
     )
 }
 
+/// Decodes an encoded extended-range sRGB (`ExtendedSrgb` / `ExtendedDisplayP3`)
+/// screenshot readback into display-linear `Rgba32Float` data.
+///
+/// These swapchains hold the gamma-encoded extended sRGB *signal* (the display
+/// encoder's odd-symmetric sRGB OETF output); saved as-is, the values would be
+/// mislabeled as linear. Each color channel is decoded through the extended
+/// sRGB EOTF ([`crate::transfer_functions::srgb_eotf_extended`]), which yields
+/// display-linear values at the **same scale scRGB screenshots use: `1.0` = 80
+/// nits** (the OETF input is the scRGB-normalized `color × paper_white / 80`).
+/// When `display_p3` (the `ExtendedDisplayP3` surface), the decoded P3-primary
+/// values are converted back to Rec.709 via [`DISPLAYP3_TO_REC709`] so every
+/// HDR screenshot shares one Rec.709 scale. Alpha passes through.
+///
+/// Captured from the `Rgba16Float` container these spaces negotiate; any other
+/// format is passed through unchanged with a warning.
+fn decode_extended_srgb_screenshot(
+    data: Vec<u8>,
+    format: TextureFormat,
+    display_p3: bool,
+) -> (Vec<u8>, TextureFormat) {
+    use crate::transfer_functions::srgb_eotf_extended;
+
+    let TextureFormat::Rgba16Float = format else {
+        warn!(
+            "Extended-sRGB-encoded screenshot readback in unexpected format {format:?}; \
+            saving the raw encoded signal values."
+        );
+        return (data, format);
+    };
+
+    let decoded: Vec<f32> = data
+        .chunks_exact(8)
+        .flat_map(|texel| {
+            let channel =
+                |i: usize| f16_bits_to_f32(u16::from_le_bytes([texel[2 * i], texel[2 * i + 1]]));
+            let mut rgb = Vec3::new(
+                srgb_eotf_extended(channel(0)),
+                srgb_eotf_extended(channel(1)),
+                srgb_eotf_extended(channel(2)),
+            );
+            if display_p3 {
+                rgb = DISPLAYP3_TO_REC709 * rgb;
+            }
+            [rgb.x, rgb.y, rgb.z, channel(3)]
+        })
+        .collect();
+
+    (
+        decoded
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
+        TextureFormat::Rgba32Float,
+    )
+}
+
 /// Converts IEEE 754 binary16 bits to an `f32`.
 ///
-/// `bevy_render` has no `half` dependency, and the PQ screenshot decode is
+/// `bevy_render` has no `half` dependency, and the HDR screenshot decodes are
 /// the only place it would be needed, so this is a minimal local conversion
 /// (handles normals, subnormals, zeros, infinities, and NaN).
 fn f16_bits_to_f32(bits: u16) -> f32 {
@@ -961,6 +1058,69 @@ mod tests {
     fn pq_decode_passes_unexpected_formats_through() {
         let data = vec![0u8, 1, 2, 3];
         let (out, format) = decode_pq_screenshot(data.clone(), TextureFormat::Rgba8Unorm);
+        assert_eq!(out, data);
+        assert_eq!(format, TextureFormat::Rgba8Unorm);
+    }
+
+    /// Builds an `Rgba16Float` texel from four f16-as-f32 channel values.
+    fn rgba16f_texel(rgba: [u16; 4]) -> Vec<u8> {
+        rgba.iter().flat_map(|bits| bits.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn extended_srgb_decode_rec709() {
+        use crate::transfer_functions::srgb_eotf_extended;
+        // Each RGB channel at signal 1.0 (f16 0x3c00), opaque alpha.
+        let texel = rgba16f_texel([0x3c00, 0x3c00, 0x3c00, 0x3c00]);
+        let (decoded, format) =
+            decode_extended_srgb_screenshot(texel, TextureFormat::Rgba16Float, false);
+        assert_eq!(format, TextureFormat::Rgba32Float);
+        let values: Vec<f32> = decoded
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // Signal 1.0 decodes through the extended sRGB EOTF to linear 1.0
+        // (the 80-nit scRGB reference white).
+        for channel in &values[0..3] {
+            assert!(
+                (channel - srgb_eotf_extended(1.0)).abs() < 1e-4,
+                "expected ~1.0, got {channel}"
+            );
+        }
+        assert_eq!(values[3], 1.0);
+    }
+
+    #[test]
+    fn extended_srgb_decode_display_p3_converts_to_rec709() {
+        // White is preserved through the P3 -> Rec.709 conversion.
+        let white = rgba16f_texel([0x3c00, 0x3c00, 0x3c00, 0x3c00]);
+        let (decoded, _) = decode_extended_srgb_screenshot(white, TextureFormat::Rgba16Float, true);
+        let values: Vec<f32> = decoded
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        for channel in &values[0..3] {
+            assert!((channel - 1.0).abs() < 1e-4, "P3 white drifted: {channel}");
+        }
+
+        // Pure-red P3 signal: EOTF -> P3 linear (1, 0, 0), then P3 -> Rec.709.
+        let red = rgba16f_texel([0x3c00, 0x0000, 0x0000, 0x3c00]);
+        let (decoded, _) = decode_extended_srgb_screenshot(red, TextureFormat::Rgba16Float, true);
+        let values: Vec<f32> = decoded
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let expected = DISPLAYP3_TO_REC709 * Vec3::new(1.0, 0.0, 0.0);
+        assert!((values[0] - expected.x).abs() < 1e-4, "{}", values[0]);
+        assert!((values[1] - expected.y).abs() < 1e-4, "{}", values[1]);
+        assert!((values[2] - expected.z).abs() < 1e-4, "{}", values[2]);
+    }
+
+    #[test]
+    fn extended_srgb_decode_passes_unexpected_formats_through() {
+        let data = vec![0u8, 1, 2, 3];
+        let (out, format) =
+            decode_extended_srgb_screenshot(data.clone(), TextureFormat::Rgba8Unorm, false);
         assert_eq!(out, data);
         assert_eq!(format, TextureFormat::Rgba8Unorm);
     }

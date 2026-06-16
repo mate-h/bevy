@@ -73,6 +73,65 @@ fn srgb_eotf(signal: vec3<f32>) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// Extended-range sRGB (IEC 61966-2-2 encoded form / "scRGB nonlinear")
+// ---------------------------------------------------------------------------
+
+// Odd-symmetric ("encoded extended range") sRGB OETF for one channel: the sRGB
+// transfer continued past `[0, 1]` by mirroring the full curve through the
+// origin, so `f(-c) == -f(c)`:
+//
+//   V = sign(c) * ( |c|*12.92                  if |c| <= 0.0031308
+//                   1.055*|c|^(1/2.4) - 0.055  otherwise )
+//
+// This is the transfer the `ExtendedSrgb` / `ExtendedDisplayP3` surface color
+// spaces expect (Vulkan `EXTENDED_SRGB_NONLINEAR_EXT`, Metal
+// `kCGColorSpaceExtendedSRGB` / `kCGColorSpaceExtendedDisplayP3`, the browser
+// WebGPU `srgb` / `display-p3` canvas with `toneMapping: "extended"`).
+//
+// Distinct from `srgb_oetf_channel`, which extends only the LINEAR segment
+// below zero (`12.92 * c`): that is the right pow-safety behavior for an SDR
+// `[0, 1]`-domain encode, but the extended-range HDR signal must apply the
+// full gamma curve to the magnitude of negative (wide-gamut / out-of-gamut)
+// components and preserve their sign. `abs` keeps `pow` away from a negative
+// base, so the result is NaN-free for every finite input.
+fn srgb_oetf_extended_channel(c: f32) -> f32 {
+    let a = abs(c);
+    let lo = a * 12.92;
+    let hi = 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+    return sign(c) * select(hi, lo, a <= 0.0031308);
+}
+
+// Per-channel odd-symmetric extended sRGB OETF; see
+// `srgb_oetf_extended_channel`.
+fn srgb_oetf_extended(linear: vec3<f32>) -> vec3<f32> {
+    return vec3(
+        srgb_oetf_extended_channel(linear.x),
+        srgb_oetf_extended_channel(linear.y),
+        srgb_oetf_extended_channel(linear.z),
+    );
+}
+
+// Odd-symmetric extended sRGB EOTF for one channel: encoded signal →
+// display-linear. Exact inverse of `srgb_oetf_extended_channel`, sign
+// preserved (the screenshot path decodes an extended-sRGB readback with it).
+fn srgb_eotf_extended_channel(s: f32) -> f32 {
+    let a = abs(s);
+    let lo = a / 12.92;
+    let hi = pow((a + 0.055) / 1.055, 2.4);
+    return sign(s) * select(hi, lo, a <= 0.04045);
+}
+
+// Per-channel odd-symmetric extended sRGB EOTF; see
+// `srgb_eotf_extended_channel`.
+fn srgb_eotf_extended(signal: vec3<f32>) -> vec3<f32> {
+    return vec3(
+        srgb_eotf_extended_channel(signal.x),
+        srgb_eotf_extended_channel(signal.y),
+        srgb_eotf_extended_channel(signal.z),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // scRGB (IEC 61966-2-2, linear form)
 // ---------------------------------------------------------------------------
 

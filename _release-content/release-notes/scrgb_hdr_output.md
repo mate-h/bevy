@@ -32,10 +32,21 @@ Surface negotiation now selects a real (format, color space) pair through
 wgpu's surface color-space API:
 
 - **`DisplayTransfer::ScRgbLinear`** configures an `Rgba16Float` swapchain in
-  the extended-sRGB-linear color space (1.0 = 80 nits, values above 1.0 reach
-  into the display's HDR headroom). Available on macOS/iOS (Metal EDR),
-  Windows (Vulkan/DX12), Wayland (Vulkan, Mesa 25.1+ color management), and
-  browser WebGPU on HDR-capable displays.
+  the extended-sRGB-**linear** color space (1.0 = 80 nits, values above 1.0
+  reach into the display's HDR headroom). Available on macOS/iOS (Metal EDR),
+  Windows (Vulkan/DX12), and Wayland (Vulkan, Mesa 25.1+ color management) —
+  this is **native-only** (browser WebGPU cannot present a linear-transfer
+  canvas; use `ExtendedSrgb` there).
+- **`DisplayTransfer::ExtendedSrgb`** is the *encoded* (gamma) sibling of
+  scRGB-linear: the same 1.0 = 80 nits normalization, but the signal is run
+  through the odd-symmetric extended sRGB OETF instead of staying linear. It is
+  the **web HDR path** and is also available on Metal and Vulkan. Its surface
+  color space follows `DisplayTarget::gamut`: `DisplayGamut::Rec709` configures
+  the `ExtendedSrgb` color space, and `DisplayGamut::DisplayP3` configures
+  `ExtendedDisplayP3` — wide-gamut HDR where the encoder converts the
+  tone-mapped output into P3 primaries before encoding (Metal and browser
+  WebGPU). This is the first transfer for which `DisplayGamut::DisplayP3` is a
+  real, non-coerced encoder target.
 - **`DisplayTransfer::Pq`** configures an HDR10 swapchain — `Rgb10a2Unorm`
   preferred (PQ's native 10-bit container), `Rgba16Float` where that is what
   the backend advertises — carrying the PQ (SMPTE ST 2084) signal in Rec.2020
@@ -83,16 +94,20 @@ than failing surface validation.
 
 Changing `DisplayTarget::transfer` at runtime reconfigures the surface with
 fresh (format, color space) negotiation (and invalidates the window's view
-targets), so HDR output can be toggled from a settings menu. Changes to the
-other calibration fields (paper white, peak, gamut) flow through uniforms
-without any surface work.
+targets), so HDR output can be toggled from a settings menu. A
+`DisplayTarget::gamut` change is treated the same way when the transfer is
+`ExtendedSrgb` (it selects `ExtendedSrgb` vs `ExtendedDisplayP3`); paper white,
+peak, and every other gamut change flow through uniforms without any surface
+work.
 
 Screenshots understand the new surfaces too: scRGB (`Rgba16Float`) captures
-read back as display-linear floats, and HDR10 captures are decoded from the
-PQ signal through the PQ EOTF to display-linear values at the same scale
-(1.0 = 80 nits). `save_to_disk` writes float images losslessly to
-float-capable containers (OpenEXR `.exr` with Bevy's `exr` feature, Radiance
-`.hdr`); saving to an 8-bit format clamps, sRGB-encodes, and warns.
+read back as display-linear floats, HDR10 captures are decoded from the PQ
+signal through the PQ EOTF, and encoded extended-range sRGB captures are
+decoded through the extended sRGB EOTF (converting `ExtendedDisplayP3` back to
+Rec.709) — all to the same display-linear Rec.709 scale (1.0 = 80 nits).
+`save_to_disk` writes float images losslessly to float-capable containers
+(OpenEXR `.exr` with Bevy's `exr` feature, Radiance `.hdr`); saving to an
+8-bit format clamps, sRGB-encodes, and warns.
 
 **Caveat: this currently requires a patched wgpu.** The surface color-space
 API (`SurfaceColorSpace`, per-format `format_capabilities`,

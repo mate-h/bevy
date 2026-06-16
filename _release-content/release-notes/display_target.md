@@ -11,7 +11,9 @@ on: the new `DisplayTarget` component in `bevy_window`.
 "paper white" is, the peak luminance the display can reach, its black level,
 its color gamut (`DisplayGamut`: Rec.709, Display P3, or Rec.2020), and the
 transfer function the final signal should be encoded with (`DisplayTransfer`:
-sRGB, scRGB-linear, PQ, or HLG). It is a required component of `Window`, so
+sRGB, scRGB-linear, PQ, HLG, or the encoded extended-range `ExtendedSrgb` —
+the web HDR path, which also pairs with `DisplayGamut::DisplayP3` for
+wide-gamut HDR). It is a required component of `Window`, so
 every window automatically gets one. The default, `DisplayTarget::SDR_SRGB`
 (paper white and peak of 100 nits, Rec.709, sRGB), reproduces Bevy's existing
 SDR output exactly. It is the foundation that this release's HDR output

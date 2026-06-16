@@ -19,14 +19,21 @@
 //          whatever the panel's physical gamut, so prepare coerces the scRGB
 //          encoding gamut to Rec.709 (the compositor maps to the panel
 //          itself),
-//        - no def: identity (Rec.709 → scRGB, or GT7's Rec.2020 →
+//        - `DISPLAY_GAMUT_DISPLAYP3`: Rec.709 source → Display-P3 signal
+//          (the `ExtendedDisplayP3` color space; an expansion, in-gamut by
+//          construction),
+//        - `GAMUT_REC2020_TO_DISPLAYP3`: GT7's Rec.2020 source → Display-P3
+//          signal (a contraction; keys the compression like the Rec.709 case),
+//        - no def: identity (Rec.709 → scRGB / extended-sRGB, GT7's Rec.2020 →
 //          PQ/Rec.2020),
 //   3. out-of-gamut handling: ACES-RGC-style hue-approximate chroma
 //      compression toward the achromatic axis (`DISPLAY_GAMUT_COMPRESSION`),
 //      with the plain hue-shifting per-channel clip as the debug fallback
-//      (`DISPLAY_GAMUT_CLIP_DEBUG`), followed by an always-on `max(0)` safety
-//      clip (PQ requires non-negative input),
-//   4. transfer encoding (`DISPLAY_TRANSFER_SCRGB` / `DISPLAY_TRANSFER_PQ`).
+//      (`DISPLAY_GAMUT_CLIP_DEBUG`), followed by a `max(0)` safety clip (PQ
+//      requires non-negative input) — skipped for the sign-preserving
+//      `DISPLAY_TRANSFER_EXTENDED_SRGB` transfer,
+//   4. transfer encoding (`DISPLAY_TRANSFER_SCRGB` /
+//      `DISPLAY_TRANSFER_PQ` / `DISPLAY_TRANSFER_EXTENDED_SRGB`).
 //
 // This shader is never specialized for sRGB targets: the exact sRGB OETF is
 // hardware-applied on the upscaling blit's `*UnormSrgb` writeback, so plain
@@ -34,7 +41,7 @@
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 #import bevy_render::display_target::DisplayTargetUniform
-#import bevy_render::transfer_functions::{scrgb_encode, pq_inverse_eotf_from_nits}
+#import bevy_render::transfer_functions::{scrgb_encode, pq_inverse_eotf_from_nits, srgb_oetf_extended}
 #ifdef SRGB_TO_LINEAR
 #import bevy_render::color_operations::srgb_to_linear
 #endif
@@ -78,6 +85,33 @@ const REC_2020_TO_REC_709 = mat3x3<f32>(
     1.6604910021084347, -0.12455047452159052, -0.01815076335490522, // column 0
     -0.5876411387885496, 1.1328998971259598, -0.10057889800800739,  // column 1
     -0.07284986331988484, -0.008349422604369487, 1.1187296613629125, // column 2
+);
+#endif
+
+#ifdef DISPLAY_GAMUT_DISPLAYP3
+// Full-precision linear Rec.709 → Display-P3 matrix (both D65; DCI-P3
+// primaries). f64-derived via the same Lindbloom primaries→XYZ method,
+// matching `bevy_color::rgb_to_rgb_matrix(RgbPrimaries::BT709,
+// RgbPrimaries::DISPLAY_P3)`. Bit-identical literals to `REC709_TO_DISPLAYP3`
+// in `bevy_render::working_color_space`. The shared blue primary makes the
+// third column's off-diagonals exactly zero.
+const REC_709_TO_DISPLAY_P3 = mat3x3<f32>(
+    0.822461968714363, 0.0331941988509616, 0.01708263072112,     // column 0
+    0.177538031285638, 0.966805801149038, 0.0723974406639634,    // column 1
+    0.0, 0.0, 0.910519928614916,                                 // column 2
+);
+#endif
+
+#ifdef GAMUT_REC2020_TO_DISPLAYP3
+// Full-precision linear Rec.2020 → Display-P3 matrix (both D65). The GT7
+// HDR-native Rec.2020 tone-map output onto a P3-gamut signal: a gamut
+// *contraction* (Display-P3 ⊂ Rec.2020), for which prepare keys in the
+// out-of-gamut compression below. Bit-identical literals to
+// `REC2020_TO_DISPLAYP3` in `bevy_render::working_color_space`.
+const REC_2020_TO_DISPLAY_P3 = mat3x3<f32>(
+    1.34357825258433, -0.0652974527891195, 0.00282178726170105,  // column 0
+    -0.282179670526136, 1.07578791584857, -0.0195984945244942,   // column 1
+    -0.0613985820581962, -0.010490463059455, 1.01677670726279,   // column 2
 );
 #endif
 
@@ -180,6 +214,17 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // `is_gamut_contraction` in mod.rs).
     rgb = REC_2020_TO_REC_709 * rgb;
 #endif
+#ifdef DISPLAY_GAMUT_DISPLAYP3
+    // Rec.709 source → Display-P3 signal (the `ExtendedDisplayP3` color space):
+    // an expansion (Display-P3 ⊃ Rec.709), in-gamut by construction.
+    rgb = REC_709_TO_DISPLAY_P3 * rgb;
+#endif
+#ifdef GAMUT_REC2020_TO_DISPLAYP3
+    // GT7's Rec.2020 source → Display-P3 signal: a contraction
+    // (Display-P3 ⊂ Rec.2020), for which prepare keys in the out-of-gamut
+    // compression below, exactly like the Rec.2020 → Rec.709 case.
+    rgb = REC_2020_TO_DISPLAY_P3 * rgb;
+#endif
 
     // 3. Out-of-gamut handling (perceptual compression, with the per-channel
     // clip as the debug fallback). The compression def
@@ -197,7 +242,17 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // construction); under DISPLAY_GAMUT_CLIP_DEBUG — or when no compression
     // is active — it IS the entire out-of-gamut handling: the hue-shifting
     // per-channel clip, kept for A/B comparison against the compression.
+    //
+    // Skipped for the encoded extended-range sRGB transfer: its OETF is
+    // odd-symmetric (sign-preserving by design), and the whole point of the
+    // extended signal is to carry wide-gamut / out-of-gamut and
+    // scene-referred negative components past the SDR floor — clipping them
+    // would discard exactly the range the transfer exists to encode. (Its
+    // contraction paths already land in-gamut via the compression above; any
+    // residue the OETF carries safely.)
+#ifndef DISPLAY_TRANSFER_EXTENDED_SRGB
     rgb = max(rgb, vec3(0.0));
+#endif
 
     // 4. Transfer encoding. Input is paper-white-relative display-linear
     // (1.0 = paper white at the operator output).
@@ -208,6 +263,11 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // PQ encodes absolute luminance normalized to 10000 nits: convert
     // paper-white-relative values to nits first.
     rgb = pq_inverse_eotf_from_nits(rgb * display_target.paper_white_nits);
+#else ifdef DISPLAY_TRANSFER_EXTENDED_SRGB
+    // Encoded extended-range sRGB (the `ExtendedSrgb` / `ExtendedDisplayP3`
+    // color spaces): the same scRGB `paper_white / 80` normalization as the
+    // linear path, then the odd-symmetric extended sRGB OETF.
+    rgb = srgb_oetf_extended(scrgb_encode(rgb, display_target.paper_white_nits));
 #endif
 
     // Alpha passes through for the multi-camera alpha-blended upscale path.

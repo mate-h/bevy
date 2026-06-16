@@ -51,13 +51,14 @@ fn clear_view_upscaling_pipelines(
 ///
 /// When the display-encoding pass runs for the view's stack (the contract
 /// carries resolved encode parameters), the main texture holds an
-/// already-encoded signal (scRGB-linear or PQ): the blit must pass it through
-/// unchanged, and any compositing-space decode was already performed by the
-/// encoder. The blit and the encoder read the same contract field, so the two
-/// can never disagree. Encode parameters only resolve when surface selection
-/// actually negotiated a non-sRGB-view surface (e.g. `Rgba16Float` for
-/// scRGB-linear), where no hardware sRGB encode happens on store: the encoded
-/// signal reaches the display unchanged. Downgraded requests resolve to plain
+/// already-encoded signal (scRGB-linear, PQ, or encoded extended-range sRGB):
+/// the blit must pass it through unchanged, and any compositing-space decode
+/// was already performed by the encoder. The blit and the encoder read the same
+/// contract field, so the two can never disagree. Encode parameters only
+/// resolve when surface selection actually negotiated a non-sRGB-view surface
+/// (e.g. `Rgba16Float` for scRGB-linear / extended-sRGB), where no hardware
+/// sRGB encode happens on store: the encoded signal reaches the display
+/// unchanged. Downgraded requests resolve to plain
 /// SDR (no encode parameters) and keep the normal
 /// decode-and-hardware-encode path.
 fn blit_source_space(contract: Option<&ViewStackContract>) -> Option<CompositingSpace> {

@@ -133,6 +133,8 @@ pub const DISPLAY_TRANSFER_SCRGB_LINEAR: u32 = 1;
 pub const DISPLAY_TRANSFER_PQ: u32 = 2;
 /// Index of [`DisplayTransfer::Hlg`] in [`DisplayTargetUniform::transfer`].
 pub const DISPLAY_TRANSFER_HLG: u32 = 3;
+/// Index of [`DisplayTransfer::ExtendedSrgb`] in [`DisplayTargetUniform::transfer`].
+pub const DISPLAY_TRANSFER_EXTENDED_SRGB: u32 = 4;
 
 /// Returns the [`DisplayTargetUniform::gamut`] index for a [`DisplayGamut`].
 pub const fn display_gamut_index(gamut: DisplayGamut) -> u32 {
@@ -151,6 +153,7 @@ pub const fn display_transfer_index(transfer: DisplayTransfer) -> u32 {
         DisplayTransfer::ScRgbLinear => DISPLAY_TRANSFER_SCRGB_LINEAR,
         DisplayTransfer::Pq => DISPLAY_TRANSFER_PQ,
         DisplayTransfer::Hlg => DISPLAY_TRANSFER_HLG,
+        DisplayTransfer::ExtendedSrgb => DISPLAY_TRANSFER_EXTENDED_SRGB,
     }
 }
 
@@ -170,6 +173,7 @@ pub const fn display_transfer_index(transfer: DisplayTransfer) -> u32 {
 /// | 1 | Display P3 | | 1 | scRGB linear |
 /// | 2 | Rec.2020 | | 2 | PQ (ST 2084) |
 /// | | | | 3 | HLG |
+/// | | | | 4 | extended sRGB (encoded) |
 ///
 /// Gamut conversion matrices are deliberately **not** part of this uniform;
 /// the gamut-transform stage of the display-encoding pass derives them per
@@ -424,6 +428,7 @@ mod tests {
         assert_eq!(display_transfer_index(DisplayTransfer::ScRgbLinear), 1);
         assert_eq!(display_transfer_index(DisplayTransfer::Pq), 2);
         assert_eq!(display_transfer_index(DisplayTransfer::Hlg), 3);
+        assert_eq!(display_transfer_index(DisplayTransfer::ExtendedSrgb), 4);
     }
 
     #[test]

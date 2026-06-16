@@ -21,21 +21,22 @@
 //! applied for free by the hardware on the upscaling blit's `*UnormSrgb`
 //! writeback; such views never receive a
 //! [`ViewDisplayEncodingPipeline`] and the node early-returns without touching
-//! the GPU. The shader-side transfer functions (scRGB / PQ) activate only for
-//! HDR transfers.
+//! the GPU. The shader-side transfer functions (scRGB / PQ / extended-sRGB)
+//! activate only for HDR transfers.
 //!
 //! Surface negotiation (`create_surfaces` in `bevy_render::view::window`)
 //! configures the swapchain this pass's output is presented through, using
-//! wgpu's surface color-space API (tracked upstream under
-//! <https://github.com/gfx-rs/wgpu/issues/2920>): an
+//! wgpu's surface color-space API: an
 //! `Rgba16Float` extended-sRGB-linear swapchain for
 //! [`DisplayTransfer::ScRgbLinear`] (macOS/iOS Metal, Windows Vulkan/DX12,
-//! Wayland Vulkan), or an HDR10 swapchain (typically `Rgb10a2Unorm`) for
-//! [`DisplayTransfer::Pq`] where the backend and OS advertise it. In both
-//! cases the encoded output of this pass is blitted to the surface unchanged
-//! (no hardware sRGB encode — these formats have no sRGB view). When the
-//! backend cannot fulfil the requested transfer, the view's **resolved**
-//! display target degrades (PQ → scRGB → plain SDR, with warnings), so the
+//! Wayland Vulkan); an encoded extended-range sRGB swapchain (`ExtendedSrgb` /
+//! `ExtendedDisplayP3`) for [`DisplayTransfer::ExtendedSrgb`] (Metal, Vulkan,
+//! and browser WebGPU — the web HDR path); or an HDR10 swapchain (typically
+//! `Rgb10a2Unorm`) for [`DisplayTransfer::Pq`] where the backend and OS
+//! advertise it. In all cases the encoded output of this pass is blitted to
+//! the surface unchanged (no hardware sRGB encode — these formats have no sRGB
+//! view). When the backend cannot fulfil the requested transfer, the view's
+//! **resolved** display target degrades (to plain SDR, with warnings), so the
 //! predicate below always reflects what the surface can actually show.
 //! [`DisplayTransfer::Hlg`] requests are fulfilled as PQ/HDR10 at
 //! negotiation (HLG is scene-referred; see the coercion notes on the phase-2
@@ -59,9 +60,9 @@ use bevy_render::{
         *,
     },
     renderer::RenderDevice,
-    transfer_functions::{pq_inverse_eotf_from_nits, scrgb_encode},
+    transfer_functions::{pq_inverse_eotf_from_nits, scrgb_encode, srgb_oetf_extended},
     view::{DisplayTargetUniform, ExtractedView, ViewTarget},
-    working_color_space::REC709_TO_REC2020,
+    working_color_space::{REC709_TO_DISPLAYP3, REC709_TO_REC2020},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shader::Shader;
@@ -132,11 +133,12 @@ impl Plugin for DisplayEncodingPlugin {
 /// (`effective_tonemapping`) — as the operator emits its native Rec.2020
 /// display-referred output; Rec.709 otherwise. Under
 /// [`DisplayGamutCompression::Auto`] the compression is therefore active for
-/// exactly one reachable configuration: GT7 HDR-native Rec.2020 input onto a
-/// Rec.709-coordinate scRGB signal (a contraction). Identity transforms
-/// (Rec.709 → scRGB, GT7's Rec.2020 → PQ/Rec.2020) and the
-/// Rec.709 → Rec.2020 PQ expansion keep the plain clip, which is a no-op for
-/// their in-gamut-by-construction inputs.
+/// the two reachable contractions: GT7 HDR-native Rec.2020 input onto a
+/// Rec.709-coordinate scRGB / extended-sRGB signal, and onto a Display-P3
+/// extended-sRGB signal (Display-P3 ⊂ Rec.2020). Identity transforms
+/// (Rec.709 → scRGB / extended-sRGB, GT7's Rec.2020 → PQ/Rec.2020) and the
+/// Rec.709 → Rec.2020 PQ and Rec.709 → Display-P3 expansions keep the plain
+/// clip, which is a no-op for their in-gamut-by-construction inputs.
 /// [`DisplayGamutCompression::Always`] forces compression on for every
 /// HDR-transfer view (e.g. to exercise or demonstrate the path).
 #[derive(Resource, ExtractResource, Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
@@ -206,15 +208,18 @@ pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayG
 /// it composites over (a viewport/letterboxed region no blit covers would
 /// otherwise present raw display-linear values as HDR signal).
 ///
-/// The gamut stage follows from the resolved transfer (the coercion contract
-/// fixes the gamut per transfer): for [`DisplayTransfer::ScRgbLinear`] the
-/// gamut is Rec.709 (identity), so each channel is just
-/// [`scrgb_encode`]; for
+/// The gamut stage follows from the resolved [`ResolvedEncoding`]: for
+/// [`DisplayTransfer::ScRgbLinear`] the gamut is Rec.709 (identity), so each
+/// channel is just [`scrgb_encode`]; for
 /// [`DisplayTransfer::Pq`] the gamut is Rec.2020, so the RGB triple is first
 /// transformed through [`REC709_TO_REC2020`],
 /// then each channel is clamped non-negative, scaled to absolute nits, and
 /// run through
-/// [`pq_inverse_eotf_from_nits`].
+/// [`pq_inverse_eotf_from_nits`]; for [`DisplayTransfer::ExtendedSrgb`] the
+/// gamut is carried by [`ResolvedEncoding::gamut`] (Rec.709 identity, or a
+/// 709 → Display-P3 expansion via [`REC709_TO_DISPLAYP3`] for the
+/// `ExtendedDisplayP3` signal), then each channel is scRGB-normalized and run
+/// through the sign-preserving [`srgb_oetf_extended`] (no `max(0)` clip).
 /// Alpha passes through unchanged for the alpha-blended upscale path.
 ///
 /// `paper_white_nits` must be
@@ -229,10 +234,11 @@ pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayG
 /// not subject to the working-space 709 -> 2020 conversion that scene colors
 /// receive.
 ///
-/// Only the two reachable HDR transfers are handled; [`DisplayTransfer::Srgb`]
-/// (hardware-encoded on the blit, no pass) and [`DisplayTransfer::Hlg`]
-/// (coerced to PQ at prepare time) are `unreachable!`, the same contract as
-/// the encoder's [`specialize`](DisplayEncodingPipeline::specialize).
+/// Only the reachable HDR transfers (scRGB, PQ, extended-sRGB) are handled;
+/// [`DisplayTransfer::Srgb`] (hardware-encoded on the blit, no pass) and
+/// [`DisplayTransfer::Hlg`] (coerced to PQ at prepare time) are `unreachable!`,
+/// the same contract as the encoder's
+/// [`specialize`](DisplayEncodingPipeline::specialize).
 ///
 /// [`display_encoding.wgsl`]: crate::display_encoding
 pub fn encode_out_texture_clear_color(
@@ -254,11 +260,34 @@ pub fn encode_out_texture_clear_color(
                 pq_inverse_eotf_from_nits(rec2020.z.max(0.0) * paper_white_nits),
             )
         }
+        DisplayTransfer::ExtendedSrgb => {
+            // The authored clear is Rec.709 display-linear; the encoder's gamut
+            // stage (carried by `encoding.gamut`) is identity for the Rec.709
+            // signal and a 709 → Display-P3 expansion for the P3 signal. The
+            // OETF is sign-preserving, so — like the shader — no `max(0)` clip
+            // is applied.
+            let linear = match encoding.gamut {
+                DisplayGamut::Rec709 => Vec3::new(color.red, color.green, color.blue),
+                DisplayGamut::DisplayP3 => {
+                    REC709_TO_DISPLAYP3 * Vec3::new(color.red, color.green, color.blue)
+                }
+                DisplayGamut::Rec2020 => unreachable!(
+                    "ExtendedSrgb coerces a Rec2020 gamut to Rec709 (no extended-Rec2020 surface)"
+                ),
+            };
+            Vec3::new(
+                srgb_oetf_extended(scrgb_encode(linear.x, paper_white_nits)),
+                srgb_oetf_extended(scrgb_encode(linear.y, paper_white_nits)),
+                srgb_oetf_extended(scrgb_encode(linear.z, paper_white_nits)),
+            )
+        }
         // sRGB never reaches this helper (hardware encode on the blit); HLG is
         // coerced to PQ at prepare time. Same contract as the encoder's
         // specialize transfer arm.
         DisplayTransfer::Srgb | DisplayTransfer::Hlg => {
-            unreachable!("only HDR transfers (scRGB / PQ) encode an out-texture clear color")
+            unreachable!(
+                "only HDR transfers (scRGB / PQ / extended-sRGB) encode an out-texture clear color"
+            )
         }
     };
     LinearRgba {
@@ -318,18 +347,20 @@ pub fn init_display_encoding_pipeline(
 /// after the prepare-time coercions in the phase-2 stack resolver
 /// ([`resolve_camera_stack_contracts`](crate::camera_stack::resolve_camera_stack_contracts);
 /// HLG → PQ, PQ forces Rec.2020, scRGB forces Rec.709 — scRGB signals are by
-/// definition expressed in extended Rec.709/sRGB coordinates — and Display P3
-/// currently falls back to Rec.709), so the pipeline hashes on what is
-/// actually encoded, not on what was requested. With the per-view
-/// [`source_gamut`](Self::source_gamut), the reachable
+/// definition expressed in extended Rec.709/sRGB coordinates — and extended-sRGB
+/// keeps Rec.709 or Display P3 while coercing Rec.2020 to Rec.709), so the
+/// pipeline hashes on what is actually encoded, not on what was requested. With
+/// the per-view [`source_gamut`](Self::source_gamut), the reachable
 /// source × display × transfer combinations are:
 ///
 /// | source (tonemap output) | display gamut | transfer | gamut stage |
 /// |---|---|---|---|
-/// | Rec.709 | Rec.709 | scRGB | identity |
+/// | Rec.709 | Rec.709 | scRGB / extended-sRGB | identity |
 /// | Rec.709 | Rec.2020 | PQ | expansion (`DISPLAY_GAMUT_REC2020`) |
-/// | Rec.2020 (GT7 HDR) | Rec.709 | scRGB | contraction (`GAMUT_REC2020_TO_REC709`, compression active under `Auto`) |
+/// | Rec.709 | Display P3 | extended-sRGB | expansion (`DISPLAY_GAMUT_DISPLAYP3`) |
+/// | Rec.2020 (GT7 HDR) | Rec.709 | scRGB / extended-sRGB | contraction (`GAMUT_REC2020_TO_REC709`, compression active under `Auto`) |
 /// | Rec.2020 (GT7 HDR) | Rec.2020 | PQ | identity |
+/// | Rec.2020 (GT7 HDR) | Display P3 | extended-sRGB | contraction (`GAMUT_REC2020_TO_DISPLAYP3`, compression active under `Auto`) |
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct DisplayEncodingPipelineKey {
     /// Format of the main texture the pass writes to (the
@@ -362,14 +393,15 @@ pub struct DisplayEncodingPipelineKey {
     /// The resolved display gamut the source color is transformed to.
     pub gamut: DisplayGamut,
     /// The resolved transfer function. Only HDR transfers occur here
-    /// ([`DisplayTransfer::ScRgbLinear`] or [`DisplayTransfer::Pq`]);
-    /// sRGB targets never get this pass.
+    /// ([`DisplayTransfer::ScRgbLinear`], [`DisplayTransfer::Pq`], or
+    /// [`DisplayTransfer::ExtendedSrgb`]); sRGB targets never get this pass.
     pub transfer: DisplayTransfer,
     /// The resolved out-of-gamut handling of the gamut stage (see
     /// [`DisplayGamutCompression`]). Under the default
     /// [`DisplayGamutCompression::Auto`] this is
     /// [`OutOfGamutHandling::Compress`] exactly when the gamut stage is a
-    /// contraction (Rec.2020 source onto a Rec.709 scRGB signal) and
+    /// contraction (a Rec.2020 source onto the narrower Rec.709 scRGB /
+    /// extended-sRGB or Display-P3 extended-sRGB signal) and
     /// [`OutOfGamutHandling::Clip`] otherwise (identity and expanding stages
     /// cannot produce out-of-gamut colors).
     pub out_of_gamut: OutOfGamutHandling,
@@ -390,9 +422,9 @@ impl SpecializedRenderPipeline for DisplayEncodingPipeline {
         }
 
         match (key.source_gamut, key.gamut) {
-            // Identity transforms: a Rec.709 tonemap output onto the
-            // Rec.709-coordinate scRGB signal, and GT7's HDR-native Rec.2020
-            // output onto a PQ/Rec.2020 signal.
+            // Identity transforms: a Rec.709 tonemap output onto a
+            // Rec.709-coordinate scRGB / extended-sRGB signal, and GT7's
+            // HDR-native Rec.2020 output onto a PQ/Rec.2020 signal.
             (DisplayGamut::Rec709, DisplayGamut::Rec709)
             | (DisplayGamut::Rec2020, DisplayGamut::Rec2020) => {}
             // Expansion (in-gamut by construction): Rec.709 tonemap output
@@ -401,27 +433,42 @@ impl SpecializedRenderPipeline for DisplayEncodingPipeline {
                 shader_defs.push("DISPLAY_GAMUT_REC2020".into());
             }
             // Contraction: GT7's HDR-native Rec.2020 output onto the
-            // Rec.709-coordinate scRGB signal — the one reachable stage that
-            // can produce out-of-gamut colors, for which `Auto` keys in the
-            // compression below.
+            // Rec.709-coordinate scRGB / extended-sRGB signal — for which
+            // `Auto` keys in the compression below.
             (DisplayGamut::Rec2020, DisplayGamut::Rec709) => {
                 shader_defs.push("GAMUT_REC2020_TO_REC709".into());
             }
-            // Coerced away by the phase-2 stack resolver (display side);
-            // never emitted by the tonemapping pass (source side).
-            (DisplayGamut::DisplayP3, _) | (_, DisplayGamut::DisplayP3) => unreachable!(
-                "DisplayP3 is coerced to Rec709 in resolve_camera_stack_contracts \
-                 and the tonemapping pass never emits DisplayP3"
+            // Expansion (in-gamut by construction): Rec.709 tonemap output
+            // onto an extended-Display-P3 signal.
+            (DisplayGamut::Rec709, DisplayGamut::DisplayP3) => {
+                shader_defs.push("DISPLAY_GAMUT_DISPLAYP3".into());
+            }
+            // Contraction: GT7's HDR-native Rec.2020 output onto an
+            // extended-Display-P3 signal (Display-P3 ⊂ Rec.2020), for which
+            // `Auto` keys in the compression below.
+            (DisplayGamut::Rec2020, DisplayGamut::DisplayP3) => {
+                shader_defs.push("GAMUT_REC2020_TO_DISPLAYP3".into());
+            }
+            // The tonemapping pass never emits a Display-P3 *source* gamut
+            // (`tonemap_output_gamut` yields only Rec.709 or Rec.2020); the
+            // display side is now a real gamut (handled above).
+            (DisplayGamut::DisplayP3, _) => unreachable!(
+                "the tonemapping pass never emits a DisplayP3 source gamut \
+                 (tonemap_output_gamut yields only Rec709 or Rec2020)"
             ),
         }
 
         match key.transfer {
             DisplayTransfer::ScRgbLinear => shader_defs.push("DISPLAY_TRANSFER_SCRGB".into()),
             DisplayTransfer::Pq => shader_defs.push("DISPLAY_TRANSFER_PQ".into()),
+            DisplayTransfer::ExtendedSrgb => {
+                shader_defs.push("DISPLAY_TRANSFER_EXTENDED_SRGB".into());
+            }
             // sRGB never reaches this pass (hardware encode on the blit);
             // HLG is coerced to PQ at prepare time.
             DisplayTransfer::Srgb | DisplayTransfer::Hlg => unreachable!(
-                "only HDR transfers (scRGB / PQ) are encoded by the display-encoding pass"
+                "only HDR transfers (scRGB / PQ / extended-sRGB) are encoded by the \
+                 display-encoding pass"
             ),
         }
 
@@ -728,6 +775,39 @@ mod tests {
         assert_eq!(key.out_of_gamut, OutOfGamutHandling::Compress);
     }
 
+    /// A Rec.709 source onto an extended-Display-P3 signal is an expansion
+    /// (Display-P3 ⊃ Rec.709): the gamut stage cannot produce out-of-gamut
+    /// colors, so `Auto` keeps the plain clip.
+    #[test]
+    fn rec709_onto_extended_displayp3_keys_the_expansion() {
+        let outputs = resolve_contracts(vec![passthrough_overlay(1, 0)]);
+        let solo = contract(
+            &outputs[&entity(1)],
+            Some((DisplayTransfer::ExtendedSrgb, DisplayGamut::DisplayP3)),
+        );
+        let key = display_encoding_key(TextureFormat::Rgba16Float, &solo).unwrap();
+        assert_eq!(key.source_gamut, DisplayGamut::Rec709);
+        assert_eq!(key.gamut, DisplayGamut::DisplayP3);
+        assert_eq!(key.transfer, DisplayTransfer::ExtendedSrgb);
+        assert_eq!(key.out_of_gamut, OutOfGamutHandling::Clip);
+    }
+
+    /// GT7's Rec.2020 output onto an extended-Display-P3 signal is a
+    /// contraction (Display-P3 ⊂ Rec.2020): `Auto` keys the compression.
+    #[test]
+    fn gt7_onto_extended_displayp3_keys_the_contraction_compression() {
+        let outputs = resolve_contracts(vec![gt7_clearing(1, 0)]);
+        let solo = contract(
+            &outputs[&entity(1)],
+            Some((DisplayTransfer::ExtendedSrgb, DisplayGamut::DisplayP3)),
+        );
+        let key = display_encoding_key(TextureFormat::Rgba16Float, &solo).unwrap();
+        assert_eq!(key.source_gamut, DisplayGamut::Rec2020);
+        assert_eq!(key.gamut, DisplayGamut::DisplayP3);
+        assert_eq!(key.transfer, DisplayTransfer::ExtendedSrgb);
+        assert_eq!(key.out_of_gamut, OutOfGamutHandling::Compress);
+    }
+
     /// SDR groups carry no encode parameters and derive no key.
     #[test]
     fn sdr_contract_derives_no_key() {
@@ -741,20 +821,37 @@ mod tests {
         );
     }
 
-    use bevy_render::transfer_functions::{pq_inverse_eotf_from_nits, scrgb_encode};
-    use bevy_render::working_color_space::REC709_TO_REC2020;
+    use bevy_render::transfer_functions::{
+        pq_inverse_eotf_from_nits, scrgb_encode, srgb_oetf_extended,
+    };
+    use bevy_render::working_color_space::{REC709_TO_DISPLAYP3, REC709_TO_REC2020};
     use bevy_window::DisplayTarget;
 
-    /// Builds a [`ResolvedEncoding`] with the given transfer; the gamut and
-    /// out-of-gamut fields are unused by [`encode_out_texture_clear_color`]
-    /// (the gamut follows from the transfer per the coercion contract).
+    /// Builds a [`ResolvedEncoding`] with the given transfer at its canonical
+    /// gamut. For scRGB and PQ the gamut and out-of-gamut fields are unused by
+    /// [`encode_out_texture_clear_color`] (the gamut follows from the transfer
+    /// per the coercion contract); for [`DisplayTransfer::ExtendedSrgb`] the
+    /// gamut field IS read (Rec.709 vs Display-P3), so this defaults it to
+    /// Rec.709 — see [`encoding_with_gamut`] for the P3 case.
     fn encoding(transfer: DisplayTransfer) -> ResolvedEncoding {
         ResolvedEncoding {
             transfer,
             gamut: match transfer {
-                DisplayTransfer::ScRgbLinear => DisplayGamut::Rec709,
+                DisplayTransfer::ScRgbLinear | DisplayTransfer::ExtendedSrgb => {
+                    DisplayGamut::Rec709
+                }
                 _ => DisplayGamut::Rec2020,
             },
+            out_of_gamut: OutOfGamutHandling::Clip,
+        }
+    }
+
+    /// Builds a [`ResolvedEncoding`] with an explicit gamut (the
+    /// extended-sRGB clear-color path reads it).
+    fn encoding_with_gamut(transfer: DisplayTransfer, gamut: DisplayGamut) -> ResolvedEncoding {
+        ResolvedEncoding {
+            transfer,
+            gamut,
             out_of_gamut: OutOfGamutHandling::Clip,
         }
     }
@@ -845,6 +942,86 @@ mod tests {
             encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ScRgbLinear), 100.0);
         assert_eq!(scrgb.red.to_bits(), scrgb_encode(-0.5, 100.0).to_bits());
         assert!(scrgb.red < 0.0);
+    }
+
+    /// Extended-sRGB over Rec.709 (the `ExtendedSrgb` color space): identity
+    /// gamut, then `srgb_oetf_extended(scrgb_encode(ch, pw))` per channel.
+    #[test]
+    fn extended_srgb_over_rec709_encodes_each_channel() {
+        let color = LinearRgba::new(0.5, 0.25, 1.0, 1.0);
+        let out =
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ExtendedSrgb), 100.0);
+        for (channel, value) in [(out.red, 0.5), (out.green, 0.25), (out.blue, 1.0)] {
+            assert_eq!(
+                channel.to_bits(),
+                srgb_oetf_extended(scrgb_encode(value, 100.0)).to_bits()
+            );
+        }
+        // 18% gray at an 80-nit paper white round-trips SDR: scrgb_encode is
+        // identity there, so this is the plain sRGB encode (~0.4613).
+        let gray = encode_out_texture_clear_color(
+            LinearRgba::new(0.18, 0.18, 0.18, 1.0),
+            &encoding(DisplayTransfer::ExtendedSrgb),
+            80.0,
+        );
+        assert!((gray.red - 0.461_356).abs() < 1e-4);
+    }
+
+    /// Extended-sRGB over Display-P3 (the `ExtendedDisplayP3` color space):
+    /// the authored Rec.709 clear gamut-converts through `REC709_TO_DISPLAYP3`
+    /// before the per-channel OETF (mirrors `pq_red_gamut_converts_before_encoding`).
+    #[test]
+    fn extended_srgb_over_displayp3_gamut_converts_before_encoding() {
+        let out = encode_out_texture_clear_color(
+            LinearRgba::RED,
+            &encoding_with_gamut(DisplayTransfer::ExtendedSrgb, DisplayGamut::DisplayP3),
+            100.0,
+        );
+        let p3 = REC709_TO_DISPLAYP3 * Vec3::new(1.0, 0.0, 0.0);
+        assert_eq!(
+            out.red.to_bits(),
+            srgb_oetf_extended(scrgb_encode(p3.x, 100.0)).to_bits()
+        );
+        assert_eq!(
+            out.green.to_bits(),
+            srgb_oetf_extended(scrgb_encode(p3.y, 100.0)).to_bits()
+        );
+        assert_eq!(
+            out.blue.to_bits(),
+            srgb_oetf_extended(scrgb_encode(p3.z, 100.0)).to_bits()
+        );
+        // The conversion is non-trivial (not identity): Rec.709 red spreads
+        // into all three P3 channels (709 red sits inside the wider P3 gamut,
+        // so this expansion stays positive — unlike a contraction it produces
+        // no negatives), so the encoded green/blue are non-zero.
+        assert!(p3.y > 0.0 && p3.z > 0.0);
+        assert!(out.green > 0.0 && out.blue > 0.0);
+    }
+
+    /// Extended-sRGB leaves negatives signed (the OETF is sign-preserving),
+    /// distinct from PQ's clamp.
+    #[test]
+    fn extended_srgb_is_sign_preserving() {
+        let color = LinearRgba::new(-0.5, 0.0, 1.0, 1.0);
+        let out =
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ExtendedSrgb), 100.0);
+        assert_eq!(
+            out.red.to_bits(),
+            srgb_oetf_extended(scrgb_encode(-0.5, 100.0)).to_bits()
+        );
+        assert!(out.red < 0.0);
+        assert!(out.red.is_finite());
+    }
+
+    /// Alpha passes through unchanged for the extended-sRGB transfer too.
+    #[test]
+    fn extended_srgb_alpha_passes_through() {
+        let color = LinearRgba::new(0.3, 0.6, 0.9, 0.42);
+        assert_eq!(
+            encode_out_texture_clear_color(color, &encoding(DisplayTransfer::ExtendedSrgb), 100.0)
+                .alpha,
+            0.42
+        );
     }
 
     /// An authored `paper_white_nits` of `0.0` sanitizes to 100 nits, so the

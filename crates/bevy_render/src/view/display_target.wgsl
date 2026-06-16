@@ -20,6 +20,7 @@ const DISPLAY_TRANSFER_SRGB: u32 = 0u;
 const DISPLAY_TRANSFER_SCRGB_LINEAR: u32 = 1u;
 const DISPLAY_TRANSFER_PQ: u32 = 2u;
 const DISPLAY_TRANSFER_HLG: u32 = 3u;
+const DISPLAY_TRANSFER_EXTENDED_SRGB: u32 = 4u;
 
 // The resolved calibration of the display a view is presented on.
 //
