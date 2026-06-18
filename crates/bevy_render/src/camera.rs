@@ -10,8 +10,8 @@ use crate::{
     sync_world::{MainEntity, MainEntityHashSet, RenderEntity, SyncToRenderWorld},
     texture::{GpuImage, ManualTextureViews},
     view::{
-        display_target_uniform::resolve_view_display_target, ColorGrading, ExtractedView,
-        ExtractedWindows, ManualDisplayTargets, Msaa, NoIndirectDrawing,
+        display_target_uniform::resolve_view_display_target, ColorGrading,
+        EffectiveManualDisplayTargets, ExtractedView, ExtractedWindows, Msaa, NoIndirectDrawing,
         RenderExtractedVisibleEntities, RenderVisibleEntities, RenderVisibleEntitiesClass,
         RetainedViewEntity, ViewUniformOffset, VisibilityExtractionSystemParam,
     },
@@ -106,7 +106,7 @@ impl Plugin for CameraPlugin {
                     (
                         extract_cameras
                             .after(extract_resource::<ManualTextureViews, ()>)
-                            .after(extract_resource::<ManualDisplayTargets, ()>),
+                            .after(extract_resource::<EffectiveManualDisplayTargets, ()>),
                         clear_dirty_specializations.in_set(DirtySpecializationSystems::Clear),
                         clear_dirty_wireframe_specializations
                             .in_set(DirtySpecializationSystems::Clear),
@@ -505,7 +505,7 @@ pub fn extract_cameras(
     >,
     primary_window: Extract<Query<Entity, With<PrimaryWindow>>>,
     extracted_windows: Res<ExtractedWindows>,
-    manual_display_targets: Res<ManualDisplayTargets>,
+    effective_manual_display_targets: Res<EffectiveManualDisplayTargets>,
     manual_texture_views: Res<ManualTextureViews>,
     images: Res<RenderAssets<GpuImage>>,
     mut existing_render_visible_entities_cpu_culling: Query<
@@ -653,7 +653,7 @@ pub fn extract_cameras(
             let hdr_transfer = resolve_view_display_target(
                 target.as_ref(),
                 &extracted_windows,
-                &manual_display_targets,
+                &effective_manual_display_targets,
             )
             .is_hdr_transfer();
             let target_format = if hdr || tonemapping_enabled || hdr_transfer {

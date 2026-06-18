@@ -43,7 +43,7 @@ use bevy_window::{DisplayGamut, DisplayTarget, DisplayTransfer};
 
 use super::{
     window::{
-        display_target::{resolve_display_target, ManualDisplayTargets},
+        display_target::{resolve_display_target, EffectiveManualDisplayTargets},
         ExtractedWindows,
     },
     ExtractedView,
@@ -72,8 +72,9 @@ use crate::{
 /// unfulfilled request.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct ViewDisplayTarget {
-    /// The display target as authored by the user (the `DisplayTarget`
-    /// window component or `ManualDisplayTargets` entry).
+    /// The resolved effective display target for this view (the window's
+    /// `EffectiveDisplayTarget` or its `EffectiveManualDisplayTargets` entry),
+    /// before surface negotiation.
     ///
     /// Useful for diagnostics and for re-resolution logic; rendering systems
     /// should use [`resolved`](Self::resolved).
@@ -296,9 +297,9 @@ pub(crate) fn resolve_window_display_target(
 }
 
 /// Resolves the [`ViewDisplayTarget`] for a camera's normalized render
-/// target: the requested [`DisplayTarget`] (window component or
-/// [`ManualDisplayTargets`] entry; see [`resolve_display_target`]) with the
-/// window surface's negotiated transfer folded in (see
+/// target: the resolved effective [`DisplayTarget`] (window component or
+/// [`EffectiveManualDisplayTargets`] entry; see [`resolve_display_target`]) with
+/// the window surface's negotiated transfer folded in (see
 /// `resolve_window_display_target` in this module).
 ///
 /// Single source shared by [`prepare_view_display_targets`] (which inserts
@@ -310,9 +311,10 @@ pub(crate) fn resolve_window_display_target(
 pub(crate) fn resolve_view_display_target(
     target: Option<&NormalizedRenderTarget>,
     extracted_windows: &ExtractedWindows,
-    manual_display_targets: &ManualDisplayTargets,
+    effective_manual_display_targets: &EffectiveManualDisplayTargets,
 ) -> ViewDisplayTarget {
-    let requested = resolve_display_target(target, extracted_windows, manual_display_targets);
+    let requested =
+        resolve_display_target(target, extracted_windows, effective_manual_display_targets);
 
     let surface_transfer = match target {
         Some(NormalizedRenderTarget::Window(window_ref)) => extracted_windows
@@ -346,14 +348,14 @@ pub(crate) fn resolve_view_display_target(
 pub fn prepare_view_display_targets(
     mut commands: Commands,
     extracted_windows: Res<ExtractedWindows>,
-    manual_display_targets: Res<ManualDisplayTargets>,
+    effective_manual_display_targets: Res<EffectiveManualDisplayTargets>,
     views: Query<(Entity, &ExtractedCamera), With<ExtractedView>>,
 ) {
     for (entity, camera) in &views {
         let view_display_target = resolve_view_display_target(
             camera.target.as_ref(),
             &extracted_windows,
-            &manual_display_targets,
+            &effective_manual_display_targets,
         );
         commands.entity(entity).insert(view_display_target);
     }

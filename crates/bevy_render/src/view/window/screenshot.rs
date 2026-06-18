@@ -1,4 +1,4 @@
-use super::{display_target::ManualDisplayTargets, ExtractedWindows};
+use super::{display_target::EffectiveManualDisplayTargets, ExtractedWindows};
 use crate::{
     gpu_readback,
     render_asset::RenderAssets,
@@ -186,10 +186,9 @@ pub fn save_to_disk(path: impl AsRef<Path>) -> impl FnMut(On<ScreenshotCaptured>
                 Ok(format) => {
                     let img = match (&dyn_img, format) {
                         // Float sources keep their full range in
-                        // float-capable containers.
-                        // TODO: add a calibrated HDR golden-image path
-                        // (metadata, PQ containers, paper-white-aware SDR
-                        // preview).
+                        // float-capable containers. The signal is written
+                        // as-is, without HDR mastering metadata, PQ
+                        // containers, or a paper-white-aware SDR preview.
                         (
                             DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_),
                             ImageFormat::OpenExr,
@@ -342,18 +341,18 @@ fn extract_screenshots(
 }
 
 /// How a manual (`Image` / `TextureView`) render target's signal must be
-/// decoded, from its registered [`ManualDisplayTargets`] entry. Manual targets
-/// resolve to the requested transfer verbatim — there is no surface
+/// decoded, from its resolved [`EffectiveManualDisplayTargets`] entry. Manual
+/// targets resolve to the requested transfer verbatim — there is no surface
 /// negotiation to downgrade them — so this mirrors the encoder's own coercion:
 /// HLG is fulfilled as PQ, and `ExtendedSrgb` keeps a Display-P3 gamut while
 /// coercing every other gamut to Rec.709.
 fn manual_target_decode(
-    manual_display_targets: &ManualDisplayTargets,
+    effective_manual_display_targets: &EffectiveManualDisplayTargets,
     target: &NormalizedRenderTarget,
 ) -> ScreenshotDecode {
-    match manual_display_targets
+    match effective_manual_display_targets
         .get(target)
-        .map(|t| (t.transfer, t.gamut))
+        .map(|e| (e.target.transfer, e.target.gamut))
     {
         Some((DisplayTransfer::Pq | DisplayTransfer::Hlg, _)) => ScreenshotDecode::Pq,
         Some((DisplayTransfer::ExtendedSrgb, gamut)) => ScreenshotDecode::ExtendedSrgb {
@@ -373,7 +372,7 @@ fn prepare_screenshots(
     mut pipelines: ResMut<SpecializedRenderPipelines<ScreenshotToScreenPipeline>>,
     images: Res<RenderAssets<GpuImage>>,
     manual_texture_views: Res<ManualTextureViews>,
-    manual_display_targets: Res<ManualDisplayTargets>,
+    effective_manual_display_targets: Res<EffectiveManualDisplayTargets>,
     mut view_target_attachments: ResMut<ViewTargetAttachments>,
 ) {
     prepared.clear();
@@ -438,7 +437,7 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
-                state.decode = manual_target_decode(&manual_display_targets, target);
+                state.decode = manual_target_decode(&effective_manual_display_targets, target);
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),
@@ -463,7 +462,7 @@ fn prepare_screenshots(
                     &pipeline_cache,
                     &mut pipelines,
                 );
-                state.decode = manual_target_decode(&manual_display_targets, target);
+                state.decode = manual_target_decode(&effective_manual_display_targets, target);
                 prepared.insert(*entity, state);
                 view_target_attachments.insert(
                     target.clone(),

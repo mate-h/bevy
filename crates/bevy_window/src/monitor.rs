@@ -20,18 +20,20 @@ use {bevy_ecs::prelude::ReflectComponent, bevy_reflect::Reflect};
 ///
 /// # HDR capability metadata
 ///
-/// `Monitor` currently carries **no luminance, gamut, or HDR-capability fields** (peak/min
-/// luminance, EDID-derived primaries, current HDR enablement): `winit` 0.30 exposes none of
-/// these on its `MonitorHandle`, and `wgpu` has no display-capability query either (the HDR
-/// work under <https://github.com/gfx-rs/wgpu/issues/2920> covers surface color-space
-/// *selection* — which Bevy's HDR output uses — but not monitor metadata). Such fields would
-/// be purely additive here once an upstream source exists.
+/// `Monitor` itself carries only geometry and refresh information. A display's
+/// luminance, primaries, and bit depth — when the platform reports them — live
+/// in the additive [`MonitorDisplayCapability`](crate::MonitorDisplayCapability)
+/// component on the same entity, populated by the renderer's display-sensing
+/// poll. Its absence means the platform reports nothing, never that the display
+/// is SDR.
 ///
-/// Until then, display calibration is described by the user-authoritative
-/// [`DisplayTarget`](crate::DisplayTarget) component on each [`Window`](crate::Window),
-/// populated from OS settings, user input, or an HGIG-style calibration flow (see the
-/// `hdr_calibration` example). The [`WindowMonitorChanged`](crate::WindowMonitorChanged)
-/// event signals when a window moves to a different monitor and recalibration may be
+/// Display *calibration* (the values the renderer encodes for) remains the
+/// user-authoritative [`DisplayTarget`](crate::DisplayTarget) on each
+/// [`Window`](crate::Window); the engine merges sensed capability into the
+/// derived [`EffectiveDisplayTarget`](crate::EffectiveDisplayTarget) only for
+/// fields whose [`DisplayCalibrationPolicy`](crate::DisplayCalibrationPolicy)
+/// opts in. The [`WindowMonitorChanged`](crate::WindowMonitorChanged) event
+/// signals when a window moves to a different monitor and recalibration may be
 /// warranted.
 #[derive(Component, Debug, Clone)]
 #[require(HasWindows)]

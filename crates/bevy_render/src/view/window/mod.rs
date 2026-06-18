@@ -6,14 +6,14 @@ use crate::{
     renderer::{RenderAdapter, RenderDevice, RenderInstance},
     Extract, ExtractSchedule, GpuResourceAppExt, MainWorld, Render, RenderApp, RenderSystems,
 };
-use bevy_app::{App, Plugin};
+use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::entity::EntityHashSet;
 use bevy_ecs::{entity::EntityHashMap, prelude::*};
 use bevy_log::{debug, info, warn, warn_once};
 use bevy_utils::default;
 use bevy_window::{
-    CompositeAlphaMode, DisplayGamut, DisplayTarget, DisplayTransfer, PresentMode, PrimaryWindow,
-    RawHandleWrapper, Window, WindowClosing, WindowResolvedTransfer,
+    CompositeAlphaMode, DisplayGamut, DisplayTarget, DisplayTransfer, EffectiveDisplayTarget,
+    PresentMode, PrimaryWindow, RawHandleWrapper, Window, WindowClosing, WindowResolvedTransfer,
 };
 use core::{
     num::NonZero,
@@ -24,9 +24,11 @@ use wgpu::{
     SurfaceTargetUnsafe, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 
+pub mod display_state;
 pub mod display_target;
 pub mod screenshot;
 
+pub use display_state::*;
 pub use display_target::*;
 use screenshot::ScreenshotPlugin;
 
@@ -36,13 +38,18 @@ impl Plugin for WindowRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             ScreenshotPlugin,
-            ExtractResourcePlugin::<ManualDisplayTargets>::default(),
+            ExtractResourcePlugin::<EffectiveManualDisplayTargets>::default(),
         ))
-        .init_resource::<ManualDisplayTargets>();
+        .init_resource::<ManualDisplayTargets>()
+        .init_resource::<EffectiveManualDisplayTargets>()
+        // Runs in the main schedule, fully before extraction, so the resolved
+        // `EffectiveDisplayTarget` the render world reads has zero frame lag.
+        .add_systems(PostUpdate, resolve_calibration);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
-                .init_resource::<ManualDisplayTargets>()
+                .init_resource::<EffectiveManualDisplayTargets>()
+                .init_resource::<DisplayStateStore>()
                 .init_gpu_resource::<ExtractedWindows>()
                 .init_gpu_resource::<WindowSurfaces>()
                 .add_systems(
@@ -50,6 +57,7 @@ impl Plugin for WindowRenderPlugin {
                     (
                         extract_windows.before(extract_cameras),
                         write_back_resolved_transfers.after(extract_windows),
+                        write_back_display_state.after(extract_windows),
                     ),
                 )
                 .add_systems(
@@ -58,7 +66,13 @@ impl Plugin for WindowRenderPlugin {
                         .run_if(need_surface_configuration)
                         .before(prepare_windows),
                 )
-                .add_systems(Render, prepare_windows.in_set(RenderSystems::PrepareViews));
+                .add_systems(Render, prepare_windows.in_set(RenderSystems::PrepareViews))
+                .add_systems(
+                    Render,
+                    poll_display_state
+                        .in_set(RenderSystems::PrepareViews)
+                        .after(prepare_windows),
+                );
         }
     }
 }
@@ -207,7 +221,7 @@ fn extract_windows(
         Query<(
             Entity,
             &Window,
-            Option<&DisplayTarget>,
+            Option<&EffectiveDisplayTarget>,
             &RawHandleWrapper,
             Option<&PrimaryWindow>,
         )>,
@@ -215,11 +229,14 @@ fn extract_windows(
     mut removed: Extract<RemovedComponents<RawHandleWrapper>>,
     mut window_surfaces: ResMut<WindowSurfaces>,
 ) {
-    for (entity, window, display_target, handle, primary) in windows.iter() {
-        // `DisplayTarget` is a required component of `Window`, but tolerate
-        // its removal by falling back to the SDR default rather than
-        // dropping the window from extraction.
-        let display_target = display_target.copied().unwrap_or_default();
+    for (entity, window, effective_display_target, handle, primary) in windows.iter() {
+        // The renderer consumes the resolved `EffectiveDisplayTarget`. It is
+        // computed in the main world before extraction; when absent (pre-resolve
+        // or removed) fall back to the SDR default, exactly as for a missing
+        // `DisplayTarget`.
+        let display_target = effective_display_target
+            .map(|effective| effective.target)
+            .unwrap_or_default();
         if primary.is_some() {
             extracted_windows.primary = Some(entity);
         }
@@ -322,18 +339,27 @@ fn write_back_resolved_transfers(
     window_surfaces: Res<WindowSurfaces>,
 ) {
     for (&entity, surface_data) in window_surfaces.surfaces.iter() {
-        let Ok(mut window) = main_world.get_entity_mut(entity) else {
-            continue;
-        };
-        // Insert only on change, so `Changed<WindowResolvedTransfer>` stays
-        // a usable signal.
-        if window
-            .get::<WindowResolvedTransfer>()
-            .map(|resolved| resolved.0)
-            != Some(surface_data.resolved_transfer)
-        {
-            window.insert(WindowResolvedTransfer(surface_data.resolved_transfer));
-        }
+        insert_on_change(
+            &mut main_world,
+            entity,
+            WindowResolvedTransfer(surface_data.resolved_transfer),
+        );
+    }
+}
+
+/// Inserts `value` onto `entity` in the main world only when it differs from the
+/// component already present (or none is), so a `Changed<C>` reader sees a real
+/// transition rather than a write every frame. A missing entity is skipped.
+pub(super) fn insert_on_change<C: Component + PartialEq>(
+    main_world: &mut MainWorld,
+    entity: Entity,
+    value: C,
+) {
+    let Ok(mut entity_mut) = main_world.get_entity_mut(entity) else {
+        return;
+    };
+    if entity_mut.get::<C>() != Some(&value) {
+        entity_mut.insert(value);
     }
 }
 
@@ -1000,12 +1026,13 @@ pub fn create_surfaces(
                 // `caps.format_capabilities`, so this configure cannot fail
                 // wgpu's `UnsupportedColorSpace` validation.
                 //
-                // TODO: the wgpu surface color-space API does not (yet)
-                // expose HDR10 mastering metadata (SMPTE ST 2086 display
-                // primaries/luminance, CTA-861.3 MaxCLL/MaxFALL); drivers use
-                // their own defaults. When it does, wire
-                // `DisplayTarget::peak_luminance_nits` /
-                // `min_luminance_nits` into it here at configure time.
+                // The color space is the only display parameter the surface
+                // carries: the wgpu surface API exposes no HDR10 mastering
+                // metadata (SMPTE ST 2086 display primaries/luminance,
+                // CTA-861.3 MaxCLL/MaxFALL), so drivers apply their own
+                // defaults and `DisplayTarget::peak_luminance_nits` /
+                // `min_luminance_nits` reach the GPU through the view uniform
+                // rather than the swapchain configuration.
                 color_space: negotiated.color_space,
                 width: window.physical_width,
                 height: window.physical_height,

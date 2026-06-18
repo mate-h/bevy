@@ -1,34 +1,62 @@
-//! HGIG-style HDR display calibration patterns.
+//! HGIG-style HDR display calibration patterns, with optional OS-sensed
+//! calibration.
 //!
 //! This example renders the three classic calibration patterns (peak
 //! luminance, paper white, black level) and lets you adjust the primary
 //! window's [`DisplayTarget`] live while looking at them, exactly the flow an
-//! in-game "HDR settings" screen would implement.
+//! in-game "HDR settings" screen would implement. On top of that manual flow it
+//! demonstrates Bevy's display-sensing path: a [`DisplayCalibrationPolicy`]
+//! opts individual fields into OS-sensed auto-resolution, the renderer merges
+//! the user's intent with what the display reports into an
+//! [`EffectiveDisplayTarget`], and the live [`WindowDisplayState`] /
+//! [`MonitorDisplayCapability`] expose what the platform sees right now.
 //!
 //! **An HDR display is required to calibrate anything real.** scRGB-linear
-//! output is currently reachable on macOS/iOS (Metal), Windows (Vulkan/DX12),
-//! and Linux (Wayland + Vulkan, Mesa 25.1+); PQ (HDR10) output on
-//! Vulkan/DX12/Metal when the OS has HDR output enabled (press `T` to cycle
-//! the requested transfer). On SDR displays (or unsupported backends) the
-//! HDR request is downgraded — PQ falls back to scRGB, then to plain SDR —
-//! with a warning in the log; the example still runs, but everything
-//! brighter than paper white clips on the SDR fallback.
+//! output is reachable on macOS/iOS (Metal), Windows (Vulkan/DX12), and Linux
+//! (Wayland + Vulkan, Mesa 25.1+); PQ (HDR10) output on Vulkan/DX12/Metal when
+//! the OS has HDR output enabled (press `T` to cycle the requested transfer).
+//! On SDR displays (or unsupported backends) the HDR request is downgraded — PQ
+//! falls back to scRGB, then to plain SDR — with a warning in the log; the
+//! example still runs, but everything brighter than paper white clips on the
+//! SDR fallback.
+//!
+//! # Manual intent versus sensed calibration
+//!
+//! [`DisplayTarget`] is the user's *intent* and Bevy never overwrites it. The
+//! HGIG-style keys below edit it directly, and a field whose
+//! [`DisplayCalibrationPolicy`] is [`AutoField::Keep`] always renders that
+//! authored value (top of the precedence ladder). A field set to
+//! [`AutoField::Auto`] instead lets the renderer fill it from sensed display
+//! information when the platform reports any — the result, and which provenance
+//! won per field, lands in [`EffectiveDisplayTarget`], the target the renderer
+//! actually encodes for. Press `A` to flip peak / black level / gamut between
+//! `Keep` (manual) and `Auto` (OS-sensed) and watch the resolved values and
+//! their provenance change in the overlay. Paper white stays manual: it is a
+//! viewing-environment preference, not a hardware fact, so the display cannot
+//! sense it.
 //!
 //! The calibration camera uses [`Tonemapping::None`] so the patterns reach
 //! the display encoder at their exact authored values: a tone-mapping
 //! operator would reshape the patches and the readings would calibrate the
 //! operator, not the display. Patch brightness is authored in
 //! paper-white-relative units (`1.0` = paper white), so a patch meant to show
-//! `N` nits is drawn at `N / paper_white_nits`. Press `G` to preview the
-//! Gran Turismo 7 operator on the same patterns (this exercises the full HDR
-//! tone-mapping path, but the patterns are no longer exact while it is on).
+//! `N` nits is drawn at `N / paper_white_nits`. The patches read the *resolved*
+//! [`EffectiveDisplayTarget`], so when peak is on `Auto` the peak pattern
+//! tracks the sensed peak. Press `G` to preview the Gran Turismo 7 operator on
+//! the same patterns (this exercises the full HDR tone-mapping path, but the
+//! patterns are no longer exact while it is on).
 
 use bevy::{
     camera::{Hdr, ScalingMode},
     core_pipeline::tonemapping::Tonemapping,
     platform::collections::HashSet,
     prelude::*,
-    window::{DisplayTarget, DisplayTransfer, Monitor, PrimaryWindow, WindowMonitorChanged},
+    window::{
+        AutoField, DisplayCalibrationPolicy, DisplayInfoSource, DisplayProvenance, DisplayTarget,
+        DisplayTransfer, EffectiveDisplayTarget, FieldProvenance, Monitor,
+        MonitorDisplayCapability, OnMonitor, PrimaryWindow, WindowDisplayState,
+        WindowMonitorChanged,
+    },
 };
 
 /// The `DisplayTarget` requested at startup (and restored with `R`): a common
@@ -37,11 +65,23 @@ use bevy::{
 /// The 1000-nit starting candidate exceeds the real peak of most consumer HDR
 /// panels (typically 400–800 nits), so the peak-luminance pattern instructs a
 /// two-directional procedure: lower the candidate first if the center square
-/// is already invisible.
+/// is already invisible. When peak is on [`AutoField::Auto`] and the display
+/// reports its peak, the sensed value takes over instead.
 const INITIAL_HDR_TARGET: DisplayTarget = DisplayTarget::SDR_SRGB
     .with_paper_white(200.0)
     .with_peak(1000.0)
     .with_transfer(DisplayTransfer::ScRgbLinear);
+
+/// The calibration policy requested at startup (and restored with `R`): paper
+/// white stays manual (the display cannot sense a viewing preference), while
+/// peak, black level, and gamut start manual but can be flipped to OS-sensed
+/// with `A`.
+const INITIAL_POLICY: DisplayCalibrationPolicy = DisplayCalibrationPolicy {
+    paper_white: AutoField::Keep,
+    peak_luminance: AutoField::Keep,
+    min_luminance: AutoField::Keep,
+    gamut: AutoField::Keep,
+};
 
 /// Height of the orthographic view volume in world units.
 const VIEW_HEIGHT: f32 = 8.0;
@@ -62,6 +102,7 @@ fn main() {
                 select_pattern,
                 adjust_display_target,
                 toggle_transfer,
+                toggle_auto_sensing,
                 toggle_gt7_preview,
                 watch_monitor_changes,
                 update_pattern_visibility,
@@ -94,12 +135,13 @@ enum CalibrationPattern {
 struct PatternRoot(CalibrationPattern);
 
 /// How bright a calibration patch should be. A system converts this to a
-/// paper-white-relative linear color whenever the [`DisplayTarget`] changes.
+/// paper-white-relative linear color whenever the resolved
+/// [`EffectiveDisplayTarget`] changes.
 #[derive(Component)]
 enum Patch {
     /// An absolute luminance in nits (drawn at `nits / paper_white_nits`).
     Nits(f32),
-    /// A fraction of the current `peak_luminance_nits`.
+    /// A fraction of the resolved `peak_luminance_nits`.
     PeakFraction(f32),
     /// A value in paper-white-relative units (`1.0` = paper white).
     PaperWhiteRelative(f32),
@@ -115,12 +157,16 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
+    primary_window: Single<Entity, With<PrimaryWindow>>,
 ) {
-    // Request HDR output. If the display/backend cannot provide it the
-    // renderer warns once and degrades to plain SDR; this example then runs
-    // (and is exercised in CI) on that downgrade path.
-    **display_target = INITIAL_HDR_TARGET;
+    // Request HDR output and the calibration policy. If the display/backend
+    // cannot provide HDR the renderer warns once and degrades to plain SDR;
+    // this example then runs (and is exercised in CI) on that downgrade path.
+    // `DisplayTarget` is the user's intent; `DisplayCalibrationPolicy` says
+    // which fields the renderer may auto-resolve from the display.
+    commands
+        .entity(*primary_window)
+        .insert((INITIAL_HDR_TARGET, INITIAL_POLICY));
 
     commands.spawn((
         Camera3d::default(),
@@ -139,8 +185,8 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Patches start black; `update_patch_levels` colors them from the
-    // `DisplayTarget` on the first frame.
+    // Patches start black; `update_patch_levels` colors them from the resolved
+    // `EffectiveDisplayTarget` on the first frame.
     let patch = |commands: &mut Commands,
                  meshes: &mut Assets<Mesh>,
                  materials: &mut Assets<StandardMaterial>,
@@ -169,7 +215,7 @@ fn setup(
     // lower the candidate until it appears, then raise it until it just
     // disappears into the clipped background — at that point
     // `peak_luminance_nits` matches the display's real peak (HGIG "MaxTML"
-    // pattern).
+    // pattern). With peak on `Auto`, the sensed peak drives the center patch.
     let peak_root = commands
         .spawn((
             Transform::default(),
@@ -310,13 +356,21 @@ fn select_pattern(keys: Res<ButtonInput<KeyCode>>, mut pattern: ResMut<Calibrati
 /// keys are held. The renderer reacts live: changing the values re-prepares
 /// the display-target uniform (and GT7 parameters when previewing), and a
 /// transfer change renegotiates the swapchain.
+///
+/// These edits always land in the user-authoritative [`DisplayTarget`]. For a
+/// field whose policy is [`AutoField::Keep`] that authored value wins outright;
+/// for an [`AutoField::Auto`] field the OS-sensed value takes precedence when
+/// the display reports one, so the manual edit only shows through (as the
+/// `Default`-provenance fallback) while nothing is sensed.
 fn adjust_display_target(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
+    mut policy: Single<&mut DisplayCalibrationPolicy, With<PrimaryWindow>>,
 ) {
     if keys.just_pressed(KeyCode::KeyR) {
         **display_target = INITIAL_HDR_TARGET;
+        **policy = INITIAL_POLICY;
         return;
     }
 
@@ -351,6 +405,10 @@ fn adjust_display_target(
 /// degrades to plain SDR with a one-time warning in the log. The gamut is left
 /// at its default Rec.709 (the encoder coerces it per transfer); the
 /// `tonemapping` example demonstrates the wide-gamut Display-P3 path.
+///
+/// The transfer is the one calibration field that is *never* auto-resolved:
+/// changing it renegotiates the swapchain, so [`DisplayCalibrationPolicy`] has
+/// no transfer field and sensing never rewrites it.
 fn toggle_transfer(
     keys: Res<ButtonInput<KeyCode>>,
     mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
@@ -365,8 +423,28 @@ fn toggle_transfer(
     }
 }
 
+/// Flips peak, black level, and gamut between [`AutoField::Keep`] (the manual
+/// HGIG values authored above win) and [`AutoField::Auto`] (the renderer
+/// resolves them from sensed display information when the platform reports
+/// any). Paper white is deliberately omitted: it is a viewing preference the
+/// display cannot sense, so it stays manual.
+fn toggle_auto_sensing(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut policy: Single<&mut DisplayCalibrationPolicy, With<PrimaryWindow>>,
+) {
+    if keys.just_pressed(KeyCode::KeyA) {
+        let next = match policy.peak_luminance {
+            AutoField::Keep => AutoField::Auto,
+            AutoField::Auto => AutoField::Keep,
+        };
+        policy.peak_luminance = next;
+        policy.min_luminance = next;
+        policy.gamut = next;
+    }
+}
+
 /// Toggles a Gran Turismo 7 tone-mapping preview. On an HDR display target
-/// the operator automatically runs in its HDR mode, plumbing the target's
+/// the operator automatically runs in its HDR mode, plumbing the resolved
 /// peak luminance into the tone curve, so this exercises the full HDR
 /// tone-mapping path end to end (add `GranTurismo7Params` to tune it). While
 /// the preview is on, the patterns are *not* exact — calibrate with it off.
@@ -385,9 +463,11 @@ fn toggle_gt7_preview(
 
 /// Listens for the window moving to a different monitor. The new monitor may
 /// have a completely different peak luminance and gamut, and `DisplayTarget`
-/// is user-authoritative (Bevy never rewrites it), so suggest recalibrating.
-/// The first event per window only reports the monitor becoming known at
-/// startup, so it is logged but does not raise the notice.
+/// is user-authoritative (Bevy never rewrites it), so suggest recalibrating —
+/// or rely on `Auto` fields, which the renderer re-resolves against the new
+/// monitor's [`MonitorDisplayCapability`] on its own. The first event per
+/// window only reports the monitor becoming known at startup, so it is logged
+/// but does not raise the notice.
 fn watch_monitor_changes(
     mut events: MessageReader<WindowMonitorChanged>,
     monitors: Query<&Monitor>,
@@ -431,23 +511,28 @@ fn update_pattern_visibility(
     }
 }
 
-/// Recomputes every patch's linear color from the current [`DisplayTarget`].
+/// Recomputes every patch's linear color from the resolved
+/// [`EffectiveDisplayTarget`].
 ///
 /// With `Tonemapping::None` the scene-linear value `v` reaches the display
 /// encoder unchanged, where `1.0` = paper white; a patch meant to show `N`
-/// nits is therefore drawn at `N / paper_white_nits`.
+/// nits is therefore drawn at `N / paper_white_nits`. Reading the *resolved*
+/// target (not the raw `DisplayTarget`) means a sensed peak or paper white
+/// shows through the patches when those fields are on `Auto`.
 fn update_patch_levels(
-    display_target: Single<&DisplayTarget, (With<PrimaryWindow>, Changed<DisplayTarget>)>,
+    effective: Single<
+        &EffectiveDisplayTarget,
+        (With<PrimaryWindow>, Changed<EffectiveDisplayTarget>),
+    >,
     patches: Query<(&Patch, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let paper_white = display_target.sanitized_paper_white_nits();
+    let target = effective.target;
+    let paper_white = target.sanitized_paper_white_nits();
     for (patch, material) in &patches {
         let value = match patch {
             Patch::Nits(nits) => nits / paper_white,
-            Patch::PeakFraction(fraction) => {
-                fraction * display_target.peak_luminance_nits / paper_white
-            }
+            Patch::PeakFraction(fraction) => fraction * target.peak_luminance_nits / paper_white,
             Patch::PaperWhiteRelative(value) => *value,
         };
         if let Some(mut material) = materials.get_mut(&material.0) {
@@ -456,18 +541,70 @@ fn update_patch_levels(
     }
 }
 
+/// One-letter tag for a field's resolved [`FieldProvenance`], shown beside the
+/// effective value so it is clear *why* it has that value.
+fn provenance_tag(provenance: FieldProvenance) -> &'static str {
+    match provenance {
+        FieldProvenance::User => "user",
+        FieldProvenance::Hgig => "HGIG",
+        FieldProvenance::Policy => "policy",
+        FieldProvenance::Os => "OS-sensed",
+        FieldProvenance::Default => "default",
+    }
+}
+
+/// Human-readable name for a [`DisplayInfoSource`].
+fn source_name(source: DisplayInfoSource) -> &'static str {
+    match source {
+        DisplayInfoSource::Unknown => "unknown (nothing sensed)",
+        DisplayInfoSource::Os => "OS / windowing system",
+        DisplayInfoSource::DerivedFromHeadroom => "derived from EDR headroom",
+        DisplayInfoSource::Web => "web coarse capability",
+    }
+}
+
+/// Renders one optional sensed nits value, or "—" when the platform did not
+/// report it.
+fn fmt_nits(value: Option<f32>) -> String {
+    value.map_or_else(|| "       —".into(), |nits| format!("{nits:7.1}n"))
+}
+
 fn update_ui(
     mut text: Single<&mut Text>,
-    display_target: Single<&DisplayTarget, With<PrimaryWindow>>,
+    window: Single<
+        (
+            &DisplayTarget,
+            &DisplayCalibrationPolicy,
+            &EffectiveDisplayTarget,
+            Option<&WindowDisplayState>,
+            Option<&OnMonitor>,
+        ),
+        With<PrimaryWindow>,
+    >,
+    capabilities: Query<&MonitorDisplayCapability>,
     tonemapping: Single<&Tonemapping, With<Camera3d>>,
     pattern: Res<CalibrationPattern>,
     notice: Res<MonitorChangeNotice>,
 ) {
+    let (display_target, policy, effective, live, on_monitor) = *window;
+    let resolved = &effective.target;
+    let provenance: &DisplayProvenance = &effective.provenance;
+    let capability = on_monitor.and_then(|on_monitor| capabilities.get(on_monitor.0).ok());
+
+    let auto = |field: AutoField| {
+        if field == AutoField::Auto {
+            "Auto"
+        } else {
+            "Keep"
+        }
+    };
+
     let mut ui = String::new();
 
-    ui.push_str("HDR calibration (HGIG-style) - requires an HDR display\n\n");
+    ui.push_str("HDR calibration (HGIG-style + OS sensing) - requires an HDR display\n\n");
 
-    ui.push_str("DisplayTarget (primary window):\n");
+    // The authored intent (what the manual keys edit).
+    ui.push_str("DisplayTarget intent (primary window):\n");
     ui.push_str(&format!(
         "  paper white: {:7.1} nits  (Left/Right, Shift = fast)\n",
         display_target.paper_white_nits
@@ -480,17 +617,91 @@ fn update_ui(
         "  min:         {:7.3} nits  ([ / ])\n",
         display_target.min_luminance_nits
     ));
+    ui.push_str(&format!("  gamut:       {:?}\n", display_target.gamut));
     ui.push_str(&format!(
-        "  transfer (requested): {:?}  (T cycles sRGB -> scRGB -> extended-sRGB -> PQ, R resets)\n",
+        "  transfer (requested): {:?}  (T cycles sRGB -> scRGB -> extended-sRGB -> PQ, R resets)\n\n",
         display_target.transfer
     ));
-    // The *resolved* transfer (post surface negotiation) currently lives only
-    // in the render world; the main world cannot read it back yet. If the
-    // request was downgraded, a warning naming the fallback was logged once.
-    ui.push_str(
-        "  transfer (resolved):  not readable from the main world; if the request\n\
-         \tcould not be fulfilled, a downgrade warning was logged\n\n",
-    );
+
+    // Which fields the renderer may auto-resolve.
+    ui.push_str(&format!(
+        "Calibration policy (A toggles peak/min/gamut Keep<->Auto):\n  \
+         paper white {}   peak {}   min {}   gamut {}\n  \
+         (paper white is always manual: the display cannot sense a viewing preference)\n\n",
+        auto(policy.paper_white),
+        auto(policy.peak_luminance),
+        auto(policy.min_luminance),
+        auto(policy.gamut),
+    ));
+
+    // The resolved target the renderer actually encodes for, with provenance.
+    ui.push_str("EffectiveDisplayTarget (resolved, what the renderer encodes):\n");
+    ui.push_str(&format!(
+        "  paper white: {:7.1} nits  [{}]\n",
+        resolved.paper_white_nits,
+        provenance_tag(provenance.paper_white),
+    ));
+    ui.push_str(&format!(
+        "  peak:        {:7.1} nits  [{}]\n",
+        resolved.peak_luminance_nits,
+        provenance_tag(provenance.peak_luminance),
+    ));
+    ui.push_str(&format!(
+        "  min:         {:7.3} nits  [{}]\n",
+        resolved.min_luminance_nits,
+        provenance_tag(provenance.min_luminance),
+    ));
+    ui.push_str(&format!(
+        "  gamut:       {:?}  [{}]\n",
+        resolved.gamut,
+        provenance_tag(provenance.gamut),
+    ));
+    ui.push_str(&format!(
+        "  transfer:    {:?}  [{}]\n\n",
+        resolved.transfer,
+        provenance_tag(provenance.transfer),
+    ));
+
+    // What the platform reports right now (the inputs the resolver merges).
+    ui.push_str("WindowDisplayState (live, sensed):\n");
+    match live {
+        Some(live) => {
+            ui.push_str(&format!(
+                "  HDR active: {}   source: {}\n",
+                live.hdr_active
+                    .map_or_else(|| "unknown".into(), |active| active.to_string()),
+                source_name(live.source),
+            ));
+            ui.push_str(&format!(
+                "  SDR white: {}   headroom potential: {}\n",
+                fmt_nits(live.sdr_white_nits),
+                live.headroom_potential
+                    .map_or_else(|| "  —".into(), |h| format!("{h:.2}x")),
+            ));
+        }
+        None => ui.push_str("  not sensed yet (no successful poll)\n"),
+    }
+    ui.push('\n');
+
+    ui.push_str("MonitorDisplayCapability (static, sensed):\n");
+    match capability {
+        Some(capability) => {
+            ui.push_str(&format!(
+                "  peak: {}   full-frame: {}   black: {}\n",
+                fmt_nits(capability.max_nits),
+                fmt_nits(capability.max_full_frame_nits),
+                fmt_nits(capability.min_nits),
+            ));
+            ui.push_str(&format!(
+                "  gamut hint: {}   source: {}\n\n",
+                capability
+                    .gamut_hint
+                    .map_or_else(|| "—".into(), |gamut| format!("{gamut:?}")),
+                source_name(capability.source),
+            ));
+        }
+        None => ui.push_str("  not sensed yet (no capability reported)\n\n"),
+    }
 
     ui.push_str("Pattern:\n");
     for (key, label, this) in [
@@ -508,10 +719,11 @@ fn update_ui(
     match *pattern {
         CalibrationPattern::PeakLuminance => ui.push_str(
             "The background checkerboard is at 9000/10000 nits (clipped to the display's\n\
-             real peak); the center square tracks `peak_luminance_nits`. If the center\n\
-             square is already invisible, lower the peak (Down) until it appears, then\n\
-             raise it (Up) until it just disappears into the background: that value is\n\
-             the display's peak luminance.\n",
+             real peak); the center square tracks the resolved `peak_luminance_nits`. If\n\
+             the center square is already invisible, lower the peak (Down) until it\n\
+             appears, then raise it (Up) until it just disappears into the background:\n\
+             that value is the display's peak luminance. (With peak on Auto, the sensed\n\
+             peak drives the center square instead.)\n",
         ),
         CalibrationPattern::PaperWhite => ui.push_str(
             "The card is at exactly 1.0 = paper white, like this UI text. Adjust\n\
