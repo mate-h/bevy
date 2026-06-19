@@ -46,7 +46,7 @@ pub mod prelude {
         DisplayProvenance, DisplayTarget, DisplayTransfer, EffectiveDisplayTarget, FileDragAndDrop,
         Ime, MonitorDisplayCapability, MonitorSelection, VideoModeSelection, Window,
         WindowDisplayState, WindowMonitorChanged, WindowMoved, WindowPlugin, WindowPosition,
-        WindowResizeConstraints, WindowResolvedTransfer,
+        WindowResizeConstraints, WindowResolvedTransfer, WindowSupportedTransfers,
     };
 }
 

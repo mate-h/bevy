@@ -1,53 +1,58 @@
-//! HGIG-style HDR display calibration patterns, with optional OS-sensed
-//! calibration.
+//! HGIG-style HDR display calibration, presented as a three-step guided wizard
+//! with optional OS-sensed calibration.
 //!
-//! This example renders the three classic calibration patterns (peak
-//! luminance, paper white, black level) and lets you adjust the primary
-//! window's [`DisplayTarget`] live while looking at them, exactly the flow an
-//! in-game "HDR settings" screen would implement. On top of that manual flow it
-//! demonstrates Bevy's display-sensing path: a [`DisplayCalibrationPolicy`]
-//! opts individual fields into OS-sensed auto-resolution, the renderer merges
-//! the user's intent with what the display reports into an
-//! [`EffectiveDisplayTarget`], and the live [`WindowDisplayState`] /
-//! [`MonitorDisplayCapability`] expose what the platform sees right now.
+//! Three guided steps - peak luminance, paper white, black level - show one
+//! calibration task at a time. Each step leads with a single instruction in the
+//! banner, exposes exactly the one value it edits in the value bar, and keeps a
+//! fixed data panel on the right that compares your *intent*, the resolved
+//! *effective* target with provenance, and what the *display* reports. This is
+//! the same flow an in-game "HDR settings" screen would implement, broken into
+//! one decision per screen so it is easy to follow.
+//!
+//! All text - banner, value bar, data panel, legend, and the per-step labels -
+//! is plain SDR [`bevy_ui`](bevy::ui). Only the calibration patches reach the
+//! display encoder, through a separate [`Tonemapping::None`] camera, so their
+//! luminance is never reshaped by tone mapping or UI compositing.
 //!
 //! **An HDR display is required to calibrate anything real.** scRGB-linear
 //! output is reachable on macOS/iOS (Metal), Windows (Vulkan/DX12), and Linux
 //! (Wayland + Vulkan, Mesa 25.1+); PQ (HDR10) output on Vulkan/DX12/Metal when
 //! the OS has HDR output enabled (press `T` to cycle the requested transfer).
-//! On SDR displays (or unsupported backends) the HDR request is downgraded — PQ
-//! falls back to scRGB, then to plain SDR — with a warning in the log; the
+//! On SDR displays (or unsupported backends) the HDR request is downgraded - PQ
+//! falls back to scRGB, then to plain SDR - with a warning in the log; the
 //! example still runs, but everything brighter than paper white clips on the
-//! SDR fallback.
+//! SDR fallback, so the peak step looks flat. The data panel's "HDR active"
+//! badge reports which path is live.
 //!
 //! # Manual intent versus sensed calibration
 //!
 //! [`DisplayTarget`] is the user's *intent* and Bevy never overwrites it. The
-//! HGIG-style keys below edit it directly, and a field whose
+//! HGIG-style keys edit it directly, and a field whose
 //! [`DisplayCalibrationPolicy`] is [`AutoField::Keep`] always renders that
 //! authored value (top of the precedence ladder). A field set to
 //! [`AutoField::Auto`] instead lets the renderer fill it from sensed display
-//! information when the platform reports any — the result, and which provenance
+//! information when the platform reports any - the result, and which provenance
 //! won per field, lands in [`EffectiveDisplayTarget`], the target the renderer
 //! actually encodes for. Press `A` to flip peak / black level / gamut between
-//! `Keep` (manual) and `Auto` (OS-sensed) and watch the resolved values and
-//! their provenance change in the overlay. Paper white stays manual: it is a
-//! viewing-environment preference, not a hardware fact, so the display cannot
-//! sense it.
+//! `Keep` (manual) and `Auto` (OS-sensed); the data panel's `effective` column
+//! and provenance tags change, and a one-line flash announces the swap. Paper
+//! white stays manual: it is a viewing-environment preference, not a hardware
+//! fact, so the display cannot sense it.
 //!
-//! The calibration camera uses [`Tonemapping::None`] so the patterns reach
-//! the display encoder at their exact authored values: a tone-mapping
-//! operator would reshape the patches and the readings would calibrate the
-//! operator, not the display. Patch brightness is authored in
-//! paper-white-relative units (`1.0` = paper white), so a patch meant to show
-//! `N` nits is drawn at `N / paper_white_nits`. The patches read the *resolved*
-//! [`EffectiveDisplayTarget`], so when peak is on `Auto` the peak pattern
-//! tracks the sensed peak. Press `G` to preview the Gran Turismo 7 operator on
-//! the same patterns (this exercises the full HDR tone-mapping path, but the
-//! patterns are no longer exact while it is on).
+//! The calibration camera uses [`Tonemapping::None`] so the patches reach the
+//! display encoder at their exact authored values: a tone-mapping operator
+//! would reshape the patches and the readings would calibrate the operator, not
+//! the display. Patch brightness is authored in paper-white-relative units
+//! (`1.0` = paper white), so a patch meant to show `N` nits is drawn at
+//! `N / paper_white_nits`. The patches read the *resolved*
+//! [`EffectiveDisplayTarget`], so when peak is on `Auto` the peak pattern tracks
+//! the sensed peak. Press `G` to preview the Gran Turismo 7 operator on the same
+//! patches (this exercises the full HDR tone-mapping path, but the patches are
+//! no longer exact while it is on).
 
 use bevy::{
     camera::{Hdr, ScalingMode},
+    color::palettes::css,
     core_pipeline::tonemapping::Tonemapping,
     platform::collections::HashSet,
     prelude::*,
@@ -55,7 +60,7 @@ use bevy::{
         AutoField, DisplayCalibrationPolicy, DisplayInfoSource, DisplayProvenance, DisplayTarget,
         DisplayTransfer, EffectiveDisplayTarget, FieldProvenance, Monitor,
         MonitorDisplayCapability, OnMonitor, PrimaryWindow, WindowDisplayState,
-        WindowMonitorChanged,
+        WindowMonitorChanged, WindowSupportedTransfers,
     },
 };
 
@@ -63,10 +68,10 @@ use bevy::{
 /// HDR baseline of 200-nit paper white on a 1000-nit display over scRGB.
 ///
 /// The 1000-nit starting candidate exceeds the real peak of most consumer HDR
-/// panels (typically 400–800 nits), so the peak-luminance pattern instructs a
-/// two-directional procedure: lower the candidate first if the center square
-/// is already invisible. When peak is on [`AutoField::Auto`] and the display
-/// reports its peak, the sensed value takes over instead.
+/// panels (typically 400-800 nits), so the peak step instructs a two-directional
+/// procedure: lower the candidate first if the center square is already
+/// invisible. When peak is on [`AutoField::Auto`] and the display reports its
+/// peak, the sensed value takes over instead.
 const INITIAL_HDR_TARGET: DisplayTarget = DisplayTarget::SDR_SRGB
     .with_paper_white(200.0)
     .with_peak(1000.0)
@@ -87,7 +92,11 @@ const INITIAL_POLICY: DisplayCalibrationPolicy = DisplayCalibrationPolicy {
 const VIEW_HEIGHT: f32 = 8.0;
 
 /// Absolute luminances (in nits) of the black-level steps, left to right.
-const BLACK_STEP_NITS: [f32; 8] = [0.0, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0];
+const BLACK_STEP_NITS: [f32; 7] = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0];
+
+/// Shifts the patch cluster left so it never renders under the right-hand data
+/// panel.
+const STAGE_SHIFT: f32 = -1.5;
 
 fn main() {
     App::new()
@@ -95,11 +104,12 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .init_resource::<CalibrationPattern>()
         .init_resource::<MonitorChangeNotice>()
+        .init_resource::<FlashNotice>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
-                select_pattern,
+                advance_step,
                 adjust_display_target,
                 toggle_transfer,
                 toggle_auto_sensing,
@@ -107,30 +117,63 @@ fn main() {
                 watch_monitor_changes,
                 update_pattern_visibility,
                 update_patch_levels,
-                update_ui,
+                update_banner,
+                update_value_bar,
+                update_data_panel,
+                update_black_step_labels,
             )
                 .chain(),
         )
         .run();
 }
 
-/// Which calibration pattern is currently shown.
+/// The current wizard step. [`next`](CalibrationPattern::next) /
+/// [`prev`](CalibrationPattern::prev) walk peak -> paper white -> black level
+/// (clamped at the ends, no wrap); [`step_index`](CalibrationPattern::step_index)
+/// numbers the steps `1..=3` for the banner.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum CalibrationPattern {
-    /// Adjust `peak_luminance_nits` until the center patch merges with the
-    /// clipped background.
+    /// Adjust `peak_luminance_nits` until the center square merges with the
+    /// clipped surround.
     #[default]
     PeakLuminance,
     /// Adjust `paper_white_nits` until the reference white card sits at a
-    /// comfortable "white UI" brightness.
+    /// comfortable "white paper" brightness.
     PaperWhite,
-    /// Find the dimmest near-black step distinguishable from the background
-    /// and record it as `min_luminance_nits`.
+    /// Find the dimmest near-black step distinguishable from black and record
+    /// it as `min_luminance_nits`.
     BlackLevel,
 }
 
-/// Marks the root entity of one calibration pattern; visibility is toggled
-/// from [`CalibrationPattern`].
+impl CalibrationPattern {
+    /// The next step, clamped at black level (no wrap).
+    fn next(self) -> Self {
+        match self {
+            Self::PeakLuminance => Self::PaperWhite,
+            Self::PaperWhite | Self::BlackLevel => Self::BlackLevel,
+        }
+    }
+
+    /// The previous step, clamped at peak luminance (no wrap).
+    fn prev(self) -> Self {
+        match self {
+            Self::BlackLevel => Self::PaperWhite,
+            Self::PaperWhite | Self::PeakLuminance => Self::PeakLuminance,
+        }
+    }
+
+    /// The step's 1-based number, for the banner.
+    fn step_index(self) -> u8 {
+        match self {
+            Self::PeakLuminance => 1,
+            Self::PaperWhite => 2,
+            Self::BlackLevel => 3,
+        }
+    }
+}
+
+/// Marks the root entity of one calibration pattern; visibility is toggled from
+/// [`CalibrationPattern`].
 #[derive(Component)]
 struct PatternRoot(CalibrationPattern);
 
@@ -153,6 +196,42 @@ struct MonitorChangeNotice {
     seconds_remaining: f32,
 }
 
+/// A short banner flash (with a countdown) that announces a state change the
+/// user just caused with a key, so the cause and its effect are visible
+/// together - used by `A` to call out the Keep<->Auto swap.
+#[derive(Resource, Default)]
+struct FlashNotice {
+    text: String,
+    seconds_remaining: f32,
+}
+
+/// Tags the banner text: the step title and its one instruction.
+#[derive(Component)]
+struct BannerText;
+
+/// Tags the value-bar text: the single value the current step edits, its
+/// marker, and its keys.
+#[derive(Component)]
+struct ValueBarText;
+
+/// Tags the right-hand data-panel text: the intent / effective / sensed
+/// comparison table, the policy line, and the live sensed footers.
+#[derive(Component)]
+struct DataPanelText;
+
+/// Tags the parent of the black-level nit labels; shown only on step 3.
+#[derive(Component)]
+struct BlackStepLabels;
+
+/// Tags one black-level nit label by its [`BLACK_STEP_NITS`] index, so its
+/// color can brighten at or above the recorded `min_luminance`.
+#[derive(Component)]
+struct BlackStepLabel(usize);
+
+/// Tags the BT.2408 203-nit label; shown only on step 2.
+#[derive(Component)]
+struct PaperRefLabel;
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -173,7 +252,7 @@ fn setup(
         // An fp16 intermediate, so patch values above paper white (> 1.0)
         // survive until the display-encoding pass.
         Hdr,
-        // Calibration patterns must reach the display encoder unmodified; an
+        // Calibration patches must reach the display encoder unmodified; an
         // operator would bend them. Press `G` for a GT7 preview instead.
         Tonemapping::None,
         Projection::from(OrthographicProjection {
@@ -207,45 +286,40 @@ fn setup(
         ));
     };
 
-    // Pattern 1: peak luminance. A near-peak checkerboard (10000/9000 nits —
-    // both clip to whatever the display can actually do) behind a center
-    // patch drawn at the *candidate* peak. The candidate starts at 1000 nits
-    // (`INITIAL_HDR_TARGET`), which already clips on dimmer panels, so the
-    // procedure is two-directional: if the center square is already invisible,
-    // lower the candidate until it appears, then raise it until it just
-    // disappears into the clipped background — at that point
-    // `peak_luminance_nits` matches the display's real peak (HGIG "MaxTML"
-    // pattern). With peak on `Auto`, the sensed peak drives the center patch.
+    // Step 1: peak luminance. A clipped near-peak surround, a true-black
+    // separating frame, and a center square at the candidate peak. The black
+    // frame guarantees a hard border so the square is never "touching" the
+    // surround; the square merges into the surround *across the black gap* at
+    // the display's real peak (HGIG "MaxTML"). The candidate starts at 1000
+    // nits (`INITIAL_HDR_TARGET`), which already clips on dimmer panels, so the
+    // procedure is two-directional: if the square is already invisible, lower
+    // peak until it reappears, then raise it until it just disappears again.
+    // With peak on `Auto`, the sensed peak drives the center square instead.
     let peak_root = commands
         .spawn((
-            Transform::default(),
+            Transform::from_xyz(STAGE_SHIFT, 0.0, 0.0),
             Visibility::Hidden,
             PatternRoot(CalibrationPattern::PeakLuminance),
         ))
         .id();
-    let (columns, rows) = (12, 6);
-    for column in 0..columns {
-        for row in 0..rows {
-            let nits = if (column + row) % 2 == 0 {
-                10000.0
-            } else {
-                9000.0
-            };
-            patch(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                peak_root,
-                Vec2::splat(1.0),
-                Vec3::new(
-                    column as f32 - (columns - 1) as f32 / 2.0,
-                    row as f32 - (rows - 1) as f32 / 2.0,
-                    0.0,
-                ),
-                Patch::Nits(nits),
-            );
-        }
-    }
+    patch(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        peak_root,
+        Vec2::new(9.0, 6.0),
+        Vec3::new(0.0, 0.0, 0.0),
+        Patch::Nits(10000.0),
+    );
+    patch(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        peak_root,
+        Vec2::splat(2.6),
+        Vec3::new(0.0, 0.0, 0.05),
+        Patch::Nits(0.0),
+    );
     patch(
         &mut commands,
         &mut meshes,
@@ -256,13 +330,12 @@ fn setup(
         Patch::PeakFraction(1.0),
     );
 
-    // Pattern 2: paper white. A reference white card at exactly 1.0
-    // (paper-white-relative) over a dim surround. The UI text (default white)
-    // also renders at paper white. A 203-nit strip (the ITU-R BT.2408
-    // reference white for HDR broadcast) is shown for comparison.
+    // Step 2: paper white. A reference white card at paper white over a dim
+    // surround, with a BT.2408 203-nit strip and two comfort swatches for
+    // context. The card and the UI text both sit at 1.0 = paper white.
     let paper_root = commands
         .spawn((
-            Transform::default(),
+            Transform::from_xyz(STAGE_SHIFT, 0.0, 0.0),
             Visibility::Hidden,
             PatternRoot(CalibrationPattern::PaperWhite),
         ))
@@ -272,7 +345,7 @@ fn setup(
         &mut meshes,
         &mut materials,
         paper_root,
-        Vec2::new(40.0, VIEW_HEIGHT),
+        Vec2::new(9.0, VIEW_HEIGHT),
         Vec3::ZERO,
         Patch::PaperWhiteRelative(0.15),
     );
@@ -281,8 +354,8 @@ fn setup(
         &mut meshes,
         &mut materials,
         paper_root,
-        Vec2::new(5.0, 3.0),
-        Vec3::new(0.0, 0.4, 0.1),
+        Vec2::new(4.5, 2.6),
+        Vec3::new(0.0, 0.5, 0.1),
         Patch::PaperWhiteRelative(1.0),
     );
     patch(
@@ -290,18 +363,37 @@ fn setup(
         &mut meshes,
         &mut materials,
         paper_root,
-        Vec2::new(5.0, 0.8),
-        Vec3::new(0.0, -2.0, 0.1),
+        Vec2::new(4.5, 0.7),
+        Vec3::new(0.0, -2.2, 0.1),
         Patch::Nits(203.0),
     );
+    patch(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        paper_root,
+        Vec2::splat(0.8),
+        Vec3::new(-1.4, -1.0, 0.1),
+        Patch::PaperWhiteRelative(0.5),
+    );
+    patch(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        paper_root,
+        Vec2::splat(0.8),
+        Vec3::new(1.4, -1.0, 0.1),
+        Patch::PaperWhiteRelative(0.75),
+    );
 
-    // Pattern 3: black level. Near-black steps at fixed absolute luminances
-    // over a true-black background. Record the dimmest step you can
-    // distinguish as `min_luminance_nits`. (On 8-bit SDR the lowest steps
-    // quantize to the same code value and are genuinely indistinguishable.)
+    // Step 3: black level. Near-black steps at fixed absolute nit levels over
+    // true black. Record the dimmest step you can distinguish as
+    // `min_luminance_nits`; the matching nit label brightens at or above it.
+    // (On 8-bit SDR the lowest steps quantize to the same code value and are
+    // genuinely indistinguishable.)
     let black_root = commands
         .spawn((
-            Transform::default(),
+            Transform::from_xyz(STAGE_SHIFT, 0.0, 0.0),
             Visibility::Hidden,
             PatternRoot(CalibrationPattern::BlackLevel),
         ))
@@ -311,7 +403,7 @@ fn setup(
         &mut meshes,
         &mut materials,
         black_root,
-        Vec2::new(40.0, VIEW_HEIGHT),
+        Vec2::new(9.0, 6.0),
         Vec3::ZERO,
         Patch::Nits(0.0),
     );
@@ -321,26 +413,138 @@ fn setup(
             &mut meshes,
             &mut materials,
             black_root,
-            Vec2::new(1.2, 2.5),
-            Vec3::new((index as f32 - 3.5) * 1.5, 0.0, 0.1),
+            Vec2::new(1.0, 2.4),
+            Vec3::new((index as f32 - 3.0) * 1.3, 0.0, 0.1),
             Patch::Nits(nits),
         );
     }
 
-    // UI overlay. Note: white UI text is composited at 1.0 in the
-    // display-linear buffer, i.e. exactly at paper white.
+    // Banner: the step title and its one instruction, across the top.
     commands.spawn((
+        BannerText,
         Text::default(),
+        TextFont::from_font_size(26.0),
+        TextLayout::justify(Justify::Center),
         Node {
             position_type: PositionType::Absolute,
             top: px(12),
-            left: px(12),
+            left: px(0),
+            right: px(0),
             ..default()
         },
     ));
+
+    // Data panel: the intent / effective / sensed comparison table and the live
+    // sensed footers, pinned to the right (default left-justified text).
+    commands.spawn((
+        DataPanelText,
+        Text::default(),
+        TextFont::from_font_size(14.0),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(150),
+            right: px(12),
+            width: px(440),
+            ..default()
+        },
+    ));
+
+    // Value bar: the single value the current step edits and its keys.
+    commands.spawn((
+        ValueBarText,
+        Text::default(),
+        TextFont::from_font_size(20.0),
+        TextLayout::justify(Justify::Center),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(44),
+            left: px(0),
+            right: px(0),
+            ..default()
+        },
+    ));
+
+    // Legend: the full key list, written once (it never changes).
+    commands.spawn((
+        Text::new(
+            "N / Space next  |  P prev  |  1|2|3 jump  |  A auto  |  \
+             T transfer  |  G GT7  |  R reset",
+        ),
+        TextFont::from_font_size(13.0),
+        TextLayout::justify(Justify::Center),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(12),
+            left: px(0),
+            right: px(0),
+            ..default()
+        },
+    ));
+
+    // BT.2408 203-nit label for step 2. It sits in the dim surround just above
+    // the reference strip rather than over it, so the white text stays legible
+    // instead of washing out against the strip's near-paper-white fill.
+    commands.spawn((
+        PaperRefLabel,
+        Text::new("203 nits - BT.2408 reference white (strip below)"),
+        TextFont::from_font_size(14.0),
+        TextLayout::justify(Justify::Center),
+        Visibility::Hidden,
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(200),
+            left: px(0),
+            right: px(0),
+            ..default()
+        },
+    ));
+
+    // Black-level nit legend for step 3, listing the step values in the same
+    // dim-to-bright order they appear on screen. It reads as a centered legend
+    // rather than a per-patch overlay, so it needs no world-to-screen projection
+    // and does not drift as the window resizes. The value at or above the
+    // recorded `min_luminance` brightens in `update_black_step_labels`.
+    commands
+        .spawn((
+            BlackStepLabels,
+            Visibility::Hidden,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(96),
+                left: px(0),
+                right: px(0),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::Center,
+                column_gap: px(14),
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("near-black steps (nits), dim to bright:"),
+                TextFont::from_font_size(13.0),
+                TextColor(css::GRAY.into()),
+            ));
+            for (index, nits) in BLACK_STEP_NITS.into_iter().enumerate() {
+                parent.spawn((
+                    BlackStepLabel(index),
+                    Text::new(format!("{nits}")),
+                    TextFont::from_font_size(13.0),
+                    TextColor(css::GRAY.into()),
+                ));
+            }
+        });
 }
 
-fn select_pattern(keys: Res<ButtonInput<KeyCode>>, mut pattern: ResMut<CalibrationPattern>) {
+/// Walks the wizard with `N` / `Space` (next) and `P` (previous), and jumps
+/// directly with `1` / `2` / `3`. Stepping is clamped at the ends (no wrap).
+fn advance_step(keys: Res<ButtonInput<KeyCode>>, mut pattern: ResMut<CalibrationPattern>) {
+    if keys.just_pressed(KeyCode::KeyN) || keys.just_pressed(KeyCode::Space) {
+        *pattern = pattern.next();
+    }
+    if keys.just_pressed(KeyCode::KeyP) {
+        *pattern = pattern.prev();
+    }
     for (key, selected) in [
         (KeyCode::Digit1, CalibrationPattern::PeakLuminance),
         (KeyCode::Digit2, CalibrationPattern::PaperWhite),
@@ -399,38 +603,62 @@ fn adjust_display_target(
     }
 }
 
-/// Cycles the requested transfer: sRGB → scRGB-linear → extended-sRGB (encoded,
-/// the web HDR path) → PQ (HDR10) → sRGB. The surface is renegotiated the same
-/// frame; if the backend cannot provide the matching color space the request
-/// degrades to plain SDR with a one-time warning in the log. The gamut is left
-/// at its default Rec.709 (the encoder coerces it per transfer); the
-/// `tonemapping` example demonstrates the wide-gamut Display-P3 path.
+/// The transfers `toggle_transfer` steps through, in cycle order: sRGB ->
+/// scRGB-linear -> extended-sRGB (encoded, the web HDR path) -> PQ (HDR10) ->
+/// sRGB. [`WindowSupportedTransfers`] reports its set in this same order.
+const TRANSFER_CYCLE: [DisplayTransfer; 4] = [
+    DisplayTransfer::Srgb,
+    DisplayTransfer::ScRgbLinear,
+    DisplayTransfer::ExtendedSrgb,
+    DisplayTransfer::Pq,
+];
+
+/// Cycles the requested transfer through only the transfers the surface
+/// advertises (via [`WindowSupportedTransfers`]), in the order sRGB ->
+/// scRGB-linear -> extended-sRGB (encoded, the web HDR path) -> PQ (HDR10) ->
+/// sRGB, skipping any the surface cannot present so `T` never steps into a mode
+/// that would silently downgrade to SDR. Before the first surface
+/// configuration the component is absent, so it falls back to the full cycle.
+/// The surface is renegotiated the same frame. The gamut is left at its default
+/// Rec.709 (the encoder coerces it per transfer); the `tonemapping` example
+/// demonstrates the wide-gamut Display-P3 path.
 ///
 /// The transfer is the one calibration field that is *never* auto-resolved:
 /// changing it renegotiates the swapchain, so [`DisplayCalibrationPolicy`] has
 /// no transfer field and sensing never rewrites it.
 fn toggle_transfer(
     keys: Res<ButtonInput<KeyCode>>,
-    mut display_target: Single<&mut DisplayTarget, With<PrimaryWindow>>,
+    window: Single<(&mut DisplayTarget, Option<&WindowSupportedTransfers>), With<PrimaryWindow>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyT) {
-        display_target.transfer = match display_target.transfer {
-            DisplayTransfer::Srgb => DisplayTransfer::ScRgbLinear,
-            DisplayTransfer::ScRgbLinear => DisplayTransfer::ExtendedSrgb,
-            DisplayTransfer::ExtendedSrgb => DisplayTransfer::Pq,
-            _ => DisplayTransfer::Srgb,
-        };
+    if !keys.just_pressed(KeyCode::KeyT) {
+        return;
     }
+    let (mut display_target, supported) = window.into_inner();
+    let current = display_target.transfer;
+    // Walk the fixed cycle from the current transfer, wrapping, and take the
+    // next entry the surface can present. With no capability information yet
+    // (pre-first-config) every transfer is treated as a candidate.
+    let start = TRANSFER_CYCLE
+        .iter()
+        .position(|&t| t == current)
+        .unwrap_or(0);
+    let next = (1..=TRANSFER_CYCLE.len())
+        .map(|offset| TRANSFER_CYCLE[(start + offset) % TRANSFER_CYCLE.len()])
+        .find(|&t| supported.is_none_or(|s| s.contains(t)))
+        .unwrap_or(current);
+    display_target.transfer = next;
 }
 
 /// Flips peak, black level, and gamut between [`AutoField::Keep`] (the manual
 /// HGIG values authored above win) and [`AutoField::Auto`] (the renderer
 /// resolves them from sensed display information when the platform reports
-/// any). Paper white is deliberately omitted: it is a viewing preference the
+/// any), and flashes a one-line notice so the effective column's swap is
+/// visible. Paper white is deliberately omitted: it is a viewing preference the
 /// display cannot sense, so it stays manual.
 fn toggle_auto_sensing(
     keys: Res<ButtonInput<KeyCode>>,
     mut policy: Single<&mut DisplayCalibrationPolicy, With<PrimaryWindow>>,
+    mut flash: ResMut<FlashNotice>,
 ) {
     if keys.just_pressed(KeyCode::KeyA) {
         let next = match policy.peak_luminance {
@@ -440,6 +668,11 @@ fn toggle_auto_sensing(
         policy.peak_luminance = next;
         policy.min_luminance = next;
         policy.gamut = next;
+        flash.text = match next {
+            AutoField::Auto => "peak/min/gamut -> Auto: effective now follows the display".into(),
+            AutoField::Keep => "peak/min/gamut -> Keep: effective follows your numbers".into(),
+        };
+        flash.seconds_remaining = 5.0;
     }
 }
 
@@ -447,7 +680,7 @@ fn toggle_auto_sensing(
 /// the operator automatically runs in its HDR mode, plumbing the resolved
 /// peak luminance into the tone curve, so this exercises the full HDR
 /// tone-mapping path end to end (add `GranTurismo7Params` to tune it). While
-/// the preview is on, the patterns are *not* exact — calibrate with it off.
+/// the preview is on, the patches are *not* exact - calibrate with it off.
 fn toggle_gt7_preview(
     keys: Res<ButtonInput<KeyCode>>,
     mut tonemapping: Single<&mut Tonemapping, With<Camera3d>>,
@@ -463,7 +696,7 @@ fn toggle_gt7_preview(
 
 /// Listens for the window moving to a different monitor. The new monitor may
 /// have a completely different peak luminance and gamut, and `DisplayTarget`
-/// is user-authoritative (Bevy never rewrites it), so suggest recalibrating —
+/// is user-authoritative (Bevy never rewrites it), so suggest recalibrating -
 /// or rely on `Auto` fields, which the renderer re-resolves against the new
 /// monitor's [`MonitorDisplayCapability`] on its own. The first event per
 /// window only reports the monitor becoming known at startup, so it is logged
@@ -495,9 +728,17 @@ fn watch_monitor_changes(
     notice.seconds_remaining = (notice.seconds_remaining - time.delta_secs()).max(0.0);
 }
 
+/// Shows the patches for the current step and hides the rest, and toggles the
+/// step-specific `bevy_ui` labels (the black-level nit row and the 203-nit
+/// label) to match.
 fn update_pattern_visibility(
     pattern: Res<CalibrationPattern>,
-    mut roots: Query<(&PatternRoot, &mut Visibility)>,
+    mut roots: Query<
+        (&PatternRoot, &mut Visibility),
+        (Without<BlackStepLabels>, Without<PaperRefLabel>),
+    >,
+    mut black_labels: Single<&mut Visibility, With<BlackStepLabels>>,
+    mut paper_label: Single<&mut Visibility, (With<PaperRefLabel>, Without<BlackStepLabels>)>,
 ) {
     if !pattern.is_changed() {
         return;
@@ -508,6 +749,17 @@ fn update_pattern_visibility(
         } else {
             Visibility::Hidden
         };
+    }
+    **black_labels = visible_if(*pattern == CalibrationPattern::BlackLevel);
+    **paper_label = visible_if(*pattern == CalibrationPattern::PaperWhite);
+}
+
+/// Maps a boolean to a shown/hidden [`Visibility`].
+fn visible_if(shown: bool) -> Visibility {
+    if shown {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
     }
 }
 
@@ -541,7 +793,108 @@ fn update_patch_levels(
     }
 }
 
-/// One-letter tag for a field's resolved [`FieldProvenance`], shown beside the
+/// Writes the banner: the step title (`Step N of 3 - NAME`), the step's one
+/// instruction, and the flash line when `A` (or a monitor change) just fired.
+fn update_banner(
+    mut text: Single<&mut Text, With<BannerText>>,
+    pattern: Res<CalibrationPattern>,
+    mut flash: ResMut<FlashNotice>,
+    mut monitor_notice: ResMut<MonitorChangeNotice>,
+    time: Res<Time>,
+) {
+    let (name, instruction) = match *pattern {
+        CalibrationPattern::PeakLuminance => (
+            "PEAK LUMINANCE",
+            "Raise PEAK (Up) until the centre square just vanishes into the bright surround, \
+             then lower one tap. If it is already invisible, lower PEAK until it reappears first.",
+        ),
+        CalibrationPattern::PaperWhite => (
+            "PAPER WHITE",
+            "Adjust PAPER WHITE (Left/Right) until the card looks like comfortable white paper \
+             for your room (dark ~100, normal ~200, bright ~250 nits).",
+        ),
+        CalibrationPattern::BlackLevel => (
+            "BLACK LEVEL",
+            "Find the dimmest step you can still tell apart from black, then set MIN ([ / ]) to \
+             its value. MIN is recorded metadata; the patches do not change, but the matching \
+             label brightens.",
+        ),
+    };
+
+    let mut banner = format!("Step {} of 3 - {name}\n{instruction}", pattern.step_index(),);
+
+    // The flash line announces a swap the user just caused; the monitor notice
+    // shares the same below-the-instruction slot.
+    flash.seconds_remaining = (flash.seconds_remaining - time.delta_secs()).max(0.0);
+    if flash.seconds_remaining > 0.0 {
+        banner.push_str(&format!("\n{}", flash.text));
+    } else if monitor_notice.seconds_remaining > 0.0 {
+        banner.push_str("\nWindow moved to a different monitor - recalibration recommended.");
+    }
+
+    // Keep the monitor countdown advancing even when the flash is showing.
+    if flash.seconds_remaining > 0.0 {
+        monitor_notice.seconds_remaining =
+            (monitor_notice.seconds_remaining - time.delta_secs()).max(0.0);
+    }
+
+    text.0 = banner;
+}
+
+/// Writes the value bar: the single value the current step edits, a marker, and
+/// the keys that change it. Reads the *authored* [`DisplayTarget`] (the value
+/// the keys move), since that is what the user is editing.
+fn update_value_bar(
+    mut text: Single<&mut Text, With<ValueBarText>>,
+    display_target: Single<&DisplayTarget, With<PrimaryWindow>>,
+    pattern: Res<CalibrationPattern>,
+) {
+    text.0 = match *pattern {
+        CalibrationPattern::PeakLuminance => format!(
+            "PEAK  *  {:.1} nits   <- editing   (Up / Down,  Shift = 4x)",
+            display_target.peak_luminance_nits,
+        ),
+        CalibrationPattern::PaperWhite => format!(
+            "PAPER WHITE  *  {:.1} nits   <- editing   (Left / Right,  Shift = 4x)",
+            display_target.paper_white_nits,
+        ),
+        CalibrationPattern::BlackLevel => {
+            let min = display_target.min_luminance_nits;
+            let nearest = BLACK_STEP_NITS
+                .into_iter()
+                .min_by(|a, b| {
+                    (a - min)
+                        .abs()
+                        .partial_cmp(&(b - min).abs())
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0.0);
+            format!(
+                "MIN  *  {min:.3} nits   <- editing   ( [ / ] )   | nearest step: {nearest:.2} nits",
+            )
+        }
+    };
+}
+
+/// Brightens the black-level nit labels at or above the recorded
+/// `min_luminance` and dims the rest, so editing MIN produces a visible change
+/// even though MIN is metadata only and the patches stay fixed.
+fn update_black_step_labels(
+    display_target: Single<&DisplayTarget, With<PrimaryWindow>>,
+    mut labels: Query<(&BlackStepLabel, &mut TextColor)>,
+) {
+    let min = display_target.min_luminance_nits;
+    for (label, mut color) in &mut labels {
+        let nits = BLACK_STEP_NITS[label.0];
+        color.0 = if nits >= min {
+            Color::WHITE
+        } else {
+            css::GRAY.into()
+        };
+    }
+}
+
+/// One-word tag for a field's resolved [`FieldProvenance`], shown beside the
 /// effective value so it is clear *why* it has that value.
 fn provenance_tag(provenance: FieldProvenance) -> &'static str {
     match provenance {
@@ -563,14 +916,19 @@ fn source_name(source: DisplayInfoSource) -> &'static str {
     }
 }
 
-/// Renders one optional sensed nits value, or "—" when the platform did not
+/// Renders one optional sensed nits value, or "-" when the platform did not
 /// report it.
 fn fmt_nits(value: Option<f32>) -> String {
-    value.map_or_else(|| "       —".into(), |nits| format!("{nits:7.1}n"))
+    value.map_or_else(|| "      -".into(), |nits| format!("{nits:7.1}"))
 }
 
-fn update_ui(
-    mut text: Single<&mut Text>,
+/// Writes the right-hand data panel: the SDR-honesty badge, the
+/// intent / effective[prov] / sensed comparison table (with a `>` marker on the
+/// row the current step edits), the policy line, the live `WindowDisplayState`
+/// and `MonitorDisplayCapability` footers, and the provenance legend plus GT7
+/// status. Every sensing field the example surfaces lives here.
+fn update_data_panel(
+    mut text: Single<&mut Text, With<DataPanelText>>,
     window: Single<
         (
             &DisplayTarget,
@@ -578,15 +936,15 @@ fn update_ui(
             &EffectiveDisplayTarget,
             Option<&WindowDisplayState>,
             Option<&OnMonitor>,
+            Option<&WindowSupportedTransfers>,
         ),
         With<PrimaryWindow>,
     >,
     capabilities: Query<&MonitorDisplayCapability>,
     tonemapping: Single<&Tonemapping, With<Camera3d>>,
     pattern: Res<CalibrationPattern>,
-    notice: Res<MonitorChangeNotice>,
 ) {
-    let (display_target, policy, effective, live, on_monitor) = *window;
+    let (display_target, policy, effective, live, on_monitor, supported) = *window;
     let resolved = &effective.target;
     let provenance: &DisplayProvenance = &effective.provenance;
     let capability = on_monitor.and_then(|on_monitor| capabilities.get(on_monitor.0).ok());
@@ -598,158 +956,160 @@ fn update_ui(
             "Keep"
         }
     };
+    // The `>` marker points at the field the current step edits.
+    let marker = |this: CalibrationPattern| {
+        if *pattern == this {
+            ">"
+        } else {
+            " "
+        }
+    };
+
+    // Sensed inputs the resolver merges, shown raw in the `sensed` column.
+    let sensed_peak = capability.and_then(|c| c.max_nits);
+    let sensed_min = capability.and_then(|c| c.min_nits);
+    let sensed_gamut = capability
+        .and_then(|c| c.gamut_hint)
+        .map_or_else(|| "      -".into(), |gamut| format!("{gamut:>7?}"));
+
+    let hdr_active = live
+        .and_then(|live| live.hdr_active)
+        .map_or_else(|| "unknown".into(), |active| active.to_string());
+
+    // The transfers `T` will cycle through, consumed from the renderer-sensed
+    // capability. Absent until the first surface configuration.
+    let transfers_available = match supported {
+        Some(supported) => supported
+            .iter()
+            .map(transfer_short_name)
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => "sensing...".into(),
+    };
 
     let mut ui = String::new();
+    ui.push_str("DISPLAY CALIBRATION\n");
+    ui.push_str(&format!(
+        "HDR active: {hdr_active} | transfer: {:?}\n",
+        resolved.transfer,
+    ));
+    ui.push_str(&format!("transfers available: {transfers_available}\n\n"));
 
-    ui.push_str("HDR calibration (HGIG-style + OS sensing) - requires an HDR display\n\n");
-
-    // The authored intent (what the manual keys edit).
-    ui.push_str("DisplayTarget intent (primary window):\n");
+    // intent | effective[prov] | sensed comparison table.
+    ui.push_str("field      intent    effective[prov]      sensed\n");
     ui.push_str(&format!(
-        "  paper white: {:7.1} nits  (Left/Right, Shift = fast)\n",
-        display_target.paper_white_nits
+        "{} paper   {:7.1}    {:7.1} [{}]{}{}\n",
+        marker(CalibrationPattern::PaperWhite),
+        display_target.paper_white_nits,
+        resolved.paper_white_nits,
+        provenance_tag(provenance.paper_white),
+        pad(provenance_tag(provenance.paper_white)),
+        // Paper white is never sensed.
+        "      -",
     ));
     ui.push_str(&format!(
-        "  peak:        {:7.1} nits  (Up/Down, Shift = fast)\n",
-        display_target.peak_luminance_nits
+        "{} peak    {:7.1}    {:7.1} [{}]{}{}\n",
+        marker(CalibrationPattern::PeakLuminance),
+        display_target.peak_luminance_nits,
+        resolved.peak_luminance_nits,
+        provenance_tag(provenance.peak_luminance),
+        pad(provenance_tag(provenance.peak_luminance)),
+        fmt_nits(sensed_peak),
     ));
     ui.push_str(&format!(
-        "  min:         {:7.3} nits  ([ / ])\n",
-        display_target.min_luminance_nits
+        "{} min     {:7.3}    {:7.3} [{}]{}{}\n",
+        marker(CalibrationPattern::BlackLevel),
+        display_target.min_luminance_nits,
+        resolved.min_luminance_nits,
+        provenance_tag(provenance.min_luminance),
+        pad(provenance_tag(provenance.min_luminance)),
+        fmt_nits(sensed_min),
     ));
-    ui.push_str(&format!("  gamut:       {:?}\n", display_target.gamut));
     ui.push_str(&format!(
-        "  transfer (requested): {:?}  (T cycles sRGB -> scRGB -> extended-sRGB -> PQ, R resets)\n\n",
-        display_target.transfer
+        "  gamut   {:>7?}    {:>7?} [{}]{}{}\n\n",
+        display_target.gamut,
+        resolved.gamut,
+        provenance_tag(provenance.gamut),
+        pad(provenance_tag(provenance.gamut)),
+        sensed_gamut,
     ));
 
     // Which fields the renderer may auto-resolve.
     ui.push_str(&format!(
-        "Calibration policy (A toggles peak/min/gamut Keep<->Auto):\n  \
-         paper white {}   peak {}   min {}   gamut {}\n  \
-         (paper white is always manual: the display cannot sense a viewing preference)\n\n",
+        "policy: paper {} | peak {} | min {} | gamut {}\n",
         auto(policy.paper_white),
         auto(policy.peak_luminance),
         auto(policy.min_luminance),
         auto(policy.gamut),
     ));
+    ui.push_str("(A toggles peak/min/gamut; paper white is always manual)\n\n");
 
-    // The resolved target the renderer actually encodes for, with provenance.
-    ui.push_str("EffectiveDisplayTarget (resolved, what the renderer encodes):\n");
-    ui.push_str(&format!(
-        "  paper white: {:7.1} nits  [{}]\n",
-        resolved.paper_white_nits,
-        provenance_tag(provenance.paper_white),
-    ));
-    ui.push_str(&format!(
-        "  peak:        {:7.1} nits  [{}]\n",
-        resolved.peak_luminance_nits,
-        provenance_tag(provenance.peak_luminance),
-    ));
-    ui.push_str(&format!(
-        "  min:         {:7.3} nits  [{}]\n",
-        resolved.min_luminance_nits,
-        provenance_tag(provenance.min_luminance),
-    ));
-    ui.push_str(&format!(
-        "  gamut:       {:?}  [{}]\n",
-        resolved.gamut,
-        provenance_tag(provenance.gamut),
-    ));
-    ui.push_str(&format!(
-        "  transfer:    {:?}  [{}]\n\n",
-        resolved.transfer,
-        provenance_tag(provenance.transfer),
-    ));
-
-    // What the platform reports right now (the inputs the resolver merges).
-    ui.push_str("WindowDisplayState (live, sensed):\n");
+    // Live window state.
     match live {
         Some(live) => {
             ui.push_str(&format!(
-                "  HDR active: {}   source: {}\n",
+                "Window state (live): HDR {} | src {}\n",
                 live.hdr_active
                     .map_or_else(|| "unknown".into(), |active| active.to_string()),
                 source_name(live.source),
             ));
             ui.push_str(&format!(
-                "  SDR white: {}   headroom potential: {}\n",
+                "  SDR white {} | headroom {}\n",
                 fmt_nits(live.sdr_white_nits),
                 live.headroom_potential
-                    .map_or_else(|| "  —".into(), |h| format!("{h:.2}x")),
+                    .map_or_else(|| "-".into(), |h| format!("{h:.2}x")),
             ));
         }
-        None => ui.push_str("  not sensed yet (no successful poll)\n"),
+        None => ui.push_str("Window state (live): not sensed yet (no successful poll)\n"),
     }
-    ui.push('\n');
 
-    ui.push_str("MonitorDisplayCapability (static, sensed):\n");
+    // Static monitor capability.
     match capability {
         Some(capability) => {
             ui.push_str(&format!(
-                "  peak: {}   full-frame: {}   black: {}\n",
+                "Monitor cap (static): peak {} | full-frame {} | black {}\n",
                 fmt_nits(capability.max_nits),
                 fmt_nits(capability.max_full_frame_nits),
                 fmt_nits(capability.min_nits),
             ));
             ui.push_str(&format!(
-                "  gamut hint: {}   source: {}\n\n",
+                "  gamut {} | src {}\n\n",
                 capability
                     .gamut_hint
-                    .map_or_else(|| "—".into(), |gamut| format!("{gamut:?}")),
+                    .map_or_else(|| "-".into(), |gamut| format!("{gamut:?}")),
                 source_name(capability.source),
             ));
         }
-        None => ui.push_str("  not sensed yet (no capability reported)\n\n"),
+        None => ui.push_str("Monitor cap (static): not sensed yet (no capability reported)\n\n"),
     }
 
-    ui.push_str("Pattern:\n");
-    for (key, label, this) in [
-        ("1", "Peak luminance", CalibrationPattern::PeakLuminance),
-        ("2", "Paper white", CalibrationPattern::PaperWhite),
-        ("3", "Black level", CalibrationPattern::BlackLevel),
-    ] {
-        ui.push_str(&format!(
-            "({key}) {} {label}\n",
-            if *pattern == this { ">" } else { " " }
-        ));
-    }
-    ui.push('\n');
-
-    match *pattern {
-        CalibrationPattern::PeakLuminance => ui.push_str(
-            "The background checkerboard is at 9000/10000 nits (clipped to the display's\n\
-             real peak); the center square tracks the resolved `peak_luminance_nits`. If\n\
-             the center square is already invisible, lower the peak (Down) until it\n\
-             appears, then raise it (Up) until it just disappears into the background:\n\
-             that value is the display's peak luminance. (With peak on Auto, the sensed\n\
-             peak drives the center square instead.)\n",
-        ),
-        CalibrationPattern::PaperWhite => ui.push_str(
-            "The card is at exactly 1.0 = paper white, like this UI text. Adjust\n\
-             `paper_white_nits` (Left/Right) until it reads as comfortable reference\n\
-             white. The lower strip is 203 nits (ITU-R BT.2408 reference white).\n",
-        ),
-        CalibrationPattern::BlackLevel => ui.push_str(&format!(
-            "Near-black steps, left to right (nits): {BLACK_STEP_NITS:?}.\n\
-             Set `min_luminance_nits` ([ / ]) to the dimmest step you can tell apart\n\
-             from the background. (Calibration metadata only: stored for tone-mapping\n\
-             operators that lift shadows above the display's black floor.)\n",
-        )),
-    }
-
+    ui.push_str("prov: user / HGIG / policy / OS-sensed / default  (precedence top->down)\n");
     ui.push_str(&format!(
-        "\n(G) Gran Turismo 7 preview: {}\n",
+        "GT7 preview: {}\n",
         if **tonemapping == Tonemapping::GranTurismo7 {
-            "ON - full HDR tone-mapping path; patterns are not exact while previewing"
+            "on - full HDR path; patches not exact while previewing"
         } else {
-            "off - patterns are exact (Tonemapping::None)"
+            "off - patches exact (Tonemapping::None)"
         }
     ));
 
-    if notice.seconds_remaining > 0.0 {
-        ui.push_str("\n*** Window moved to a different monitor - recalibration recommended. ***\n");
-    }
-
     text.0 = ui;
+}
+
+/// Pads a provenance tag to a fixed width so the `sensed` column lines up
+/// regardless of which tag won.
+fn pad(tag: &str) -> String {
+    " ".repeat("OS-sensed".len().saturating_sub(tag.len()) + 3)
+}
+
+/// A short, human-readable name for a [`DisplayTransfer`], for the
+/// `transfers available` line.
+fn transfer_short_name(transfer: DisplayTransfer) -> &'static str {
+    match transfer {
+        DisplayTransfer::Srgb => "sRGB",
+        DisplayTransfer::ScRgbLinear => "scRGB",
+        DisplayTransfer::ExtendedSrgb => "ext-sRGB",
+        DisplayTransfer::Pq => "PQ",
+        DisplayTransfer::Hlg => "HLG",
+    }
 }

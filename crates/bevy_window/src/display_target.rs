@@ -12,6 +12,7 @@
 //! surface (format, color space) selection. The default value,
 //! [`DisplayTarget::SDR_SRGB`], reproduces Bevy's current SDR behavior exactly.
 
+use alloc::vec::Vec;
 use bevy_ecs::prelude::Component;
 
 #[cfg(feature = "bevy_reflect")]
@@ -422,6 +423,48 @@ impl DisplayTransfer {
     reflect(Serialize, Deserialize)
 )]
 pub struct WindowResolvedTransfer(pub DisplayTransfer);
+
+/// The [`DisplayTransfer`]s this window's surface can currently present,
+/// derived from the color spaces the surface advertises.
+///
+/// Where [`WindowResolvedTransfer`] reports the *one* transfer currently in
+/// use, this lists *all* the transfers a [`DisplayTarget::transfer`] request
+/// could be fulfilled with on this surface right now — so an app can offer
+/// only the modes that will actually work instead of requesting one that
+/// silently downgrades. [`DisplayTransfer::Srgb`] (the SDR fallback) is always
+/// present; [`DisplayTransfer::Hlg`] never appears in its own right (HLG
+/// requests are fulfilled as [`DisplayTransfer::Pq`]). The set follows a stable
+/// order suitable for cycling: `Srgb`, `ScRgbLinear`, `ExtendedSrgb`, `Pq`.
+///
+/// Read-only and mirrored from the renderer; writing it has no effect on the
+/// surface. It is absent until the window's first surface configuration (and on
+/// windows that never get a surface, e.g. headless), and updates if the surface
+/// is later renegotiated against changed capabilities.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "bevy_reflect",
+    derive(Reflect),
+    reflect(Component, Default, Debug, PartialEq, Clone)
+)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(feature = "serialize", feature = "bevy_reflect"),
+    reflect(Serialize, Deserialize)
+)]
+pub struct WindowSupportedTransfers(pub Vec<DisplayTransfer>);
+
+impl WindowSupportedTransfers {
+    /// Returns `true` if `transfer` is one of the transfers this surface can
+    /// currently present.
+    pub fn contains(&self, transfer: DisplayTransfer) -> bool {
+        self.0.contains(&transfer)
+    }
+
+    /// Iterates the supported transfers in the surface's stable cycle order.
+    pub fn iter(&self) -> impl Iterator<Item = DisplayTransfer> + '_ {
+        self.0.iter().copied()
+    }
+}
 
 #[cfg(test)]
 mod tests {

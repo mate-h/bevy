@@ -14,6 +14,7 @@ use bevy_utils::default;
 use bevy_window::{
     CompositeAlphaMode, DisplayGamut, DisplayTarget, DisplayTransfer, EffectiveDisplayTarget,
     PresentMode, PrimaryWindow, RawHandleWrapper, Window, WindowClosing, WindowResolvedTransfer,
+    WindowSupportedTransfers,
 };
 use core::{
     num::NonZero,
@@ -329,11 +330,13 @@ fn extract_windows(
     }
 }
 
-/// Mirrors each window surface's negotiated transfer back to the main world
-/// as a [`WindowResolvedTransfer`] component, so apps can detect downgraded
-/// (or later-renegotiated) HDR requests. Runs during extraction — the render
-/// world's only window into the main world — so the value lags the
-/// negotiation it reports by one frame.
+/// Mirrors each window surface's negotiated transfer back to the main world as
+/// a [`WindowResolvedTransfer`] component (so apps can detect downgraded or
+/// later-renegotiated HDR requests), and the set of transfers the surface can
+/// present as [`WindowSupportedTransfers`] (so apps can offer only the modes
+/// that will actually work). Runs during extraction — the render world's only
+/// window into the main world — so the values lag the negotiation they report
+/// by one frame.
 fn write_back_resolved_transfers(
     mut main_world: ResMut<MainWorld>,
     window_surfaces: Res<WindowSurfaces>,
@@ -343,6 +346,11 @@ fn write_back_resolved_transfers(
             &mut main_world,
             entity,
             WindowResolvedTransfer(surface_data.resolved_transfer),
+        );
+        insert_on_change(
+            &mut main_world,
+            entity,
+            WindowSupportedTransfers(surface_data.supported_transfers.clone()),
         );
     }
 }
@@ -373,6 +381,11 @@ struct SurfaceData {
     /// downgraded (see [`negotiate_surface_format`]). Mirrored into
     /// [`ExtractedWindow::resolved_transfer`] by [`create_surfaces`].
     resolved_transfer: DisplayTransfer,
+    /// The [`DisplayTransfer`]s this surface can present, derived from its
+    /// advertised capabilities (see [`supported_transfers`]). Mirrored to the
+    /// main world as [`WindowSupportedTransfers`] by
+    /// [`write_back_resolved_transfers`].
+    supported_transfers: Vec<DisplayTransfer>,
 }
 
 impl SurfaceData {
@@ -726,6 +739,38 @@ fn negotiate_extended_display_p3(
     )
 }
 
+/// The [`DisplayTransfer`]s a surface with these capabilities can present,
+/// mirrored to the main world as [`WindowSupportedTransfers`].
+///
+/// Each transfer is included exactly when its negotiation helper can satisfy a
+/// request for it, so the set never offers a transfer that would silently
+/// downgrade. The order is the stable cycle order apps step through:
+/// - [`DisplayTransfer::Srgb`] — always (the SDR fallback);
+/// - [`DisplayTransfer::ScRgbLinear`] — when [`negotiate_scrgb_linear`] succeeds;
+/// - [`DisplayTransfer::ExtendedSrgb`] — when either encoded extended-range
+///   color space is advertised ([`negotiate_extended_srgb`] for Rec.709 or
+///   [`negotiate_extended_display_p3`] for Display-P3; the gamut rides
+///   [`DisplayTarget::gamut`], so either reaching the transfer is enough);
+/// - [`DisplayTransfer::Pq`] — when [`negotiate_hdr10`] succeeds.
+///
+/// [`DisplayTransfer::Hlg`] is excluded by design: HLG requests are fulfilled as
+/// PQ, never as an HLG swapchain (see [`DisplayTransfer::Hlg`]).
+fn supported_transfers(format_capabilities: &[SurfaceFormatCapabilities]) -> Vec<DisplayTransfer> {
+    let mut transfers = vec![DisplayTransfer::Srgb];
+    if negotiate_scrgb_linear(format_capabilities).is_some() {
+        transfers.push(DisplayTransfer::ScRgbLinear);
+    }
+    if negotiate_extended_srgb(format_capabilities).is_some()
+        || negotiate_extended_display_p3(format_capabilities).is_some()
+    {
+        transfers.push(DisplayTransfer::ExtendedSrgb);
+    }
+    if negotiate_hdr10(format_capabilities).is_some() {
+        transfers.push(DisplayTransfer::Pq);
+    }
+    transfers
+}
+
 /// Negotiates the (format, color space) pair for a window surface from the
 /// surface's capabilities, honoring the requested [`DisplayTransfer`] when
 /// possible.
@@ -1005,6 +1050,7 @@ pub fn create_surfaces(
                 window.display_target.transfer,
                 window.display_target.gamut,
             );
+            let supported_transfers = supported_transfers(&caps.format_capabilities);
 
             // Non-sRGB 8-bit surface formats on the plain sRGB transfer are
             // rendered through an sRGB view so shaders always work in linear
@@ -1064,6 +1110,7 @@ pub fn create_surfaces(
                     configuration,
                     texture_view_format,
                     resolved_transfer: negotiated.resolved_transfer,
+                    supported_transfers,
                 },
             );
         }
@@ -1089,6 +1136,10 @@ pub fn create_surfaces(
             data.configuration.height = window.physical_height;
             let caps = data.surface.get_capabilities(&render_adapter);
             data.configuration.present_mode = present_mode(window, &caps);
+            // Refresh the supported-transfer set from the fresh capabilities so
+            // it tracks runtime changes (e.g. the OS HDR toggle adding or
+            // removing HDR10), mirrored back below.
+            data.supported_transfers = supported_transfers(&caps.format_capabilities);
             if window.display_target_transfer_changed {
                 // Re-run (format, color space) negotiation with the new
                 // requested transfer. `cleanup_view_targets_for_resize` has
@@ -1722,5 +1773,43 @@ mod tests {
                 resolved_transfer: DisplayTransfer::Srgb,
             }
         );
+    }
+
+    #[test]
+    fn supported_transfers_matches_negotiable_set() {
+        use DisplayTransfer::{ExtendedSrgb, Pq, ScRgbLinear, Srgb};
+
+        // Each surface advertises exactly the transfers its negotiation
+        // helpers can satisfy, in the stable cycle order, with `Srgb` always
+        // present and `Hlg` never offered in its own right.
+        let cases: [(
+            &str,
+            fn() -> (Vec<TextureFormat>, Vec<SurfaceFormatCapabilities>),
+            Vec<DisplayTransfer>,
+        ); 5] = [
+            // Metal advertises every color space: the full cycle.
+            (
+                "metal_like",
+                metal_like,
+                vec![Srgb, ScRgbLinear, ExtendedSrgb, Pq],
+            ),
+            // The web HDR path is the encoded extended-sRGB transfer; no
+            // linear-transfer canvas (scRGB-linear) and no HDR10.
+            ("web_like", web_like, vec![Srgb, ExtendedSrgb]),
+            // The reported Windows+NVIDIA Vulkan case: scRGB-linear and HDR10
+            // but no encoded extended-sRGB, so `T` must skip `ExtendedSrgb`.
+            (
+                "vulkan_hdr_like",
+                vulkan_hdr_like,
+                vec![Srgb, ScRgbLinear, Pq],
+            ),
+            ("scrgb_only", scrgb_only, vec![Srgb, ScRgbLinear]),
+            ("sdr_only", sdr_only, vec![Srgb]),
+        ];
+
+        for (name, fixture, expected) in cases {
+            let (_, caps) = fixture();
+            assert_eq!(supported_transfers(&caps), expected, "{name}");
+        }
     }
 }
