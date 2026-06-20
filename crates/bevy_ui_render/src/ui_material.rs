@@ -132,6 +132,10 @@ pub struct UiMaterialKey<M: UiMaterial> {
     /// fragment output (see
     /// [`push_compositing_space_defs`](crate::pipeline::push_compositing_space_defs)).
     pub compositing_space: Option<bevy_camera::CompositingSpace>,
+    /// Whether the post-tonemap buffer this material node composites into uses
+    /// Rec.2020 primaries (see
+    /// [`push_working_gamut_defs`](crate::pipeline::push_working_gamut_defs)).
+    pub source_gamut_rec2020: bool,
 }
 
 impl<M: UiMaterial> Eq for UiMaterialKey<M> where M::Data: PartialEq {}
@@ -144,6 +148,7 @@ where
         self.target_format == other.target_format
             && self.bind_group_data == other.bind_group_data
             && self.compositing_space == other.compositing_space
+            && self.source_gamut_rec2020 == other.source_gamut_rec2020
     }
 }
 
@@ -156,6 +161,7 @@ where
             target_format: self.target_format,
             bind_group_data: self.bind_group_data.clone(),
             compositing_space: self.compositing_space,
+            source_gamut_rec2020: self.source_gamut_rec2020,
         }
     }
 }
@@ -168,6 +174,7 @@ where
         self.target_format.hash(state);
         self.bind_group_data.hash(state);
         self.compositing_space.hash(state);
+        self.source_gamut_rec2020.hash(state);
     }
 }
 

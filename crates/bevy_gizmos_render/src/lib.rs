@@ -78,6 +78,34 @@ use bevy_gizmos::{
     GizmoAsset, GizmoHandles,
 };
 
+/// Pushes the writer-side color-space shader defs shared by the 2D and 3D gizmo
+/// pipelines.
+///
+/// Gizmos render pre-tonemap in the scene working space, so a Rec.2020 working
+/// space gets the `WORKING_COLOR_SPACE_REC2020` gamut-convert def. 2D gizmos
+/// additionally blend into the camera's compositing-space buffer alongside
+/// sprites, so they pass the resolved `compositing_space` to writer-encode their
+/// output (`SRGB_OUTPUT`/`OKLAB_OUTPUT`); 3D gizmos pass `None`. A default
+/// Rec.709 / Linear view pushes nothing, keeping the SDR path byte-identical.
+#[cfg(any(feature = "bevy_pbr", feature = "bevy_sprite_render"))]
+pub(crate) fn push_gizmo_color_space_defs(
+    shader_defs: &mut Vec<bevy_shader::ShaderDefVal>,
+    working_color_space: bevy_render::working_color_space::WorkingColorSpace,
+    compositing_space: Option<bevy_camera::CompositingSpace>,
+) {
+    use bevy_camera::CompositingSpace;
+    use bevy_render::working_color_space::WORKING_COLOR_SPACE_REC2020_SHADER_DEF;
+
+    if working_color_space.is_rec2020() {
+        shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+    }
+    match compositing_space {
+        Some(CompositingSpace::Srgb) => shader_defs.push("SRGB_OUTPUT".into()),
+        Some(CompositingSpace::Oklab) => shader_defs.push("OKLAB_OUTPUT".into()),
+        Some(CompositingSpace::Linear) | None => {}
+    }
+}
+
 /// A [`Plugin`] that provides an immediate mode drawing api for visual debugging.
 ///
 /// Requires to be loaded after [`PbrPlugin`](bevy_pbr::PbrPlugin) or [`SpriteRenderPlugin`](bevy_sprite_render::SpriteRenderPlugin).

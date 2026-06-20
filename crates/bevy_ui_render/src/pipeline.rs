@@ -8,6 +8,7 @@ use bevy_render::{
         *,
     },
     view::ViewUniform,
+    working_color_space::WORKING_COLOR_SPACE_REC2020_SHADER_DEF,
 };
 use bevy_shader::{Shader, ShaderDefVal};
 use bevy_utils::default;
@@ -31,6 +32,23 @@ pub(crate) fn push_compositing_space_defs(
         Some(CompositingSpace::Srgb) => shader_defs.push("SRGB_OUTPUT".into()),
         Some(CompositingSpace::Oklab) => shader_defs.push("OKLAB_OUTPUT".into()),
         Some(CompositingSpace::Linear) | None => {}
+    }
+}
+
+/// Appends the working-gamut shader def when the post-tonemap buffer this view
+/// composites into uses Rec.2020 primaries (`source_gamut_rec2020`).
+///
+/// UI is authored in Rec.709; on a GT7 HDR view (or any view under a Rec.2020
+/// working space) the buffer holds Rec.2020 primaries, so each UI fragment
+/// converts its color with `rec709_to_rec2020` — the `WORKING_COLOR_SPACE_REC2020`
+/// def shared with sprites and 2D meshes — before the compositing-space encode.
+/// A default Rec.709 buffer pushes nothing, keeping the SDR path byte-identical.
+pub(crate) fn push_working_gamut_defs(
+    shader_defs: &mut Vec<ShaderDefVal>,
+    source_gamut_rec2020: bool,
+) {
+    if source_gamut_rec2020 {
+        shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
     }
 }
 
@@ -76,6 +94,10 @@ pub struct UiPipelineKey {
     /// the writer-side encode of the fragment output (see
     /// [`push_compositing_space_defs`]).
     pub compositing_space: Option<CompositingSpace>,
+    /// Whether the post-tonemap buffer this node composites into uses Rec.2020
+    /// primaries, driving the Rec.709 → working-space color conversion (see
+    /// [`push_working_gamut_defs`]).
+    pub source_gamut_rec2020: bool,
 }
 
 impl SpecializedRenderPipeline for UiPipeline {
@@ -109,6 +131,7 @@ impl SpecializedRenderPipeline for UiPipeline {
             Vec::new()
         };
         push_compositing_space_defs(&mut shader_defs, key.compositing_space);
+        push_working_gamut_defs(&mut shader_defs, key.source_gamut_rec2020);
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -184,5 +207,27 @@ mod tests {
         push_compositing_space_defs(&mut oklab_defs, Some(CompositingSpace::Oklab));
         assert!(oklab_defs.contains(&ShaderDefVal::from("OKLAB_OUTPUT")));
         assert!(!oklab_defs.contains(&ShaderDefVal::from("SRGB_OUTPUT")));
+    }
+
+    /// A Rec.709 buffer (the default) appends no working-gamut def, so the SDR
+    /// pipeline compiles byte-identically.
+    #[test]
+    fn rec709_buffer_appends_no_working_gamut_def() {
+        let baseline = vec![ShaderDefVal::from("ANTI_ALIAS")];
+        let mut defs = baseline.clone();
+        push_working_gamut_defs(&mut defs, false);
+        assert_eq!(defs, baseline);
+    }
+
+    /// A Rec.2020 buffer appends exactly `WORKING_COLOR_SPACE_REC2020` (the
+    /// gamut-convert def shared with sprites), nothing else.
+    #[test]
+    fn rec2020_buffer_appends_working_gamut_def() {
+        let mut defs = Vec::new();
+        push_working_gamut_defs(&mut defs, true);
+        assert_eq!(
+            defs,
+            vec![ShaderDefVal::from(WORKING_COLOR_SPACE_REC2020_SHADER_DEF)]
+        );
     }
 }

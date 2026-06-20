@@ -38,6 +38,7 @@ use bevy_ui::{
 use bevy_app::prelude::*;
 use bevy_asset::{AssetEvent, AssetId, Assets};
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
+use bevy_core_pipeline::camera_stack::ViewStackContract;
 use bevy_core_pipeline::display_encoding::display_encoding;
 use bevy_core_pipeline::schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy_core_pipeline::upscaling::upscaling;
@@ -1527,12 +1528,16 @@ pub fn queue_uinodes(
     render_views: Query<(&UiCameraView, Option<&UiAntiAlias>), With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
     resolved_spaces: Res<ResolvedCompositionSpaces>,
+    view_contracts: Query<&ViewStackContract>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
 ) {
     let draw_function = draw_functions.read().id::<DrawUi>();
     let mut current_camera_entity = Entity::PLACEHOLDER;
     let mut current_phase = None;
+    // `ViewStackContract` is per-view, so the buffer gamut is constant for a run
+    // of nodes sharing a camera; resolve it once per camera change, not per node.
+    let mut current_source_gamut_rec2020 = false;
 
     for (index, extracted_uinode) in extracted_uinodes.uinodes.iter().enumerate() {
         if current_camera_entity != extracted_uinode.extracted_camera_entity {
@@ -1549,6 +1554,9 @@ pub fn queue_uinodes(
                                 .map(|transparent_phase| (view, ui_anti_alias, transparent_phase))
                         })
                 });
+            current_source_gamut_rec2020 = view_contracts
+                .get(extracted_uinode.extracted_camera_entity)
+                .is_ok_and(ViewStackContract::source_gamut_is_rec2020);
             current_camera_entity = extracted_uinode.extracted_camera_entity;
         }
 
@@ -1564,6 +1572,7 @@ pub fn queue_uinodes(
                 anti_alias: matches!(ui_anti_alias, None | Some(UiAntiAlias::On)),
                 compositing_space: resolved_spaces
                     .get(extracted_uinode.extracted_camera_entity, None),
+                source_gamut_rec2020: current_source_gamut_rec2020,
             },
         );
 

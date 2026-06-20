@@ -382,13 +382,12 @@ pub struct DisplayEncodingPipelineKey {
     /// Rec.2020 when that operator is GT7 (authored or substituted) on an
     /// HDR-transfer target, Rec.709 otherwise.
     ///
-    /// Known limitation (documented, see the release notes and
-    /// `plans/ui-hdr-rfc.md`): the UI pass composites Rec.709-authored
-    /// colors into the post-tonemap buffer unconverted, so on GT7-HDR views
-    /// (Rec.2020 buffer) saturated UI colors are reinterpreted in the wider
-    /// primaries and oversaturate; grays and whites are unaffected (shared
-    /// D65 white point). Converting UI colors per view needs a per-view key
-    /// axis on the UI pipelines and is deferred to the UI HDR follow-up.
+    /// UI and gizmos that composite into this buffer match its primaries: they
+    /// convert their Rec.709-authored colors to `source_gamut` per view (the
+    /// `WORKING_COLOR_SPACE_REC2020` writer-encode, keyed off
+    /// [`ViewStackContract::source_gamut_is_rec2020`]), so saturated UI/gizmo
+    /// colors no longer oversaturate on a Rec.2020 (GT7) HDR view. Emissive UI
+    /// above paper white remains a follow-up (see `plans/ui-hdr-rfc.md`).
     pub source_gamut: DisplayGamut,
     /// The resolved display gamut the source color is transformed to.
     pub gamut: DisplayGamut,

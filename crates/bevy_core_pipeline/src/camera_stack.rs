@@ -165,6 +165,17 @@ pub struct ViewStackContract {
     pub stack_tonemaps: bool,
 }
 
+impl ViewStackContract {
+    /// Whether the buffer this view composites into uses Rec.2020 primaries —
+    /// a GT7 HDR view, or any view under a Rec.2020 working space. A
+    /// post-tonemap writer such as UI uses this to convert its Rec.709-authored
+    /// colors to the buffer's primaries; `false` for the default Rec.709
+    /// buffer, where no conversion runs.
+    pub fn source_gamut_is_rec2020(&self) -> bool {
+        matches!(self.source_gamut, DisplayGamut::Rec2020)
+    }
+}
+
 /// A view participating in the stack analysis for one fullscreen pass.
 pub(crate) struct StackView<K> {
     pub entity: Entity,
