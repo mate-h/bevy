@@ -99,13 +99,29 @@ const BLACK_STEP_NITS: [f32; 7] = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0];
 const STAGE_SHIFT: f32 = -1.5;
 
 fn main() {
+    // Pass `--rec2020` to opt into the wide (Rec.2020) working color space, a
+    // startup-time `RenderPlugin` setting. The scene and 3D gizmos then render
+    // with Rec.2020 primaries, so the saturated demo gizmos convert their
+    // Rec.709 colors to the working space instead of oversaturating. Grayscale
+    // calibration patterns are gamut-invariant, so calibration is unaffected.
+    let working_color_space = if std::env::args().any(|arg| arg == "--rec2020") {
+        bevy::render::working_color_space::WorkingColorSpace::Rec2020
+    } else {
+        bevy::render::working_color_space::WorkingColorSpace::Rec709
+    };
+
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(bevy::render::RenderPlugin {
+            working_color_space,
+            ..default()
+        }))
         .insert_resource(ClearColor(Color::BLACK))
         .init_resource::<CalibrationPattern>()
         .init_resource::<MonitorChangeNotice>()
         .init_resource::<FlashNotice>()
+        .init_resource::<ShowGamutDemo>()
         .add_systems(Startup, setup)
+        .add_systems(Update, (toggle_gamut_demo, draw_gamut_gizmos).chain())
         .add_systems(
             Update,
             (
@@ -468,7 +484,7 @@ fn setup(
     commands.spawn((
         Text::new(
             "N / Space next  |  P prev  |  1|2|3 jump  |  A auto  |  \
-             T transfer  |  G GT7  |  R reset",
+             T transfer  |  G GT7  |  S swatches  |  R reset",
         ),
         TextFont::from_font_size(13.0),
         TextLayout::justify(Justify::Center),
@@ -534,6 +550,115 @@ fn setup(
                 ));
             }
         });
+
+    // --- Gamut demo: saturated UI swatches (toggle with `S`, hidden by default) ---
+    // Pure Rec.709 primaries and secondaries (white is a gamut-invariant
+    // control), tucked in the corner and hidden by default so they don't crowd
+    // the calibration view. UI composites after tone mapping, so with the `G` GT7
+    // preview active on an HDR transfer the camera's buffer is Rec.2020 and UI
+    // converts these colors to its primaries instead of writing them verbatim —
+    // without the conversion the saturated swatches would oversaturate. Grayscale
+    // calibration patterns are unaffected (achromatic colors don't shift gamut).
+    commands
+        .spawn((
+            GamutSwatches,
+            Visibility::Hidden,
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(12),
+                left: px(12),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("saturated UI (S)"),
+                TextFont::from_font_size(12.0),
+                TextColor(css::GRAY.into()),
+            ));
+            parent
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: px(4),
+                    ..default()
+                })
+                .with_children(|row| {
+                    for color in [
+                        css::RED,
+                        css::LIME,
+                        css::BLUE,
+                        css::AQUA,
+                        css::MAGENTA,
+                        css::YELLOW,
+                        css::WHITE,
+                    ] {
+                        row.spawn((
+                            Node {
+                                width: px(28),
+                                height: px(28),
+                                ..default()
+                            },
+                            BackgroundColor(color.into()),
+                        ));
+                    }
+                });
+        });
+}
+
+/// Marks the saturated-swatch UI group so [`toggle_gamut_demo`] can show/hide it.
+#[derive(Component)]
+struct GamutSwatches;
+
+/// Whether the gamut demo (swatches + gizmos) is shown. Off by default so the
+/// calibration view stays uncluttered; `S` toggles it.
+#[derive(Resource, Default)]
+struct ShowGamutDemo(bool);
+
+/// Toggles the gamut demo with `S`: flips [`ShowGamutDemo`] and the swatch
+/// group's visibility together (the gizmos read the resource in
+/// [`draw_gamut_gizmos`]).
+fn toggle_gamut_demo(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut show: ResMut<ShowGamutDemo>,
+    mut swatches: Single<&mut Visibility, With<GamutSwatches>>,
+) {
+    if keys.just_pressed(KeyCode::KeyS) {
+        show.0 = !show.0;
+        **swatches = if show.0 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+/// Draws saturated demo gizmo lines along the top edge, above the central
+/// calibration patches (the view spans `y` in `[-VIEW_HEIGHT/2, VIEW_HEIGHT/2]`).
+/// 3D gizmos render pre-tone-map in the scene working space, so under `--rec2020`
+/// these Rec.709 colors convert to the Rec.2020 working primaries instead of
+/// oversaturating; in the default Rec.709 working space they are unchanged.
+/// Shown only while the gamut demo is toggled on (`S`).
+fn draw_gamut_gizmos(show: Res<ShowGamutDemo>, mut gizmos: Gizmos) {
+    if !show.0 {
+        return;
+    }
+    let colors = [
+        css::RED,
+        css::LIME,
+        css::BLUE,
+        css::AQUA,
+        css::MAGENTA,
+        css::YELLOW,
+    ];
+    let count = colors.len() as f32;
+    for (index, color) in colors.into_iter().enumerate() {
+        let x = (index as f32 - (count - 1.0) / 2.0) * 0.7;
+        // z = 1.0 sits between the camera (z = 5) and the patches (z ~ 0), so the
+        // lines draw in front of the patches rather than being occluded.
+        gizmos.line(Vec3::new(x, 3.2, 1.0), Vec3::new(x, 3.8, 1.0), color);
+    }
 }
 
 /// Walks the wizard with `N` / `Space` (next) and `P` (previous), and jumps
