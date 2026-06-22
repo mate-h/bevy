@@ -5601,7 +5601,7 @@ wasm = false
 # Pinned to a rev (Cargo.lock is gitignored, so the resolved commit lives here);
 # bump the rev when the fork branch advances.
 [patch.crates-io]
-wgpu = { git = "https://github.com/stuartparmenter/wgpu", rev = "7561bed41e53cc89851df77b59bff7cc3fa87248" }
-wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", rev = "7561bed41e53cc89851df77b59bff7cc3fa87248" }
-wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", rev = "7561bed41e53cc89851df77b59bff7cc3fa87248" }
-naga = { git = "https://github.com/stuartparmenter/wgpu", rev = "7561bed41e53cc89851df77b59bff7cc3fa87248" }
+wgpu = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
+wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
+wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
+naga = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }

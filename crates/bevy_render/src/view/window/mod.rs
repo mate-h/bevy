@@ -534,8 +534,8 @@ pub fn prepare_windows(
                 );
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                // Defensive (HDR surfaces only — `to_flag()` is `None` for
-                // the SDR path's `Auto`): a surface can go outdated because
+                // Defensive (HDR surfaces only — `to_color_spaces()` is `None`
+                // for the SDR path's `Auto`): a surface can go outdated because
                 // the OS-level color capabilities changed (e.g. the HDR
                 // toggle was flipped), not just because of a resize. If the
                 // stored explicit color space is no longer advertised,
@@ -545,7 +545,7 @@ pub fn prepare_windows(
                 // this frame with the old resolved transfer (one frame of
                 // incorrectly-encoded output); the updated
                 // `resolved_transfer` corrects them from the next frame.
-                if let Some(flag) = surface_data.configuration.color_space.to_flag() {
+                if let Some(flag) = surface_data.configuration.color_space.to_color_spaces() {
                     let caps = surface_data.surface.get_capabilities(&render_adapter);
                     if !caps
                         .color_spaces(surface_data.configuration.format)
@@ -1152,7 +1152,7 @@ pub fn create_surfaces(
                     window.display_target.transfer,
                     window.display_target.gamut,
                 ));
-            } else if let Some(flag) = data.configuration.color_space.to_flag()
+            } else if let Some(flag) = data.configuration.color_space.to_color_spaces()
                 && !caps.color_spaces(data.configuration.format).contains(flag)
             {
                 // Defensive: explicit (non-`Auto`) color spaces can vanish
