@@ -72,6 +72,12 @@ tone-map deferral is cancelled for the whole stack and Bevy warns.
   camera's encoded buffer; each UI fragment shader now writer-encodes its final
   color into the resolved compositing space, the same way the sprite shader does.
 
+- **UI and gizmo wide-gamut colors.** UI and gizmos authored their colors in
+  Rec.709 and wrote them unconverted into a post-tone-map buffer that, on a GT7 HDR
+  view, holds Rec.2020 primaries — so saturated colors oversaturated. They now
+  convert to the buffer's working gamut (`rec709_to_rec2020`) the same way sprites
+  do, and 2D gizmos additionally writer-encode into the camera's compositing space.
+
 Default SDR projects render byte-for-byte identically: a solo camera resolves to
 its own request, so every pipeline key and every shader-def vector hashes exactly
 as before. The behavior changes above are confined to camera stacks, non-default

@@ -103,6 +103,24 @@ configurations, never default SDR cameras.
   into the resolved compositing space, the same way the sprite shader does. UI
   over 3D cameras is unaffected (non-2D cameras always resolve to linear).
 
+- **UI and gizmos now convert Rec.709-authored colors to the buffer's working
+  gamut on a Rec.2020 (GT7) HDR view.** A UI or gizmo color authored in Rec.709
+  used to be written verbatim into a post-tone-map buffer that held Rec.2020
+  primaries, so saturated colors landed in wider primaries and oversaturated
+  (grays and whites, sharing the D65 white point, were unaffected). UI fragment
+  shaders, and the 2D and 3D gizmo line/joint shaders, now apply
+  `rec709_to_rec2020` (the shared `WORKING_COLOR_SPACE_REC2020` writer-encode)
+  before the compositing-space encode. UI keys this per view off the buffer's
+  `source_gamut`; gizmos render pre-tone-map and key off the global
+  `WorkingColorSpace` like sprites and meshes. SDR and Rec.709 views are
+  byte-identical (no shader def, no conversion).
+
+- **2D gizmos now writer-encode into the camera's compositing space.** Like UI
+  and sprites, 2D gizmos blend into a `CompositingSpace::Srgb`/`Oklab` 2D buffer,
+  so they now encode their output to match it; previously they wrote linear values
+  and could look slightly off on those views. 3D gizmos render pre-tone-map and
+  are unaffected (no compositing space). SDR/linear views are byte-identical.
+
 - **FXAA on an Oklab-compositing view uses the Oklab L channel for edge luma.**
   FXAA's edge-detection luma was a Rec.601-weighted dot, which can go negative (and
   NaN under the square root) on an Oklab buffer's signed chroma channels. On a view
