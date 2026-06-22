@@ -382,12 +382,16 @@ pub struct DisplayEncodingPipelineKey {
     /// Rec.2020 when that operator is GT7 (authored or substituted) on an
     /// HDR-transfer target, Rec.709 otherwise.
     ///
-    /// UI and gizmos that composite into this buffer match its primaries: they
-    /// convert their Rec.709-authored colors to `source_gamut` per view (the
-    /// `WORKING_COLOR_SPACE_REC2020` writer-encode, keyed off
-    /// [`ViewStackContract::source_gamut_is_rec2020`]), so saturated UI/gizmo
-    /// colors no longer oversaturate on a Rec.2020 (GT7) HDR view. Emissive UI
-    /// above paper white remains a follow-up (see `plans/ui-hdr-rfc.md`).
+    /// Post-tonemap UI converts its Rec.709-authored colors to `source_gamut`
+    /// per view (the `WORKING_COLOR_SPACE_REC2020` writer-encode, keyed off
+    /// [`ViewStackContract::source_gamut_is_rec2020`]), so saturated UI colors no
+    /// longer oversaturate on a Rec.2020 (GT7) HDR view. Pre-tonemap writers (PBR
+    /// meshes, 3D gizmos) instead convert off the global `WorkingColorSpace`, so
+    /// they match `source_gamut` only when an operator marks the buffer Rec.2020
+    /// (e.g. GT7 on an HDR target); a `Tonemapping::None` view leaves
+    /// `source_gamut` Rec.709 while the buffer holds Rec.2020, which a tonemapping
+    /// pass would otherwise reconcile. Emissive UI above paper white remains a
+    /// follow-up (see `plans/ui-hdr-rfc.md`).
     pub source_gamut: DisplayGamut,
     /// The resolved display gamut the source color is transformed to.
     pub gamut: DisplayGamut,

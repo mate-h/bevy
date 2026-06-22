@@ -636,10 +636,14 @@ fn toggle_gamut_demo(
 
 /// Draws saturated demo gizmo lines along the top edge, above the central
 /// calibration patches (the view spans `y` in `[-VIEW_HEIGHT/2, VIEW_HEIGHT/2]`).
-/// 3D gizmos render pre-tone-map in the scene working space, so under `--rec2020`
-/// these Rec.709 colors convert to the Rec.2020 working primaries instead of
-/// oversaturating; in the default Rec.709 working space they are unchanged.
-/// Shown only while the gamut demo is toggled on (`S`).
+/// 3D gizmos render pre-tone-map and convert their Rec.709 colors to the working
+/// primaries off the global `WorkingColorSpace` (like PBR meshes), so under
+/// `--rec2020` they land in Rec.2020. The display encoder only converts that back
+/// when an operator marks the buffer Rec.2020, so the colors read correctly under
+/// the `G` GT7 preview but *desaturate* under the default `Tonemapping::None` (the
+/// encoder keeps `source_gamut` Rec.709 and passes the Rec.2020 values through
+/// unchanged). In the default Rec.709 working space they are unchanged. Shown only
+/// while the gamut demo is toggled on (`S`).
 fn draw_gamut_gizmos(show: Res<ShowGamutDemo>, mut gizmos: Gizmos) {
     if !show.0 {
         return;

@@ -922,11 +922,11 @@ pub fn prepare_view_tonemapping_pipelines(
         // silently.
         if working_color_space.is_rec2020() && tonemapping == Tonemapping::None {
             warn_once!(
-                "`WorkingColorSpace::Rec2020` is enabled but a camera uses \
-                `Tonemapping::None` (the default for `Camera2d`). The Rec.2020 → Rec.709 \
-                conversion runs in the tonemapping pass, so this camera's output will be \
-                reinterpreted (desaturated). Use `Tonemapping::Linear` for the conversion \
-                with no tone curve, or an operator like `Tonemapping::GranTurismo7`."
+                "A camera uses `Tonemapping::None` under `WorkingColorSpace::Rec2020`, so \
+                nothing converts its Rec.2020 working colors back to the display gamut and \
+                saturated colors come out desaturated (grayscale is unaffected). Use \
+                `Tonemapping::Linear` to convert with no tone curve, or an operator like \
+                `Tonemapping::GranTurismo7`."
             );
         }
 

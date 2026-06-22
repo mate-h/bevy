@@ -166,11 +166,13 @@ pub struct ViewStackContract {
 }
 
 impl ViewStackContract {
-    /// Whether the buffer this view composites into uses Rec.2020 primaries —
-    /// a GT7 HDR view, or any view under a Rec.2020 working space. A
-    /// post-tonemap writer such as UI uses this to convert its Rec.709-authored
-    /// colors to the buffer's primaries; `false` for the default Rec.709
-    /// buffer, where no conversion runs.
+    /// Whether the encoder's input buffer for this view uses Rec.2020 primaries —
+    /// i.e. a GT7 view on an HDR-transfer target, whose pass emits native
+    /// Rec.2020. A post-tonemap writer such as UI uses this to convert its
+    /// Rec.709-authored colors to the buffer's primaries; `false` otherwise,
+    /// including a `Tonemapping::None` view under a Rec.2020 working space (its
+    /// `source_gamut` stays Rec.709 because no pass marks the buffer Rec.2020),
+    /// where no post-tonemap conversion runs.
     pub fn source_gamut_is_rec2020(&self) -> bool {
         matches!(self.source_gamut, DisplayGamut::Rec2020)
     }
@@ -786,9 +788,10 @@ fn resolve_group_encode_parameters(
         gamut = DisplayGamut::Rec709;
     }
     if transfer_after_hlg == DisplayTransfer::Pq && gamut != DisplayGamut::Rec2020 {
-        warn_once!(
-            "PQ display targets are canonically Rec.2020 (ITU-R BT.2100); coercing \
-            `DisplayTarget::gamut` from {gamut:?} to Rec2020 for encoding."
+        info_once!(
+            "PQ display targets are canonically Rec.2020 (ITU-R BT.2100); encoding \
+            the {gamut:?} gamut against Rec.2020 primaries (a lossless widening; \
+            `DisplayTarget::gamut` is unchanged)."
         );
     }
 
@@ -881,10 +884,11 @@ fn emit_contract_diagnostics(
     }
     if diagnostics.encode_without_tonemap {
         warn_once!(
-            "No camera in a stack rendering to an HDR display target has an active \
-            tone-mapping operator; scene-linear values will be transfer-encoded without \
-            tone mapping. Use a tone-mapping operator (e.g. `Tonemapping::GranTurismo7`) \
-            on HDR targets."
+            "No camera rendering to an HDR display target has an active tone-mapping \
+            operator, so scene-linear values are transfer-encoded without tone mapping. \
+            Add an operator like `Tonemapping::GranTurismo7`, or `Tonemapping::Linear` to \
+            encode with no tone curve; raw pass-through is intentional only for debug or \
+            calibration passes."
         );
     }
     if diagnostics.fullscreen_blit_over_per_camera_passes {
