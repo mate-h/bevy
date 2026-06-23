@@ -5617,14 +5617,16 @@ wasm = false
 # HDR surface color-space wgpu fork (https://github.com/stuartparmenter/wgpu, branch
 # hdr-surface-color-space, based on wgpu trunk at version 29.0.0). Provides
 # `SurfaceColorSpace` / `SurfaceCapabilities::format_capabilities` for HDR output,
-# plus `Surface::display_hdr_info()` for read-only display HDR-capability queries.
+# plus `Surface::display_hdr_info()` for read-only display HDR-capability queries
+# (display HDR query API simplified: `hdr_active` dropped, `SurfaceColorSpace::is_hdr`
+# added — surface capability and live tone-map headroom are now separate questions).
 # In-tree requirements on these crates are relaxed to "29" so the 29.0.0 git
 # versions satisfy them. wgpu-core / wgpu-hal are not listed: nothing in the tree
 # depends on them from crates.io; the patched git `wgpu` pulls them as path deps.
 # Pinned to a rev (Cargo.lock is gitignored, so the resolved commit lives here);
 # bump the rev when the fork branch advances.
 [patch.crates-io]
-wgpu = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
-wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
-wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
-naga = { git = "https://github.com/stuartparmenter/wgpu", rev = "eb509da64a5af0acafa4ca0609187581308f518e" }
+wgpu = { git = "https://github.com/stuartparmenter/wgpu", rev = "bb4b147e3591d2ae7cc9625b29f60cc39a363b35" }
+wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", rev = "bb4b147e3591d2ae7cc9625b29f60cc39a363b35" }
+wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", rev = "bb4b147e3591d2ae7cc9625b29f60cc39a363b35" }
+naga = { git = "https://github.com/stuartparmenter/wgpu", rev = "bb4b147e3591d2ae7cc9625b29f60cc39a363b35" }

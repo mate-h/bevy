@@ -12,8 +12,9 @@ use bevy_ecs::{entity::EntityHashMap, prelude::*};
 use bevy_log::{debug, info, warn, warn_once};
 use bevy_utils::default;
 use bevy_window::{
-    CompositeAlphaMode, DisplayGamut, DisplayTarget, DisplayTransfer, EffectiveDisplayTarget,
-    PresentMode, PrimaryWindow, RawHandleWrapper, Window, WindowClosing, WindowResolvedTransfer,
+    CompositeAlphaMode, DisplayCalibrationPolicy, DisplayGamut, DisplayTarget, DisplayTransfer,
+    EffectiveDisplayTarget, PresentMode, PrimaryWindow, RawHandleWrapper, Window, WindowClosing,
+    WindowFocused, WindowMonitorChanged, WindowMoved, WindowResolvedTransfer,
     WindowSupportedTransfers,
 };
 use core::{
@@ -150,6 +151,23 @@ pub struct ExtractedWindow {
     /// encoding pass and HDR operator modes always key on what the surface
     /// can show, never on an unfulfilled request.
     pub resolved_transfer: Option<DisplayTransfer>,
+    /// Set for one frame when a window event that can change the backing display
+    /// (a move, a focus regain, or a monitor change) fired this frame, so
+    /// [`poll_display_state`] re-reads the live display state in response.
+    ///
+    /// This is how the otherwise event-less platforms catch discrete changes: a
+    /// monitor swap (new peak / primaries) or, on Windows, the SDR-content
+    /// brightness slider (which fires no OS message — but the user must leave the
+    /// app to reach it, so a focus regain catches it on return).
+    pub request_display_requery: bool,
+    /// Whether this window's [`DisplayCalibrationPolicy`] opts any field into
+    /// [`Auto`](bevy_window::AutoField::Auto).
+    ///
+    /// Gates the continuous (per-frame, Apple) live re-read in
+    /// [`poll_display_state`]: an all-[`Keep`](bevy_window::AutoField::Keep)
+    /// project resolves identically with or without fresh sensing, so it never
+    /// pays the per-frame query.
+    pub display_calibration_auto: bool,
     /// Whether this window needs an initial buffer commit.
     ///
     /// On Wayland, windows must present at least once before they are shown.
@@ -223,14 +241,35 @@ fn extract_windows(
             Entity,
             &Window,
             Option<&EffectiveDisplayTarget>,
+            Option<&DisplayCalibrationPolicy>,
             &RawHandleWrapper,
             Option<&PrimaryWindow>,
         )>,
     >,
+    // Window events that can change the backing display, so `poll_display_state`
+    // re-reads the live display state in response (the only way the event-less
+    // platforms catch a monitor swap or the Windows SDR-brightness slider).
+    mut moved: Extract<MessageReader<WindowMoved>>,
+    mut focused: Extract<MessageReader<WindowFocused>>,
+    mut monitor_changed: Extract<MessageReader<WindowMonitorChanged>>,
     mut removed: Extract<RemovedComponents<RawHandleWrapper>>,
     mut window_surfaces: ResMut<WindowSurfaces>,
 ) {
-    for (entity, window, effective_display_target, handle, primary) in windows.iter() {
+    // Collect the windows whose backing display may have changed this frame: a
+    // move or monitor change (a possible new display), or a focus regain — the
+    // moment to catch an in-place change made while the app was backgrounded (the
+    // Windows SDR-brightness slider, which fires no OS message and requires
+    // leaving the app to reach).
+    let mut display_requery: EntityHashSet = moved
+        .read()
+        .map(|moved| moved.window)
+        .chain(monitor_changed.read().map(|changed| changed.window))
+        .collect();
+    display_requery.extend(focused.read().filter(|f| f.focused).map(|f| f.window));
+
+    for (entity, window, effective_display_target, calibration_policy, handle, primary) in
+        windows.iter()
+    {
         // The renderer consumes the resolved `EffectiveDisplayTarget`. It is
         // computed in the main world before extraction; when absent (pre-resolve
         // or removed) fall back to the SDR default, exactly as for a missing
@@ -263,6 +302,8 @@ fn extract_windows(
             alpha_mode: window.composite_alpha_mode,
             display_target,
             display_target_transfer_changed: false,
+            request_display_requery: false,
+            display_calibration_auto: false,
             resolved_transfer: None,
             needs_initial_present: true,
         });
@@ -286,6 +327,13 @@ fn extract_windows(
         extracted_window.display_target_transfer_changed =
             transfer_changed || extended_srgb_gamut_changed;
         extracted_window.display_target = display_target;
+
+        // Per-frame display-sensing flags: whether a window event asks for a
+        // re-query this frame, and whether this window auto-calibrates at all
+        // (the gate for the continuous per-frame live read on Apple).
+        extracted_window.request_display_requery = display_requery.contains(&entity);
+        extracted_window.display_calibration_auto =
+            calibration_policy.is_some_and(DisplayCalibrationPolicy::has_auto);
 
         if extracted_window.swap_chain_texture.is_none() {
             // If we called present on the previous swap-chain texture last update,

@@ -21,8 +21,9 @@
 //! On SDR displays (or unsupported backends) the HDR request is downgraded - PQ
 //! falls back to scRGB, then to plain SDR - with a warning in the log; the
 //! example still runs, but everything brighter than paper white clips on the
-//! SDR fallback, so the peak step looks flat. The data panel's "HDR active"
-//! badge reports which path is live.
+//! SDR fallback, so the peak step looks flat. The data panel's `transfer` line
+//! tags the resolved transfer `(HDR)` or `(SDR)`, and a separate `headroom` line
+//! reports the live sensed multiplier.
 //!
 //! # Manual intent versus sensed calibration
 //!
@@ -1051,7 +1052,7 @@ fn fmt_nits(value: Option<f32>) -> String {
     value.map_or_else(|| "      -".into(), |nits| format!("{nits:7.1}"))
 }
 
-/// Writes the right-hand data panel: the SDR-honesty badge, the
+/// Writes the right-hand data panel: the `transfer` (HDR/SDR) line, the
 /// intent / effective[prov] / sensed comparison table (with a `>` marker on the
 /// row the current step edits), the policy line, the live `WindowDisplayState`
 /// and `MonitorDisplayCapability` footers, and the provenance legend plus GT7
@@ -1101,10 +1102,6 @@ fn update_data_panel(
         .and_then(|c| c.gamut_hint)
         .map_or_else(|| "      -".into(), |gamut| format!("{gamut:>7?}"));
 
-    let hdr_active = live
-        .and_then(|live| live.hdr_active)
-        .map_or_else(|| "unknown".into(), |active| active.to_string());
-
     // The transfers `T` will cycle through, consumed from the renderer-sensed
     // capability. Absent until the first surface configuration.
     let transfers_available = match supported {
@@ -1118,9 +1115,16 @@ fn update_data_panel(
 
     let mut ui = String::new();
     ui.push_str("DISPLAY CALIBRATION\n");
+    // HDR is a capability decision (the transfer's `is_hdr`), kept separate from
+    // the live headroom value below.
     ui.push_str(&format!(
-        "HDR active: {hdr_active} | transfer: {:?}\n",
+        "transfer: {:?} ({})\n",
         resolved.transfer,
+        if resolved.transfer.is_hdr() {
+            "HDR"
+        } else {
+            "SDR"
+        },
     ));
     ui.push_str(&format!("transfers available: {transfers_available}\n\n"));
 
@@ -1173,21 +1177,18 @@ fn update_data_panel(
     ));
     ui.push_str("(A toggles peak/min/gamut; paper white is always manual)\n\n");
 
-    // Live window state.
+    // Live window state. `tone_map_headroom` is the one cross-platform live HDR
+    // value (the multiplier of SDR white the display can drive right now); it
+    // drifts on macOS and is what peak auto-calibration tracks.
     match live {
         Some(live) => {
             ui.push_str(&format!(
-                "Window state (live): HDR {} | src {}\n",
-                live.hdr_active
-                    .map_or_else(|| "unknown".into(), |active| active.to_string()),
+                "Window state (live): headroom {} | src {}\n",
+                live.tone_map_headroom
+                    .map_or_else(|| "unknown".into(), |h| format!("{h:.2}x")),
                 source_name(live.source),
             ));
-            ui.push_str(&format!(
-                "  SDR white {} | headroom {}\n",
-                fmt_nits(live.sdr_white_nits),
-                live.headroom_potential
-                    .map_or_else(|| "-".into(), |h| format!("{h:.2}x")),
-            ));
+            ui.push_str(&format!("  SDR white {}\n", fmt_nits(live.sdr_white_nits)));
         }
         None => ui.push_str("Window state (live): not sensed yet (no successful poll)\n"),
     }

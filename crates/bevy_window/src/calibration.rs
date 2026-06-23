@@ -31,10 +31,11 @@ use bevy_reflect::{ReflectDeserialize, ReflectSerialize};
 /// Where a piece of display information came from.
 ///
 /// Sensed values flow from the windowing system or the graphics backend; the
-/// renderer keeps the source so calibration UIs can distinguish a value the OS
-/// reported from one a user or the engine chose, and so the commit policy for
-/// live state can depend on how trustworthy a transition is (a real OS toggle
-/// commits immediately; a value merely *derived* from headroom is smoothed).
+/// renderer keeps the source purely as provenance, so calibration UIs can
+/// distinguish a value the OS reported in absolute nits (Windows) from one
+/// derived from a relative EDR headroom (Apple) or a coarse web capability. It
+/// does not affect how a value commits — every continuous field is smoothed the
+/// same way.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "bevy_reflect",
@@ -55,10 +56,8 @@ pub enum DisplayInfoSource {
     /// (for example a Windows HDR enablement flag or absolute luminance from
     /// display metadata).
     Os,
-    /// Derived from a relative-headroom signal (the Apple EDR path), where an
-    /// absolute luminance is reconstructed by anchoring on the display's live
-    /// SDR white. Transitions from this source are smoothed rather than
-    /// committed instantly.
+    /// Derived from a relative EDR-headroom signal (the Apple path), which
+    /// reports a unitless multiplier over SDR white and no absolute nits.
     DerivedFromHeadroom,
     /// Reported by the web platform's coarse `dynamic-range` / `color-gamut`
     /// capability query (a capability, not a live mode).
@@ -182,20 +181,20 @@ impl Default for MonitorDisplayCapability {
     }
 }
 
-/// The live, drifting display state of a window's surface: whether HDR output
-/// is active right now and how much headroom is currently available.
+/// The live, drifting display state of a window's surface: how much HDR headroom
+/// the display can drive right now, and the nit level it maps SDR white to.
 ///
 /// Unlike [`MonitorDisplayCapability`] (static per display) this changes while
-/// the window is open — the user flips the OS HDR toggle, drags the window to
-/// another monitor, or (on the relative-headroom path) the system EDR headroom
-/// shifts with ambient conditions. The renderer mirrors it back to the main
-/// world insert-on-change, so [`Changed<WindowDisplayState>`](bevy_ecs::prelude::Changed)
-/// is a real signal: [`generation`](Self::generation) is bumped only when a
-/// value actually commits past the renderer's hysteresis, never on raw poll
-/// jitter.
+/// the window is open — the user drags the window to another monitor, moves the
+/// SDR-brightness slider, or (on the Apple EDR path) the system headroom shifts
+/// with ambient light, brightness, and thermal conditions. The renderer mirrors
+/// it back to the main world insert-on-change, so
+/// [`Changed<WindowDisplayState>`](bevy_ecs::prelude::Changed) is a real signal:
+/// [`generation`](Self::generation) is bumped only when a value actually commits
+/// past the renderer's epsilon, never on raw read jitter.
 ///
 /// Treat it as read-only diagnostics: writing it has no effect on the surface.
-/// It is absent until the window's first successful poll.
+/// It is absent until the window's first successful read.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(
     feature = "bevy_reflect",
@@ -208,28 +207,28 @@ impl Default for MonitorDisplayCapability {
     reflect(Serialize, Deserialize)
 )]
 pub struct WindowDisplayState {
-    /// Whether HDR output is active on this surface right now, when known.
-    pub hdr_active: Option<bool>,
-    /// The headroom available *at this instant* (a multiplier over live SDR
-    /// white). **Diagnostic only** — it tracks raw, unsmoothed poll values and
-    /// must not drive peak-luminance math; use
-    /// [`headroom_potential`](Self::headroom_potential) for that.
-    pub headroom_current: Option<f32>,
-    /// The headroom the display can reach (a multiplier over live SDR white),
-    /// the value peak-aware tone mapping targets.
-    pub headroom_potential: Option<f32>,
-    /// The headroom of the reference white the headroom multipliers are
-    /// expressed against, when reported.
-    pub headroom_reference: Option<f32>,
-    /// The luminance, in nits, of SDR reference white on this surface right
-    /// now. On the relative-headroom path this is the anchor that turns a
-    /// headroom multiplier into an absolute peak.
+    /// The linear multiplier of SDR (paper) white the display can drive before
+    /// clipping, **right now** — wgpu's `DisplayHdrInfo::tone_map_headroom()`.
+    ///
+    /// This is the one cross-platform live HDR value, folded from whatever the
+    /// backend reports: Apple's live EDR headroom, or `max_nits / sdr_white_nits`
+    /// on Windows, or `1.0` for a definitively-SDR display. `None` means "can't
+    /// tell here", never "SDR". It is exactly what peak-aware tone mapping
+    /// targets — GT7's HDR ceiling is `peak / paper_white`, which auto-resolves to
+    /// this multiplier.
+    pub tone_map_headroom: Option<f32>,
+    /// The luminance, in nits, of SDR reference white on this surface right now.
+    ///
+    /// Reported only where the platform exposes absolute nits (Windows, via
+    /// `DISPLAYCONFIG_SDR_WHITE_LEVEL`; it moves with the SDR-content brightness
+    /// slider). `None` on the Apple EDR and web paths, which report no absolute
+    /// nits. Feeds the `paper_white` auto-calibration.
     pub sdr_white_nits: Option<f32>,
     /// Where this live state came from.
     pub source: DisplayInfoSource,
-    /// Bumped each time a field commits past the renderer's hysteresis, so
+    /// Bumped each time a field commits past the renderer's epsilon, so
     /// [`Changed<WindowDisplayState>`](bevy_ecs::prelude::Changed) signals a
-    /// real transition rather than poll jitter.
+    /// real transition rather than read jitter.
     pub generation: u32,
 }
 
@@ -238,10 +237,7 @@ impl Default for WindowDisplayState {
     /// source and generation `0`: "nothing sensed yet", never "SDR".
     fn default() -> Self {
         Self {
-            hdr_active: None,
-            headroom_current: None,
-            headroom_potential: None,
-            headroom_reference: None,
+            tone_map_headroom: None,
             sdr_white_nits: None,
             source: DisplayInfoSource::Unknown,
             generation: 0,
@@ -309,6 +305,21 @@ pub struct DisplayCalibrationPolicy {
     pub min_luminance: AutoField,
     /// Whether to auto-resolve [`DisplayTarget::gamut`].
     pub gamut: AutoField,
+}
+
+impl DisplayCalibrationPolicy {
+    /// Whether any field opts into [`Auto`](AutoField::Auto).
+    ///
+    /// When this is `false` the resolver is a pure identity pass, so the renderer
+    /// has no reason to keep re-reading the live display state for this window —
+    /// the gate the render-side poll uses to skip continuous sensing on
+    /// all-[`Keep`](AutoField::Keep) projects.
+    pub const fn has_auto(&self) -> bool {
+        matches!(self.paper_white, AutoField::Auto)
+            || matches!(self.peak_luminance, AutoField::Auto)
+            || matches!(self.min_luminance, AutoField::Auto)
+            || matches!(self.gamut, AutoField::Auto)
+    }
 }
 
 /// For each [`DisplayTarget`] field, which provenance won the precedence ladder
@@ -426,6 +437,21 @@ mod tests {
     }
 
     #[test]
+    fn has_auto_is_false_for_all_keep_true_for_any_auto() {
+        assert!(!DisplayCalibrationPolicy::default().has_auto());
+        assert!(DisplayCalibrationPolicy {
+            peak_luminance: AutoField::Auto,
+            ..Default::default()
+        }
+        .has_auto());
+        assert!(DisplayCalibrationPolicy {
+            gamut: AutoField::Auto,
+            ..Default::default()
+        }
+        .has_auto());
+    }
+
+    #[test]
     fn effective_default_is_sdr_with_user_provenance() {
         let e = EffectiveDisplayTarget::default();
         assert_eq!(e.target, DisplayTarget::SDR_SRGB);
@@ -439,7 +465,7 @@ mod tests {
             WindowDisplayState::default().source,
             DisplayInfoSource::Unknown
         );
-        assert_eq!(WindowDisplayState::default().hdr_active, None);
+        assert_eq!(WindowDisplayState::default().tone_map_headroom, None);
         assert_eq!(WindowDisplayState::default().generation, 0);
         assert_eq!(
             MonitorDisplayCapability::default().source,

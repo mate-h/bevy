@@ -121,8 +121,6 @@ pub(crate) mod policy {
         EffectiveDisplayTarget, FieldProvenance, MonitorDisplayCapability, WindowDisplayState,
     };
 
-    use crate::view::window::display_state::anchored_peak;
-
     /// The sensed inputs the resolver may draw on for one target.
     #[derive(Default, Clone, Copy)]
     pub(crate) struct SensedInputs<'a> {
@@ -174,17 +172,9 @@ pub(crate) mod policy {
         // All `User` (the byte-identity provenance).
         let mut prov = DisplayProvenance::default();
 
-        resolve_f32(
-            policy.peak_luminance,
-            &mut out.peak_luminance_nits,
-            &mut prov.peak_luminance,
-            target.peak_luminance_nits,
-            sensed.hgig.and_then(|h| h.peak_luminance_nits),
-            sensed.engine.and_then(|e| e.peak_luminance_nits),
-            // OS peak: prefer absolute max_nits from capability; fall back to a
-            // live headroom-derived peak anchored on live SDR white.
-            os_peak(&sensed),
-        );
+        // Paper white resolves first: on platforms without absolute nits (Apple)
+        // the OS-sensed peak is reconstructed as `paper_white * headroom`, so the
+        // resolved paper white must be known before peak.
         resolve_f32(
             policy.paper_white,
             &mut out.paper_white_nits,
@@ -193,6 +183,18 @@ pub(crate) mod policy {
             sensed.hgig.and_then(|h| h.paper_white_nits),
             sensed.engine.and_then(|e| e.paper_white_nits),
             sensed.live.and_then(|l| l.sdr_white_nits),
+        );
+        resolve_f32(
+            policy.peak_luminance,
+            &mut out.peak_luminance_nits,
+            &mut prov.peak_luminance,
+            target.peak_luminance_nits,
+            sensed.hgig.and_then(|h| h.peak_luminance_nits),
+            sensed.engine.and_then(|e| e.peak_luminance_nits),
+            // The HDR-vs-SDR decision is the transfer's `is_hdr` (a capability
+            // question), never the live headroom value. The transfer is never
+            // auto-resolved, so `out.transfer` is the authored request.
+            os_peak(&sensed, out.paper_white_nits, out.transfer.is_hdr()),
         );
         resolve_f32(
             policy.min_luminance,
@@ -220,16 +222,34 @@ pub(crate) mod policy {
         }
     }
 
-    /// The OS-sensed peak: the display's absolute small-patch peak when
-    /// reported, else a peak reconstructed from live SDR white and potential
-    /// headroom (the Apple EDR path).
-    fn os_peak(sensed: &SensedInputs) -> Option<f32> {
-        // Prefer the resolved absolute peak; otherwise reconstruct from this
-        // surface's live SDR white when no monitor capability is available.
-        sensed.capability.and_then(|c| c.max_nits).or_else(|| {
-            sensed
-                .live
-                .and_then(|l| anchored_peak(l.sdr_white_nits, l.headroom_potential))
+    /// The OS-sensed peak luminance in nits, for an HDR target.
+    ///
+    /// `surface_is_hdr` is the HDR-vs-SDR decision — the transfer's
+    /// [`is_hdr`](bevy_window::DisplayTransfer::is_hdr), a capability question
+    /// kept separate from the live headroom *value*. On an SDR target there is no
+    /// HDR peak to auto-resolve, so peak falls through the ladder to the authored
+    /// value.
+    ///
+    /// For an HDR target the absolute peak is the platform's measured small-patch
+    /// peak where it reports one (Windows DXGI `max_nits`), else reconstructed
+    /// from the resolved paper white and the live
+    /// [`tone_map_headroom`](WindowDisplayState::tone_map_headroom) multiplier
+    /// (the Apple EDR path, which reports no absolute nits). Either way GT7's
+    /// `peak / paper_white` ceiling resolves to the live headroom — and when the
+    /// display has no headroom right now (`tone_map_headroom == 1.0`, e.g. macOS
+    /// at full brightness) the Apple estimate is `paper_white * 1.0 == paper_white`,
+    /// so highlights correctly do not exceed paper white.
+    fn os_peak(sensed: &SensedInputs, paper_white_nits: f32, surface_is_hdr: bool) -> Option<f32> {
+        use crate::view::window::display_state::finite_positive;
+        if !surface_is_hdr {
+            return None;
+        }
+        finite_positive(sensed.capability.and_then(|c| c.max_nits)).or_else(|| {
+            let headroom = finite_positive(sensed.live.and_then(|l| l.tone_map_headroom))?;
+            let paper_white = finite_positive(Some(paper_white_nits))?;
+            // `finite_positive` on the product also rejects an overflow to
+            // infinity from two large finite-positive factors.
+            finite_positive(Some(paper_white * headroom))
         })
     }
 
@@ -392,7 +412,11 @@ mod policy_tests {
 
     #[test]
     fn auto_peak_takes_os_when_no_higher_source() {
-        let target = DisplayTarget::SDR_SRGB.with_peak(1000.0);
+        // An HDR target (the `is_hdr` gate `os_peak` requires) with a measured
+        // capability peak: the absolute peak wins over any headroom estimate.
+        let target = DisplayTarget::SDR_SRGB
+            .with_peak(1000.0)
+            .with_transfer(DisplayTransfer::Pq);
         let policy = DisplayCalibrationPolicy {
             peak_luminance: AutoField::Auto,
             ..Default::default()
@@ -408,6 +432,30 @@ mod policy_tests {
         );
         assert_eq!(e.target.peak_luminance_nits, 4000.0);
         assert_eq!(e.provenance.peak_luminance, FieldProvenance::Os);
+    }
+
+    #[test]
+    fn auto_peak_skipped_on_sdr_target() {
+        // The HDR-vs-SDR decision is the transfer's `is_hdr`, not the sensed
+        // values: on an SDR target a reported capability peak (the EDID panel
+        // peak) must NOT surface as a phantom HDR peak; peak falls through to the
+        // authored value.
+        let target = DisplayTarget::SDR_SRGB.with_peak(1000.0); // Srgb transfer
+        let policy = DisplayCalibrationPolicy {
+            peak_luminance: AutoField::Auto,
+            ..Default::default()
+        };
+        let cap = cap_with_peak(270.0);
+        let e = resolve(
+            target,
+            policy,
+            SensedInputs {
+                capability: Some(&cap),
+                ..Default::default()
+            },
+        );
+        assert_eq!(e.target.peak_luminance_nits, 1000.0);
+        assert_eq!(e.provenance.peak_luminance, FieldProvenance::Default);
     }
 
     #[test]
@@ -504,8 +552,9 @@ mod policy_tests {
             ..Default::default()
         };
         let live = WindowDisplayState {
+            // sdr_white_nits is reported only on the absolute-nits (Windows) path.
             sdr_white_nits: Some(80.0),
-            source: DisplayInfoSource::DerivedFromHeadroom,
+            source: DisplayInfoSource::Os,
             ..Default::default()
         };
         let e = resolve(
@@ -521,17 +570,20 @@ mod policy_tests {
     }
 
     #[test]
-    fn auto_peak_reconstructs_from_live_headroom_when_no_absolute_peak() {
-        // No capability max_nits, but a live SDR white and potential headroom:
-        // the OS peak is reconstructed by anchoring on live white.
-        let target = DisplayTarget::SDR_SRGB.with_peak(1000.0);
+    fn auto_peak_reconstructs_from_headroom_when_no_absolute_peak() {
+        // The Apple path: no capability max_nits (Apple reports no absolute
+        // nits), only a live headroom multiplier. The OS peak is reconstructed as
+        // `paper_white * headroom`. Paper white is `Keep` here, so it is the
+        // authored SDR_SRGB default (100 nits): 100 * 5 = 500.
+        let target = DisplayTarget::SDR_SRGB
+            .with_peak(1000.0)
+            .with_transfer(DisplayTransfer::ScRgbLinear);
         let policy = DisplayCalibrationPolicy {
             peak_luminance: AutoField::Auto,
             ..Default::default()
         };
         let live = WindowDisplayState {
-            sdr_white_nits: Some(100.0),
-            headroom_potential: Some(5.0),
+            tone_map_headroom: Some(5.0),
             source: DisplayInfoSource::DerivedFromHeadroom,
             ..Default::default()
         };
@@ -544,6 +596,74 @@ mod policy_tests {
             },
         );
         assert_eq!(e.target.peak_luminance_nits, 500.0);
+        assert_eq!(e.provenance.peak_luminance, FieldProvenance::Os);
+    }
+
+    #[test]
+    fn auto_peak_and_paper_white_together_on_apple_path() {
+        // Both Auto on the Apple path: paper white has no absolute SDR white to
+        // draw from (Apple reports none), so it falls back to the authored
+        // default (100, tagged Default); peak then reconstructs as 100 * 4 = 400.
+        let target = DisplayTarget::SDR_SRGB.with_transfer(DisplayTransfer::ScRgbLinear);
+        let policy = DisplayCalibrationPolicy {
+            paper_white: AutoField::Auto,
+            peak_luminance: AutoField::Auto,
+            ..Default::default()
+        };
+        let live = WindowDisplayState {
+            tone_map_headroom: Some(4.0),
+            source: DisplayInfoSource::DerivedFromHeadroom,
+            ..Default::default()
+        };
+        let e = resolve(
+            target,
+            policy,
+            SensedInputs {
+                live: Some(&live),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            e.target.paper_white_nits,
+            DisplayTarget::SDR_SRGB.paper_white_nits
+        );
+        assert_eq!(e.provenance.paper_white, FieldProvenance::Default);
+        assert_eq!(
+            e.target.peak_luminance_nits,
+            DisplayTarget::SDR_SRGB.paper_white_nits * 4.0
+        );
+        assert_eq!(e.provenance.peak_luminance, FieldProvenance::Os);
+    }
+
+    #[test]
+    fn peak_uses_the_resolved_paper_white_not_the_authored_one() {
+        // Both Auto: paper white auto-resolves to the sensed SDR white (120),
+        // which must then anchor the peak estimate (120 * 3 = 360). If peak
+        // resolved BEFORE paper white it would use the authored 100 (-> 300), so
+        // this fixture pins the ordering. Synthetic: a live SDR white with no
+        // capability max_nits forces the headroom-estimate branch.
+        let target = DisplayTarget::SDR_SRGB.with_transfer(DisplayTransfer::ScRgbLinear);
+        let policy = DisplayCalibrationPolicy {
+            paper_white: AutoField::Auto,
+            peak_luminance: AutoField::Auto,
+            ..Default::default()
+        };
+        let live = WindowDisplayState {
+            sdr_white_nits: Some(120.0),
+            tone_map_headroom: Some(3.0),
+            source: DisplayInfoSource::Os,
+            ..Default::default()
+        };
+        let e = resolve(
+            target,
+            policy,
+            SensedInputs {
+                live: Some(&live),
+                ..Default::default()
+            },
+        );
+        assert_eq!(e.target.paper_white_nits, 120.0);
+        assert_eq!(e.target.peak_luminance_nits, 360.0);
         assert_eq!(e.provenance.peak_luminance, FieldProvenance::Os);
     }
 }
