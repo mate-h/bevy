@@ -131,7 +131,7 @@ mod xyza;
 pub mod prelude {
     pub use crate::{
         color::*, color_ops::*, hsla::*, hsva::*, hwba::*, laba::*, lcha::*, linear_rec2020::*,
-        linear_rgba::*, oklaba::*, oklcha::*, srgba::*, xyza::*,
+        linear_rgba::*, okhsla::*, okhsva::*, oklaba::*, oklcha::*, srgba::*, xyza::*,
     };
 }
 

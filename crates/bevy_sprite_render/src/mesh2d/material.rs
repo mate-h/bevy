@@ -638,7 +638,7 @@ pub struct SpecializedMaterial2dViewPipelineCache<M> {
 impl<M> Default for SpecializedMaterial2dPipelineCache<M> {
     fn default() -> Self {
         Self {
-            map: HashMap::default(),
+            map: MainEntityHashMap::default(),
             marker: PhantomData,
         }
     }
@@ -647,7 +647,7 @@ impl<M> Default for SpecializedMaterial2dPipelineCache<M> {
 impl<M> Default for SpecializedMaterial2dViewPipelineCache<M> {
     fn default() -> Self {
         Self {
-            map: HashMap::default(),
+            map: MainEntityHashMap::default(),
             marker: PhantomData,
         }
     }
