@@ -4,8 +4,9 @@ use super::{
 };
 use crate::*;
 use bevy_camera::{Camera3d, Projection};
-use bevy_core_pipeline::prepass::{
-    DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass,
+use bevy_core_pipeline::{
+    prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
+    tonemapping::{DebandDither, Tonemapping},
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_light::{EnvironmentMapLight, IrradianceVolume, ShadowFilteringMethod};
@@ -46,6 +47,8 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
         (
             &mut MeshletViewMaterialsMainOpaquePass,
             &ExtractedView,
+            Option<&Tonemapping>,
+            Option<&DebandDither>,
             Option<&ShadowFilteringMethod>,
             (Has<ScreenSpaceAmbientOcclusion>, Has<DistanceFog>),
             (
@@ -67,6 +70,8 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
     for (
         mut materials,
         view,
+        tonemapping,
+        dither,
         shadow_filter_method,
         (ssao, distance_fog),
         (normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass),
@@ -121,6 +126,20 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
             }
             ShadowFilteringMethod::Temporal => {
                 view_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL;
+            }
+        }
+
+        if view.target_format == TextureFormat::Rgba8UnormSrgb
+            || view.target_format == TextureFormat::Rgba8Unorm
+        {
+            if let Some(tonemapping) = tonemapping {
+                if *tonemapping != Tonemapping::None {
+                    view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
+                    view_key |= tonemapping_pipeline_key(*tonemapping);
+                    if let Some(DebandDither::Enabled) = dither {
+                        view_key |= MeshPipelineKey::DEBAND_DITHER;
+                    }
+                }
             }
         }
 

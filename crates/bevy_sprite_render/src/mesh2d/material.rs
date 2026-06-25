@@ -8,8 +8,11 @@ use bevy_asset::{
     AsAssetId, Asset, AssetApp, AssetEventSystems, AssetId, AssetServer, Handle, UntypedAssetId,
 };
 use bevy_camera::visibility::ViewVisibility;
-use bevy_core_pipeline::core_2d::{
-    AlphaMask2d, AlphaMask2dBinKey, BatchSetKey2d, Opaque2d, Opaque2dBinKey, Transparent2d,
+use bevy_core_pipeline::{
+    core_2d::{
+        AlphaMask2d, AlphaMask2dBinKey, BatchSetKey2d, Opaque2d, Opaque2dBinKey, Transparent2d,
+    },
+    tonemapping::Tonemapping,
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -561,6 +564,24 @@ pub const fn alpha_mode_pipeline_key(alpha_mode: AlphaMode2d) -> Mesh2dPipelineK
         AlphaMode2d::Blend => Mesh2dPipelineKey::BLEND_ALPHA,
         AlphaMode2d::Mask(_) => Mesh2dPipelineKey::MAY_DISCARD,
         _ => Mesh2dPipelineKey::NONE,
+    }
+}
+
+pub const fn tonemapping_pipeline_key(tonemapping: Tonemapping) -> Mesh2dPipelineKey {
+    match tonemapping {
+        Tonemapping::None => Mesh2dPipelineKey::TONEMAP_METHOD_NONE,
+        Tonemapping::Linear => Mesh2dPipelineKey::TONEMAP_METHOD_LINEAR,
+        Tonemapping::Reinhard => Mesh2dPipelineKey::TONEMAP_METHOD_REINHARD,
+        Tonemapping::ReinhardLuminance => Mesh2dPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE,
+        Tonemapping::AcesFitted => Mesh2dPipelineKey::TONEMAP_METHOD_ACES_FITTED,
+        Tonemapping::AgX => Mesh2dPipelineKey::TONEMAP_METHOD_AGX,
+        Tonemapping::SomewhatBoringDisplayTransform => {
+            Mesh2dPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM
+        }
+        Tonemapping::TonyMcMapface => Mesh2dPipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE,
+        Tonemapping::BlenderFilmic => Mesh2dPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC,
+        Tonemapping::KhronosPbrNeutral => Mesh2dPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL,
+        Tonemapping::GranTurismo7 => Mesh2dPipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7,
     }
 }
 

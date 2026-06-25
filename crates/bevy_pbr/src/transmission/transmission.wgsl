@@ -10,6 +10,10 @@
 
 #import bevy_render::maths::PI
 
+#ifdef TONEMAP_IN_SHADER
+#import bevy_core_pipeline::tonemapping::approximate_inverse_tone_mapping
+#endif
+
 // The IOR impacts how much a single microfacet refracts incoming light. In turn this changes how
 // "wide" the distribution of output ray directions is and how rough the BRDF should be.
 // This function scales the roughness toward 0.0 as IOR tends towards 1.0, while leaving the default
@@ -80,9 +84,10 @@ fn fetch_transmissive_background_non_rough(offset_position: vec2<f32>, frag_coor
 #endif
 #endif
 
-    // The main texture is always a pre-tonemap, scene-linear HDR snapshot
-    // (tone mapping runs as a post-process pass for every camera), so the
-    // sampled background needs no inverse-tonemap correction.
+#ifdef TONEMAP_IN_SHADER
+    background_color = approximate_inverse_tone_mapping(background_color, view_bindings::view.color_grading);
+#endif
+
     return background_color;
 }
 
@@ -189,6 +194,10 @@ fn fetch_transmissive_background(offset_position: vec2<f32>, frag_coord: vec3<f3
     }
 
     result /= f32(num_taps);
+
+#ifdef TONEMAP_IN_SHADER
+    result = approximate_inverse_tone_mapping(result, view_bindings::view.color_grading);
+#endif
 
     return result;
 }

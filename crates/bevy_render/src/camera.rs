@@ -25,8 +25,9 @@ use bevy_camera::{
     visibility::{self, RenderLayers, VisibleEntities},
     Camera, Camera2d, Camera3d, CameraMainTextureUsages, CameraOutputMode, CameraUpdateSystems,
     ClearColor, ClearColorConfig, CompositingSpace, Exposure, Hdr, ManualTextureViewHandle,
-    MsaaWriteback, NormalizedRenderTarget, Projection, RenderTarget, RenderTargetInfo,
-    TonemappingEnabled, Viewport,
+    MsaaWriteback, NeedsNodeTonemapping, NeedsSceneLinearAa, NeedsSceneLinearPost,
+    NormalizedRenderTarget, Projection, RenderTarget, RenderTargetInfo, TonemappingEnabled,
+    Viewport,
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -51,6 +52,7 @@ use bevy_math::{uvec2, vec2, Mat4, URect, UVec2, UVec4, Vec2};
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_reflect::prelude::*;
 use bevy_transform::components::GlobalTransform;
+use bevy_window::DisplayTarget;
 use bevy_window::{PrimaryWindow, Window, WindowCreated, WindowResized, WindowScaleFactorChanged};
 use itertools::Either;
 use wgpu::TextureFormat;
@@ -500,6 +502,9 @@ pub fn extract_cameras(
                 Option<&RenderLayers>,
                 Option<&Projection>,
                 Has<NoIndirectDrawing>,
+                Has<NeedsSceneLinearPost>,
+                Has<NeedsSceneLinearAa>,
+                Has<NeedsNodeTonemapping>,
             ),
         )>,
     >,
@@ -517,6 +522,24 @@ pub fn extract_cameras(
 ) {
     main_pass_formats.clear();
     let primary_window = primary_window.iter().next();
+
+    // Count active cameras per normalized render target. The SDR in-shader
+    // tone-mapping fast path (selected below via `eligible_in_shader_tonemap`)
+    // forces an 8-bit main texture, so it may only be taken when a camera is
+    // the sole active occupant of its target; a shared target (a camera stack)
+    // must keep every member on the same fp16 format or compositing would
+    // split across mismatched textures.
+    let mut active_cameras_per_target: HashMap<NormalizedRenderTarget, usize> = HashMap::default();
+    for camera_query in query.iter() {
+        let (camera, render_target) = (camera_query.2, camera_query.3);
+        if !camera.is_active {
+            continue;
+        }
+        if let Some(target) = render_target.normalize(primary_window) {
+            *active_cameras_per_target.entry(target).or_default() += 1;
+        }
+    }
+
     type ExtractedCameraComponents = (
         ExtractedCamera,
         ExtractedView,
@@ -549,6 +572,9 @@ pub fn extract_cameras(
             render_layers,
             projection,
             no_indirect_drawing,
+            needs_scene_linear_post,
+            needs_scene_linear_aa,
+            needs_node_tonemapping,
         ),
     ) in query.iter()
     {
@@ -650,19 +676,46 @@ pub fn extract_cameras(
             //   sRGB-encoded values into it for gamma-encoded blending).
             // - Everything else (e.g. `Tonemapping::None` 2D cameras on SDR
             //   targets) follows the output texture's view format.
-            let hdr_transfer = resolve_view_display_target(
+            let view_display_target = resolve_view_display_target(
                 target.as_ref(),
                 &extracted_windows,
                 &effective_manual_display_targets,
-            )
-            .is_hdr_transfer();
-            let target_format = if hdr || tonemapping_enabled || hdr_transfer {
-                TextureFormat::Rgba16Float
-            } else if compositing_space.is_some_and(|s| *s == CompositingSpace::Srgb) {
-                TextureFormat::Rgba8Unorm
-            } else {
-                output_texture_format
-            };
+            );
+            let hdr_transfer = view_display_target.is_hdr_transfer();
+            // SDR in-shader tone-mapping fast path: a plain SDR sRGB window
+            // camera with an active operator, nothing that needs the
+            // scene-linear HDR buffer, and sole ownership of its target folds
+            // tone mapping into its material shaders (the `TONEMAP_IN_SHADER`
+            // pipeline path) and keeps its 8-bit main texture, reproducing the
+            // pre-node-side-tone-mapping SDR pipeline exactly. Restricted to
+            // window targets so the 8-bit format is always `Rgba8UnormSrgb`
+            // (image / texture-view targets keep the node-side path, which is
+            // why the format below stays multi-clause). The compositing space
+            // must be the default linear one: `Srgb` would route to
+            // `Rgba8Unorm` below (no hardware sRGB encode, which the 3D fold
+            // relies on) and `Oklab` needs signed-float storage — both keep the
+            // node-side path. `NeedsNodeTonemapping` excludes operators whose
+            // config the fold cannot reproduce (custom GT7 params).
+            let eligible_in_shader_tonemap = tonemapping_enabled
+                && !hdr
+                && !needs_scene_linear_post
+                && !needs_scene_linear_aa
+                && !needs_node_tonemapping
+                && compositing_space.is_none_or(|s| *s == CompositingSpace::Linear)
+                && view_display_target.resolved == DisplayTarget::SDR_SRGB
+                && matches!(target, Some(NormalizedRenderTarget::Window(_)))
+                && target
+                    .as_ref()
+                    .and_then(|t| active_cameras_per_target.get(t))
+                    .is_some_and(|&count| count <= 1);
+            let target_format =
+                if (hdr || tonemapping_enabled || hdr_transfer) && !eligible_in_shader_tonemap {
+                    TextureFormat::Rgba16Float
+                } else if compositing_space.is_some_and(|s| *s == CompositingSpace::Srgb) {
+                    TextureFormat::Rgba8Unorm
+                } else {
+                    output_texture_format
+                };
             main_pass_formats.insert(render_entity, target_format);
 
             let mut commands = commands.entity(render_entity);

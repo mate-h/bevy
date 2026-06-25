@@ -9,7 +9,7 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_resource::{
         BindGroup, BindGroupEntries, BufferId, LoadOp, Operations, PipelineCache,
-        RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TextureViewId,
+        RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TextureFormat, TextureViewId,
     },
     renderer::{RenderContext, ViewQuery},
     texture::{FallbackImage, GpuImage},
@@ -62,6 +62,19 @@ pub fn tonemapping(
     // operator runs node-side for every camera (with or without `Hdr`);
     // the legacy in-shader (`TONEMAP_IN_SHADER`) path no longer exists.
     if *tonemapping == Tonemapping::None {
+        return;
+    }
+
+    // Eligible SDR cameras fold tone mapping into their material shaders (the
+    // `TONEMAP_IN_SHADER` path selected in camera extraction) and keep an 8-bit
+    // main texture instead of the fp16 intermediate. The 8-bit format is the
+    // carried signal: running this node for such a camera would tone-map a
+    // second time, so skip it. (Every camera that runs the node-side operator
+    // is on an `Rgba16Float` intermediate.)
+    if matches!(
+        target.main_texture_format(),
+        TextureFormat::Rgba8UnormSrgb | TextureFormat::Rgba8Unorm
+    ) {
         return;
     }
 

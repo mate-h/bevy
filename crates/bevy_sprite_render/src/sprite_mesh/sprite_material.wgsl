@@ -7,6 +7,9 @@
     sprite_functions,
 }
 
+#ifdef TONEMAP_IN_SHADER
+#import bevy_core_pipeline::tonemapping
+#endif
 #ifdef SRGB_OUTPUT
 #import bevy_render::color_operations::linear_to_srgb
 #endif
@@ -58,6 +61,10 @@ fn fragment(
     mesh: VertexOutput,
 ) -> @location(0) vec4<f32> {
     var output_color = sprite_functions::sample_final_color(mesh.uv);
+
+#ifdef TONEMAP_IN_SHADER
+    output_color = tonemapping::tone_mapping(output_color, view.color_grading);
+#endif
 
 #ifdef WORKING_COLOR_SPACE_REC2020
     // The composed color converts into the Rec.2020 working space once,

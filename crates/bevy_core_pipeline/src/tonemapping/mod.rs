@@ -2,7 +2,7 @@ use bevy_app::prelude::*;
 use bevy_asset::{
     embedded_asset, load_embedded_asset, AssetServer, Assets, Handle, RenderAssetUsages,
 };
-use bevy_camera::{Camera, CompositingSpace, TonemappingEnabled};
+use bevy_camera::{Camera, CompositingSpace, NeedsNodeTonemapping, TonemappingEnabled};
 use bevy_ecs::prelude::*;
 use bevy_image::{CompressedImageFormats, Image, ImageSampler, ImageType};
 #[cfg(not(feature = "tonemapping_luts"))]
@@ -104,7 +104,10 @@ impl Plugin for TonemappingPlugin {
             ExtractComponentPlugin::<GranTurismo7Params>::default(),
         ));
 
-        app.add_systems(PostUpdate, sync_tonemapping_enabled);
+        app.add_systems(
+            PostUpdate,
+            (sync_tonemapping_enabled, sync_needs_node_tonemapping),
+        );
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -334,6 +337,38 @@ pub fn sync_tonemapping_enabled(
         // The entity may have been despawned entirely.
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.remove::<TonemappingEnabled>();
+        }
+    }
+}
+
+/// Keeps the auto-managed [`NeedsNodeTonemapping`] marker (in `bevy_camera`)
+/// in sync with cameras whose tone-mapping configuration the in-shader SDR
+/// fast path cannot reproduce: currently a [`Tonemapping::GranTurismo7`]
+/// operator paired with a [`GranTurismo7Params`] component, because the
+/// in-shader fold has no path to bind the per-view GT7 params uniform and
+/// would silently fall back to the baked SDR defaults.
+///
+/// The marker lets the renderer's camera extraction (in `bevy_render`, which
+/// cannot see these components) veto the fast path so the camera keeps the
+/// node-side pass that honors its custom parameters. Runs in [`PostUpdate`].
+pub fn sync_needs_node_tonemapping(
+    mut commands: Commands,
+    cameras: Query<
+        (
+            Entity,
+            &Tonemapping,
+            Has<GranTurismo7Params>,
+            Has<NeedsNodeTonemapping>,
+        ),
+        With<Camera>,
+    >,
+) {
+    for (entity, tonemapping, has_gt7_params, has_marker) in &cameras {
+        let needs = *tonemapping == Tonemapping::GranTurismo7 && has_gt7_params;
+        if needs && !has_marker {
+            commands.entity(entity).insert(NeedsNodeTonemapping);
+        } else if !needs && has_marker {
+            commands.entity(entity).remove::<NeedsNodeTonemapping>();
         }
     }
 }

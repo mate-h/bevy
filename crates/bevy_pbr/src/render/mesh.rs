@@ -98,6 +98,7 @@ use crate::{
 };
 use bevy_core_pipeline::oit::OrderIndependentTransparencySettings;
 use bevy_core_pipeline::prepass::{DeferredPrepass, DepthPrepass, NormalPrepass};
+use bevy_core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy_render::camera::{DirtySpecializations, TemporalJitter};
 use bevy_render::prelude::Msaa;
 use bevy_render::sync_world::{MainEntity, MainEntityHashMap};
@@ -363,6 +364,7 @@ pub fn check_views_need_specialization(
     mut views: Query<(
         &ExtractedView,
         &Msaa,
+        (Option<&Tonemapping>, Option<&DebandDither>),
         Option<&ShadowFilteringMethod>,
         Has<ScreenSpaceAmbientOcclusion>,
         (
@@ -390,6 +392,7 @@ pub fn check_views_need_specialization(
     for (
         view,
         msaa,
+        (tonemapping, dither),
         shadow_filter_method,
         ssao,
         (normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass),
@@ -472,6 +475,19 @@ pub fn check_views_need_specialization(
             }
         }
 
+        if view.target_format == TextureFormat::Rgba8UnormSrgb
+            || view.target_format == TextureFormat::Rgba8Unorm
+        {
+            if let Some(tonemapping) = tonemapping {
+                if *tonemapping != Tonemapping::None {
+                    view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
+                    view_key |= tonemapping_pipeline_key(*tonemapping);
+                    if let Some(DebandDither::Enabled) = dither {
+                        view_key |= MeshPipelineKey::DEBAND_DITHER;
+                    }
+                }
+            }
+        }
         if ssao {
             view_key |= MeshPipelineKey::SCREEN_SPACE_AMBIENT_OCCLUSION;
         }
@@ -3026,6 +3042,8 @@ bitflags::bitflags! {
         const MORPH_TARGETS                     = BaseMeshPipelineKey::MORPH_TARGETS.bits();
 
         // Flag bits
+        const TONEMAP_IN_SHADER                 = 1 << 0;
+        const DEBAND_DITHER                     = 1 << 1;
         const DEPTH_PREPASS                     = 1 << 2;
         const NORMAL_PREPASS                    = 1 << 3;
         const DEFERRED_PREPASS                  = 1 << 4;
@@ -3069,6 +3087,18 @@ bitflags::bitflags! {
         const BLEND_MULTIPLY                    = 2 << Self::BLEND_SHIFT_BITS;                     // ← See `BLEND_MASK_BITS` for the number of bits available
         const BLEND_ALPHA                       = 3 << Self::BLEND_SHIFT_BITS;                     //
         const BLEND_ALPHA_TO_COVERAGE           = 4 << Self::BLEND_SHIFT_BITS;                     // ← We still have room for three more values without adding more bits
+        const TONEMAP_METHOD_RESERVED_BITS      = Self::TONEMAP_METHOD_MASK_BITS << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_NONE               = 0 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_REINHARD           = 1 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_REINHARD_LUMINANCE = 2 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_ACES_FITTED        = 3 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_AGX                = 4 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM = 5 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_TONY_MC_MAPFACE    = 6 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_BLENDER_FILMIC     = 7 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_PBR_NEUTRAL        = 8 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_LINEAR             = 9 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_GRAN_TURISMO_7     = 10 << Self::TONEMAP_METHOD_SHIFT_BITS;
         const SHADOW_FILTER_METHOD_RESERVED_BITS = Self::SHADOW_FILTER_METHOD_MASK_BITS << Self::SHADOW_FILTER_METHOD_SHIFT_BITS;
         const SHADOW_FILTER_METHOD_HARDWARE_2X2  = 0 << Self::SHADOW_FILTER_METHOD_SHIFT_BITS;
         const SHADOW_FILTER_METHOD_GAUSSIAN      = 1 << Self::SHADOW_FILTER_METHOD_SHIFT_BITS;
@@ -3088,6 +3118,7 @@ bitflags::bitflags! {
         const ALL_RESERVED_BITS =
             Self::BLEND_RESERVED_BITS.bits() |
             Self::MSAA_RESERVED_BITS.bits() |
+            Self::TONEMAP_METHOD_RESERVED_BITS.bits() |
             Self::SHADOW_FILTER_METHOD_RESERVED_BITS.bits() |
             Self::VIEW_PROJECTION_RESERVED_BITS.bits() |
             Self::SCREEN_SPACE_SPECULAR_TRANSMISSION_RESERVED_BITS.bits() |
@@ -3102,9 +3133,13 @@ impl MeshPipelineKey {
     const BLEND_MASK_BITS: u64 = 0b111;
     const BLEND_SHIFT_BITS: u64 = Self::MSAA_MASK_BITS.count_ones() as u64 + Self::MSAA_SHIFT_BITS;
 
+    const TONEMAP_METHOD_MASK_BITS: u64 = 0b1111;
+    const TONEMAP_METHOD_SHIFT_BITS: u64 =
+        Self::BLEND_MASK_BITS.count_ones() as u64 + Self::BLEND_SHIFT_BITS;
+
     const SHADOW_FILTER_METHOD_MASK_BITS: u64 = 0b11;
     const SHADOW_FILTER_METHOD_SHIFT_BITS: u64 =
-        Self::BLEND_MASK_BITS.count_ones() as u64 + Self::BLEND_SHIFT_BITS;
+        Self::TONEMAP_METHOD_MASK_BITS.count_ones() as u64 + Self::TONEMAP_METHOD_SHIFT_BITS;
 
     const VIEW_PROJECTION_MASK_BITS: u64 = 0b11;
     const VIEW_PROJECTION_SHIFT_BITS: u64 = Self::SHADOW_FILTER_METHOD_MASK_BITS.count_ones()
@@ -3548,6 +3583,49 @@ impl SpecializedMeshPipeline for MeshPipeline {
 
         #[cfg(feature = "experimental_pbr_pcss")]
         shader_defs.push("PCSS_SAMPLERS_AVAILABLE".into());
+
+        if key.contains(MeshPipelineKey::TONEMAP_IN_SHADER) {
+            shader_defs.push("TONEMAP_IN_SHADER".into());
+            shader_defs.push(ShaderDefVal::UInt(
+                "TONEMAPPING_LUT_TEXTURE_BINDING_INDEX".into(),
+                TONEMAPPING_LUT_TEXTURE_BINDING_INDEX,
+            ));
+            shader_defs.push(ShaderDefVal::UInt(
+                "TONEMAPPING_LUT_SAMPLER_BINDING_INDEX".into(),
+                TONEMAPPING_LUT_SAMPLER_BINDING_INDEX,
+            ));
+
+            let method = key.intersection(MeshPipelineKey::TONEMAP_METHOD_RESERVED_BITS);
+
+            if method == MeshPipelineKey::TONEMAP_METHOD_NONE {
+                shader_defs.push("TONEMAP_METHOD_NONE".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD {
+                shader_defs.push("TONEMAP_METHOD_REINHARD".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE {
+                shader_defs.push("TONEMAP_METHOD_REINHARD_LUMINANCE".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_ACES_FITTED {
+                shader_defs.push("TONEMAP_METHOD_ACES_FITTED".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_AGX {
+                shader_defs.push("TONEMAP_METHOD_AGX".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM {
+                shader_defs.push("TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC {
+                shader_defs.push("TONEMAP_METHOD_BLENDER_FILMIC".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE {
+                shader_defs.push("TONEMAP_METHOD_TONY_MC_MAPFACE".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL {
+                shader_defs.push("TONEMAP_METHOD_PBR_NEUTRAL".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_LINEAR {
+                shader_defs.push("TONEMAP_METHOD_LINEAR".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7 {
+                shader_defs.push("TONEMAP_METHOD_GRAN_TURISMO_7".into());
+            }
+
+            // Debanding is tied to tonemapping in the shader, cannot run without it.
+            if key.contains(MeshPipelineKey::DEBAND_DITHER) {
+                shader_defs.push("DEBAND_DITHER".into());
+            }
+        }
 
         if key.contains(MeshPipelineKey::MAY_DISCARD) {
             shader_defs.push("MAY_DISCARD".into());

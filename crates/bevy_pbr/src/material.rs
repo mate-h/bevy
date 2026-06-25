@@ -12,6 +12,7 @@ use bevy_core_pipeline::prepass::{AlphaMask3dPrepass, Opaque3dPrepass};
 use bevy_core_pipeline::{
     core_3d::{AlphaMask3d, Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, Transparent3d},
     prepass::{OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey},
+    tonemapping::Tonemapping,
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::change_detection::Tick;
@@ -687,6 +688,24 @@ pub const fn alpha_mode_pipeline_key(alpha_mode: AlphaMode, msaa: &Msaa) -> Mesh
             _ => MeshPipelineKey::BLEND_ALPHA_TO_COVERAGE,
         },
         _ => MeshPipelineKey::NONE,
+    }
+}
+
+pub const fn tonemapping_pipeline_key(tonemapping: Tonemapping) -> MeshPipelineKey {
+    match tonemapping {
+        Tonemapping::None => MeshPipelineKey::TONEMAP_METHOD_NONE,
+        Tonemapping::Reinhard => MeshPipelineKey::TONEMAP_METHOD_REINHARD,
+        Tonemapping::ReinhardLuminance => MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE,
+        Tonemapping::AcesFitted => MeshPipelineKey::TONEMAP_METHOD_ACES_FITTED,
+        Tonemapping::AgX => MeshPipelineKey::TONEMAP_METHOD_AGX,
+        Tonemapping::SomewhatBoringDisplayTransform => {
+            MeshPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM
+        }
+        Tonemapping::TonyMcMapface => MeshPipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE,
+        Tonemapping::BlenderFilmic => MeshPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC,
+        Tonemapping::KhronosPbrNeutral => MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL,
+        Tonemapping::Linear => MeshPipelineKey::TONEMAP_METHOD_LINEAR,
+        Tonemapping::GranTurismo7 => MeshPipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7,
     }
 }
 

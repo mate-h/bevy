@@ -12,10 +12,16 @@ use bevy_render::{
 use bevy_shader::{load_shader_library, Shader, ShaderDefVal, ShaderSettings};
 
 use crate::{
-    prepare_pending_mesh_material2d_queues, Material2dBindGroupId, PendingMeshMaterial2dQueues,
-    RenderMaterial2dBindGroupIds, RenderMaterial2dIds,
+    prepare_pending_mesh_material2d_queues, tonemapping_pipeline_key, Material2dBindGroupId,
+    PendingMeshMaterial2dQueues, RenderMaterial2dBindGroupIds, RenderMaterial2dIds,
 };
-use bevy_core_pipeline::core_2d::{AlphaMask2d, Opaque2d, Transparent2d, CORE_2D_DEPTH_FORMAT};
+use bevy_core_pipeline::{
+    core_2d::{AlphaMask2d, Opaque2d, Transparent2d, CORE_2D_DEPTH_FORMAT},
+    tonemapping::{
+        get_lut_bind_group_layout_entries, get_lut_bindings, DebandDither, Tonemapping,
+        TonemappingLuts,
+    },
+};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     prelude::*,
@@ -43,6 +49,7 @@ use bevy_render::{
     render_resource::{binding_types::uniform_buffer, *},
     renderer::RenderDevice,
     sync_world::{MainEntity, MainEntityHashMap},
+    texture::{FallbackImage, GpuImage},
     view::{
         resolve_composition_spaces, texture_format_from_code, texture_format_to_code,
         ExtractedView, ResolvedCompositionSpaces, ViewUniform, ViewUniformOffset, ViewUniforms,
@@ -131,17 +138,43 @@ pub struct ViewKeyCache(MainEntityHashMap<Mesh2dPipelineKey>);
 pub fn check_views_need_specialization(
     mut view_key_cache: ResMut<ViewKeyCache>,
     mut dirty_specializations: ResMut<DirtySpecializations>,
-    cameras: Query<(Entity, &MainEntity, &ExtractedView, &ExtractedCamera, &Msaa)>,
+    cameras: Query<(
+        Entity,
+        &MainEntity,
+        &ExtractedView,
+        &ExtractedCamera,
+        &Msaa,
+        Option<&Tonemapping>,
+        Option<&DebandDither>,
+    )>,
     resolved_spaces: Res<ResolvedCompositionSpaces>,
 ) {
-    for (entity, view_entity, view, camera, msaa) in &cameras {
+    for (entity, view_entity, view, camera, msaa, tonemapping, dither) in &cameras {
         // `ResolvedCompositionSpaces` is keyed by the render-world view
         // entity; `ViewKeyCache` stays `MainEntity`-keyed.
-        let view_key = Mesh2dPipelineKey::from_msaa_samples(msaa.samples())
+        let mut view_key = Mesh2dPipelineKey::from_msaa_samples(msaa.samples())
             | Mesh2dPipelineKey::from_target_format(view.target_format)
             | Mesh2dPipelineKey::from_compositing_space(
                 resolved_spaces.get(entity, camera.compositing_space),
             );
+
+        // In-shader tonemapping fast path: an eligible SDR camera (8-bit
+        // main texture) with an active operator folds tonemapping (and
+        // optional debanding) into the mesh2d / material fragment shaders,
+        // skipping the separate tonemapping pass. Eligibility rides
+        // `view.target_format`, which the extract format fork drives to an
+        // 8-bit format only for eligible cameras.
+        if (view.target_format == TextureFormat::Rgba8UnormSrgb
+            || view.target_format == TextureFormat::Rgba8Unorm)
+            && let Some(tonemapping) = tonemapping
+            && *tonemapping != Tonemapping::None
+        {
+            view_key |= Mesh2dPipelineKey::TONEMAP_IN_SHADER;
+            view_key |= tonemapping_pipeline_key(*tonemapping);
+            if let Some(DebandDither::Enabled) = dither {
+                view_key |= Mesh2dPipelineKey::DEBAND_DITHER;
+            }
+        }
 
         if !view_key_cache
             .get_mut(view_entity)
@@ -319,6 +352,7 @@ pub fn init_mesh_2d_pipeline(
     asset_server: Res<AssetServer>,
     working_color_space: Res<WorkingColorSpace>,
 ) {
+    let tonemapping_lut_entries = get_lut_bind_group_layout_entries();
     let view_layout = BindGroupLayoutDescriptor::new(
         "mesh2d_view_layout",
         &BindGroupLayoutEntries::sequential(
@@ -326,6 +360,8 @@ pub fn init_mesh_2d_pipeline(
             (
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer::<GlobalsUniform>(false),
+                tonemapping_lut_entries[0].visibility(ShaderStages::FRAGMENT),
+                tonemapping_lut_entries[1].visibility(ShaderStages::FRAGMENT),
             ),
         ),
     );
@@ -474,6 +510,8 @@ bitflags::bitflags! {
     // FIXME: make normals optional?
     pub struct Mesh2dPipelineKey: u32 {
         const NONE                              = 0;
+        const TONEMAP_IN_SHADER                 = 1 << 0;
+        const DEBAND_DITHER                     = 1 << 1;
         const BLEND_ALPHA                       = 1 << 2;
         const MAY_DISCARD                       = 1 << 3;
         const SRGB_COMPOSITING                  = 1 << 4;
@@ -481,6 +519,18 @@ bitflags::bitflags! {
         const COLOR_TARGET_FORMAT_RESERVED_BITS = Self::COLOR_TARGET_FORMAT_MASK_BITS << Self::COLOR_TARGET_FORMAT_SHIFT_BITS;
         const MSAA_RESERVED_BITS                = Self::MSAA_MASK_BITS << Self::MSAA_SHIFT_BITS;
         const PRIMITIVE_TOPOLOGY_RESERVED_BITS  = Self::PRIMITIVE_TOPOLOGY_MASK_BITS << Self::PRIMITIVE_TOPOLOGY_SHIFT_BITS;
+        const TONEMAP_METHOD_RESERVED_BITS      = Self::TONEMAP_METHOD_MASK_BITS << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_NONE               = 0 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_REINHARD           = 1 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_REINHARD_LUMINANCE = 2 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_ACES_FITTED        = 3 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_AGX                = 4 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM = 5 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_TONY_MC_MAPFACE    = 6 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_BLENDER_FILMIC     = 7 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_PBR_NEUTRAL        = 8 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_LINEAR             = 9 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_GRAN_TURISMO_7     = 10 << Self::TONEMAP_METHOD_SHIFT_BITS;
         const STRIP_INDEX_FORMAT_RESERVED_BITS        = Self::INDEX_FORMAT_MASK_BITS << Self::INDEX_FORMAT_SHIFT_BITS;
         const STRIP_INDEX_FORMAT_NONE                 = 0 << Self::INDEX_FORMAT_SHIFT_BITS;
         const STRIP_INDEX_FORMAT_U32                  = 1 << Self::INDEX_FORMAT_SHIFT_BITS;
@@ -495,9 +545,12 @@ impl Mesh2dPipelineKey {
     const MSAA_SHIFT_BITS: u32 = 32 - Self::MSAA_MASK_BITS.count_ones();
     const PRIMITIVE_TOPOLOGY_MASK_BITS: u32 = 0b111;
     const PRIMITIVE_TOPOLOGY_SHIFT_BITS: u32 = Self::MSAA_SHIFT_BITS - 3;
+    const TONEMAP_METHOD_MASK_BITS: u32 = 0b1111;
+    const TONEMAP_METHOD_SHIFT_BITS: u32 =
+        Self::PRIMITIVE_TOPOLOGY_SHIFT_BITS - Self::TONEMAP_METHOD_MASK_BITS.count_ones();
     pub const INDEX_FORMAT_MASK_BITS: u32 = 0b11;
     pub const INDEX_FORMAT_SHIFT_BITS: u32 =
-        Self::PRIMITIVE_TOPOLOGY_SHIFT_BITS - Self::INDEX_FORMAT_MASK_BITS.count_ones();
+        Self::TONEMAP_METHOD_SHIFT_BITS - Self::TONEMAP_METHOD_MASK_BITS.count_ones();
 
     pub fn from_msaa_samples(msaa_samples: u32) -> Self {
         let msaa_bits =
@@ -661,6 +714,61 @@ impl SpecializedMeshPipeline for Mesh2dPipeline {
             vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(4));
         }
 
+        if key.contains(Mesh2dPipelineKey::TONEMAP_IN_SHADER) {
+            shader_defs.push("TONEMAP_IN_SHADER".into());
+            shader_defs.push(ShaderDefVal::UInt(
+                "TONEMAPPING_LUT_TEXTURE_BINDING_INDEX".into(),
+                2,
+            ));
+            shader_defs.push(ShaderDefVal::UInt(
+                "TONEMAPPING_LUT_SAMPLER_BINDING_INDEX".into(),
+                3,
+            ));
+
+            let method = key.intersection(Mesh2dPipelineKey::TONEMAP_METHOD_RESERVED_BITS);
+
+            match method {
+                Mesh2dPipelineKey::TONEMAP_METHOD_NONE => {
+                    shader_defs.push("TONEMAP_METHOD_NONE".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_LINEAR => {
+                    shader_defs.push("TONEMAP_METHOD_LINEAR".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_REINHARD => {
+                    shader_defs.push("TONEMAP_METHOD_REINHARD".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE => {
+                    shader_defs.push("TONEMAP_METHOD_REINHARD_LUMINANCE".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_ACES_FITTED => {
+                    shader_defs.push("TONEMAP_METHOD_ACES_FITTED".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_AGX => {
+                    shader_defs.push("TONEMAP_METHOD_AGX".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM => {
+                    shader_defs.push("TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC => {
+                    shader_defs.push("TONEMAP_METHOD_BLENDER_FILMIC".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE => {
+                    shader_defs.push("TONEMAP_METHOD_TONY_MC_MAPFACE".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL => {
+                    shader_defs.push("TONEMAP_METHOD_PBR_NEUTRAL".into());
+                }
+                Mesh2dPipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7 => {
+                    shader_defs.push("TONEMAP_METHOD_GRAN_TURISMO_7".into());
+                }
+                _ => {}
+            }
+            // Debanding is tied to tonemapping in the shader, cannot run without it.
+            if key.contains(Mesh2dPipelineKey::DEBAND_DITHER) {
+                shader_defs.push("DEBAND_DITHER".into());
+            }
+        }
+
         if key.contains(Mesh2dPipelineKey::MAY_DISCARD) {
             shader_defs.push("MAY_DISCARD".into());
         }
@@ -794,8 +902,11 @@ pub fn prepare_mesh2d_view_bind_groups(
     pipeline_cache: Res<PipelineCache>,
     mesh2d_pipeline: Res<Mesh2dPipeline>,
     view_uniforms: Res<ViewUniforms>,
-    views: Query<Entity, (With<ExtractedView>, With<Camera2d>)>,
+    views: Query<(Entity, &Tonemapping), (With<ExtractedView>, With<Camera2d>)>,
     globals_buffer: Res<GlobalsBuffer>,
+    tonemapping_luts: Res<TonemappingLuts>,
+    images: Res<RenderAssets<GpuImage>>,
+    fallback_image: Res<FallbackImage>,
 ) {
     let (Some(view_binding), Some(globals)) = (
         view_uniforms.uniforms.binding(),
@@ -804,11 +915,18 @@ pub fn prepare_mesh2d_view_bind_groups(
         return;
     };
 
-    for entity in &views {
+    for (entity, tonemapping) in &views {
+        let lut_bindings =
+            get_lut_bindings(&images, &tonemapping_luts, tonemapping, &fallback_image);
         let view_bind_group = render_device.create_bind_group(
             "mesh2d_view_bind_group",
             &pipeline_cache.get_bind_group_layout(&mesh2d_pipeline.view_layout),
-            &BindGroupEntries::sequential((view_binding.clone(), globals.clone())),
+            &BindGroupEntries::sequential((
+                view_binding.clone(),
+                globals.clone(),
+                lut_bindings.0,
+                lut_bindings.1,
+            )),
         );
 
         commands.entity(entity).insert(Mesh2dViewBindGroup {
