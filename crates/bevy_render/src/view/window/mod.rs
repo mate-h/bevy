@@ -717,18 +717,18 @@ fn negotiate_scrgb_linear(
 fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<NegotiatedSurface> {
     const PREFERRED: &[TextureFormat] = &[TextureFormat::Rgb10a2Unorm, TextureFormat::Rgba16Float];
     let preferred = PREFERRED.iter().copied().filter(|&format| {
-        advertised_color_spaces(format_capabilities, format).contains(SurfaceColorSpaces::HDR10)
+        advertised_color_spaces(format_capabilities, format).contains(SurfaceColorSpaces::BT2100_PQ)
     });
     // Formats that are themselves sRGB-encoded are excluded: their stores
     // bake in the sRGB OETF, which would re-encode the already-PQ-encoded
     // signal regardless of which view the blit writes through.
     let any = format_capabilities
         .iter()
-        .filter(|fc| fc.color_spaces.contains(SurfaceColorSpaces::HDR10) && !fc.format.is_srgb())
+        .filter(|fc| fc.color_spaces.contains(SurfaceColorSpaces::BT2100_PQ) && !fc.format.is_srgb())
         .map(|fc| fc.format);
     preferred.chain(any).next().map(|format| NegotiatedSurface {
         format,
-        color_space: SurfaceColorSpace::Hdr10,
+        color_space: SurfaceColorSpace::Bt2100Pq,
         resolved_transfer: DisplayTransfer::Pq,
     })
 }
@@ -854,19 +854,19 @@ fn supported_transfers(format_capabilities: &[SurfaceFormatCapabilities]) -> Vec
 ///   request that cannot get `ExtendedDisplayP3` falls straight to SDR rather
 ///   than to the Rec.709 `ExtendedSrgb` surface (which would mismatch the
 ///   encoder's resolved P3 gamut, since the returned transfer carries no gamut).
-/// - [`DisplayTransfer::Pq`]: HDR10 ([`SurfaceColorSpace::Hdr10`]) on the
+/// - [`DisplayTransfer::Pq`]: HDR10 ([`SurfaceColorSpace::Bt2100Pq`]) on the
 ///   advertised formats (see [`negotiate_hdr10`]; requires the OS to have
 ///   HDR output enabled on DX12/Vulkan). When unavailable, the downgrade
 ///   chain applies, each step with its own warning:
 ///   PQ → scRGB-linear → SDR sRGB.
 /// - [`DisplayTransfer::Hlg`]: fulfilled as **PQ/HDR10**, never as an HLG
 ///   swapchain, even where the backend advertises
-///   [`SurfaceColorSpace::Hlg`]: HLG is scene-referred (the display applies
+///   [`SurfaceColorSpace::Bt2100Hlg`]: HLG is scene-referred (the display applies
 ///   the OOTF), and Bevy's display-encoding pass deliberately refuses to
 ///   HLG-encode its display-referred tone-mapped output (it would
 ///   double-tone-map; the pass coerces HLG to PQ). Negotiating an HLG
 ///   surface and presenting PQ-encoded signal into it would display
-///   incorrectly. The HLG → `SurfaceColorSpace::Hlg` mapping can light up
+///   incorrectly. The HLG → `SurfaceColorSpace::Bt2100Hlg` mapping can light up
 ///   once a scene-referred HLG encoder path exists.
 ///
 /// Gamut interaction: the negotiation keys on the transfer (and, for
@@ -1013,8 +1013,8 @@ fn negotiate_surface_format(
             DisplayTransfer::ScRgbLinear,
         ),
         (
-            SurfaceColorSpaces::HDR10,
-            SurfaceColorSpace::Hdr10,
+            SurfaceColorSpaces::BT2100_PQ,
+            SurfaceColorSpace::Bt2100Pq,
             DisplayTransfer::Pq,
         ),
     ] {
@@ -1340,15 +1340,15 @@ mod tests {
                         | SurfaceColorSpaces::EXTENDED_SRGB_LINEAR
                         | SurfaceColorSpaces::EXTENDED_SRGB
                         | SurfaceColorSpaces::EXTENDED_DISPLAY_P3
-                        | SurfaceColorSpaces::HDR10
-                        | SurfaceColorSpaces::HLG,
+                        | SurfaceColorSpaces::BT2100_PQ
+                        | SurfaceColorSpaces::BT2100_HLG,
                 ),
                 fc(
                     TextureFormat::Rgb10a2Unorm,
                     SurfaceColorSpaces::SRGB
                         | SurfaceColorSpaces::DISPLAY_P3
-                        | SurfaceColorSpaces::HDR10
-                        | SurfaceColorSpaces::HLG,
+                        | SurfaceColorSpaces::BT2100_PQ
+                        | SurfaceColorSpaces::BT2100_HLG,
                 ),
             ],
         )
@@ -1395,7 +1395,7 @@ mod tests {
                 ),
                 fc(
                     TextureFormat::Rgb10a2Unorm,
-                    SurfaceColorSpaces::HDR10 | SurfaceColorSpaces::HLG,
+                    SurfaceColorSpaces::BT2100_PQ | SurfaceColorSpaces::BT2100_HLG,
                 ),
             ],
         )
@@ -1517,7 +1517,7 @@ mod tests {
     fn pq_negotiates_hdr10_preferring_rgb10a2unorm() {
         let expected = NegotiatedSurface {
             format: TextureFormat::Rgb10a2Unorm,
-            color_space: SurfaceColorSpace::Hdr10,
+            color_space: SurfaceColorSpace::Bt2100Pq,
             resolved_transfer: DisplayTransfer::Pq,
         };
         // Vulkan-like: Rgb10a2Unorm is the only HDR10 format (and is not
@@ -1538,14 +1538,14 @@ mod tests {
             fc(TextureFormat::Bgra8UnormSrgb, SurfaceColorSpaces::SRGB),
             fc(
                 TextureFormat::Rgba16Float,
-                SurfaceColorSpaces::EXTENDED_SRGB_LINEAR | SurfaceColorSpaces::HDR10,
+                SurfaceColorSpaces::EXTENDED_SRGB_LINEAR | SurfaceColorSpaces::BT2100_PQ,
             ),
         ];
         assert_eq!(
             negotiate(&formats, &caps, DisplayTransfer::Pq),
             NegotiatedSurface {
                 format: TextureFormat::Rgba16Float,
-                color_space: SurfaceColorSpace::Hdr10,
+                color_space: SurfaceColorSpace::Bt2100Pq,
                 resolved_transfer: DisplayTransfer::Pq,
             }
         );
@@ -1559,14 +1559,14 @@ mod tests {
             fc(TextureFormat::Bgra8UnormSrgb, SurfaceColorSpaces::SRGB),
             fc(
                 TextureFormat::Bgra8Unorm,
-                SurfaceColorSpaces::SRGB | SurfaceColorSpaces::HDR10,
+                SurfaceColorSpaces::SRGB | SurfaceColorSpaces::BT2100_PQ,
             ),
         ];
         assert_eq!(
             negotiate(&formats, &caps, DisplayTransfer::Pq),
             NegotiatedSurface {
                 format: TextureFormat::Bgra8Unorm,
-                color_space: SurfaceColorSpace::Hdr10,
+                color_space: SurfaceColorSpace::Bt2100Pq,
                 resolved_transfer: DisplayTransfer::Pq,
             }
         );
@@ -1603,7 +1603,7 @@ mod tests {
             negotiate(&formats, &caps, DisplayTransfer::Hlg),
             NegotiatedSurface {
                 format: TextureFormat::Rgb10a2Unorm,
-                color_space: SurfaceColorSpace::Hdr10,
+                color_space: SurfaceColorSpace::Bt2100Pq,
                 resolved_transfer: DisplayTransfer::Pq,
             }
         );
@@ -1629,18 +1629,18 @@ mod tests {
         // explicit-opt-in color spaces. Configuring with `Auto` would fail
         // validation, so the negotiation must pick an explicit pair (and
         // must not panic).
-        let caps = vec![fc(TextureFormat::Rgb10a2Unorm, SurfaceColorSpaces::HDR10)];
+        let caps = vec![fc(TextureFormat::Rgb10a2Unorm, SurfaceColorSpaces::BT2100_PQ)];
         assert_eq!(
             negotiate(&[], &caps, DisplayTransfer::Srgb),
             NegotiatedSurface {
                 format: TextureFormat::Rgb10a2Unorm,
-                color_space: SurfaceColorSpace::Hdr10,
+                color_space: SurfaceColorSpace::Bt2100Pq,
                 resolved_transfer: DisplayTransfer::Pq,
             }
         );
         // An explicitly-advertised sRGB pair is preferred when present.
         let caps = vec![
-            fc(TextureFormat::Rgb10a2Unorm, SurfaceColorSpaces::HDR10),
+            fc(TextureFormat::Rgb10a2Unorm, SurfaceColorSpaces::BT2100_PQ),
             fc(TextureFormat::Bgra8UnormSrgb, SurfaceColorSpaces::SRGB),
         ];
         assert_eq!(
