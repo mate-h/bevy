@@ -5638,22 +5638,8 @@ description = "Demonstrates blending between multiple reflection probes"
 category = "3D Rendering"
 wasm = false
 
-# HDR display-query wgpu fork (https://github.com/stuartparmenter/wgpu, branch
-# hdr-display-query, PR https://github.com/gfx-rs/wgpu/pull/9739, based on wgpu trunk
-# at version 29.0.0). The surface color-space API — `SurfaceColorSpace` /
-# `SurfaceCapabilities::format_capabilities` for HDR output — has landed in wgpu trunk
-# (its branch was merged to main), so this fork's only remaining delta on top of trunk
-# is `Surface::display_hdr_info()` for read-only display HDR-capability queries (display
-# HDR query API simplified: `hdr_active` dropped, `SurfaceColorSpace::is_hdr` added —
-# surface capability and live tone-map headroom are now separate questions). Once 9739
-# merges too, drop this patch and depend on the released wgpu directly.
-# In-tree requirements on these crates are relaxed to "29" so the 29.0.0 git
-# versions satisfy them. wgpu-core / wgpu-hal are not listed: nothing in the tree
-# depends on them from crates.io; the patched git `wgpu` pulls them as path deps.
-# Pinned to a rev (Cargo.lock is gitignored, so the resolved commit lives here);
-# bump the rev when the fork branch advances.
 [patch.crates-io]
-wgpu = { git = "https://github.com/stuartparmenter/wgpu", rev = "af64796742a9046d4c0b1bdd06e2439c3435e93e" }
-wgpu-types = { git = "https://github.com/stuartparmenter/wgpu", rev = "af64796742a9046d4c0b1bdd06e2439c3435e93e" }
-wgpu-naga-bridge = { git = "https://github.com/stuartparmenter/wgpu", rev = "af64796742a9046d4c0b1bdd06e2439c3435e93e" }
-naga = { git = "https://github.com/stuartparmenter/wgpu", rev = "af64796742a9046d4c0b1bdd06e2439c3435e93e" }
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "a03be8d2232ad3507b69e431c02e483a5ea792d0" }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "a03be8d2232ad3507b69e431c02e483a5ea792d0" }
+wgpu-naga-bridge = { git = "https://github.com/gfx-rs/wgpu", rev = "a03be8d2232ad3507b69e431c02e483a5ea792d0" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "a03be8d2232ad3507b69e431c02e483a5ea792d0" }
