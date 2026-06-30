@@ -141,9 +141,7 @@ pub struct ExtractedWindow {
     /// Display-P3 gamuts both resolve to `ExtendedSrgb`). It differs on a
     /// downgrade: [`DisplayTransfer::Srgb`] for a full SDR downgrade,
     /// [`DisplayTransfer::ScRgbLinear`] when a PQ request fell back to the
-    /// extended-sRGB-linear color space, and [`DisplayTransfer::Pq`] for an
-    /// [`DisplayTransfer::Hlg`] request (always fulfilled as PQ/HDR10; see
-    /// `negotiate_surface_format`). `None` until the surface has been
+    /// extended-sRGB-linear color space. `None` until the surface has been
     /// configured.
     ///
     /// `prepare_view_display_targets` reads this to build each view's
@@ -724,7 +722,9 @@ fn negotiate_hdr10(format_capabilities: &[SurfaceFormatCapabilities]) -> Option<
     // signal regardless of which view the blit writes through.
     let any = format_capabilities
         .iter()
-        .filter(|fc| fc.color_spaces.contains(SurfaceColorSpaces::BT2100_PQ) && !fc.format.is_srgb())
+        .filter(|fc| {
+            fc.color_spaces.contains(SurfaceColorSpaces::BT2100_PQ) && !fc.format.is_srgb()
+        })
         .map(|fc| fc.format);
     preferred.chain(any).next().map(|format| NegotiatedSurface {
         format,
@@ -800,9 +800,6 @@ fn negotiate_extended_display_p3(
 ///   [`negotiate_extended_display_p3`] for Display-P3; the gamut rides
 ///   [`DisplayTarget::gamut`], so either reaching the transfer is enough);
 /// - [`DisplayTransfer::Pq`] — when [`negotiate_hdr10`] succeeds.
-///
-/// [`DisplayTransfer::Hlg`] is excluded by design: HLG requests are fulfilled as
-/// PQ, never as an HLG swapchain (see [`DisplayTransfer::Hlg`]).
 fn supported_transfers(format_capabilities: &[SurfaceFormatCapabilities]) -> Vec<DisplayTransfer> {
     let mut transfers = vec![DisplayTransfer::Srgb];
     if negotiate_scrgb_linear(format_capabilities).is_some() {
@@ -859,15 +856,6 @@ fn supported_transfers(format_capabilities: &[SurfaceFormatCapabilities]) -> Vec
 ///   HDR output enabled on DX12/Vulkan). When unavailable, the downgrade
 ///   chain applies, each step with its own warning:
 ///   PQ → scRGB-linear → SDR sRGB.
-/// - [`DisplayTransfer::Hlg`]: fulfilled as **PQ/HDR10**, never as an HLG
-///   swapchain, even where the backend advertises
-///   [`SurfaceColorSpace::Bt2100Hlg`]: HLG is scene-referred (the display applies
-///   the OOTF), and Bevy's display-encoding pass deliberately refuses to
-///   HLG-encode its display-referred tone-mapped output (it would
-///   double-tone-map; the pass coerces HLG to PQ). Negotiating an HLG
-///   surface and presenting PQ-encoded signal into it would display
-///   incorrectly. The HLG → `SurfaceColorSpace::Bt2100Hlg` mapping can light up
-///   once a scene-referred HLG encoder path exists.
 ///
 /// Gamut interaction: the negotiation keys on the transfer (and, for
 /// `ExtendedSrgb`, the gamut), consistent with the encoder's gamut coercions —
@@ -935,32 +923,23 @@ fn negotiate_surface_format(
                 );
             }
         }
-        DisplayTransfer::Pq | DisplayTransfer::Hlg => {
-            if requested_transfer == DisplayTransfer::Hlg {
-                warn_once!(
-                    "DisplayTransfer::Hlg was requested, but Bevy's display pipeline \
-                    cannot produce a correct HLG signal (HLG is scene-referred; \
-                    encoding tone-mapped display-referred output with the HLG OETF \
-                    would double-tone-map), so an HLG swapchain is never negotiated. \
-                    Fulfilling the request with PQ (HDR10) where available."
-                );
-            }
+        DisplayTransfer::Pq => {
             if let Some(negotiated) = negotiate_hdr10(format_capabilities) {
                 return negotiated;
             }
             warn_once!(
-                "DisplayTransfer::{requested_transfer:?} was requested, but this \
-                surface does not advertise the HDR10 (PQ) color space — the OS may \
-                have HDR output disabled, or the backend lacks support. Downgrading \
-                to scRGB-linear if available, else SDR sRGB."
+                "DisplayTransfer::Pq was requested, but this surface does not \
+                advertise the HDR10 (PQ) color space — the OS may have HDR output \
+                disabled, or the backend lacks support. Downgrading to scRGB-linear \
+                if available, else SDR sRGB."
             );
             if let Some(negotiated) = negotiate_scrgb_linear(format_capabilities) {
                 return negotiated;
             }
             warn_once!(
-                "DisplayTransfer::{requested_transfer:?} could not be downgraded to \
-                scRGB-linear either (no Rgba16Float extended-sRGB-linear support); \
-                downgrading to SDR sRGB output."
+                "DisplayTransfer::Pq could not be downgraded to scRGB-linear either \
+                (no Rgba16Float extended-sRGB-linear support); downgrading to SDR \
+                sRGB output."
             );
         }
     }
@@ -1593,43 +1572,15 @@ mod tests {
     }
 
     #[test]
-    fn hlg_is_fulfilled_as_hdr10_pq() {
-        // HLG is never negotiated as an HLG swapchain (the display pipeline
-        // cannot produce a correct scene-referred HLG signal); it resolves to
-        // PQ/HDR10 — even when the surface advertises the HLG color space —
-        // and follows PQ's downgrade chain otherwise.
-        let (formats, caps) = metal_like();
-        assert_eq!(
-            negotiate(&formats, &caps, DisplayTransfer::Hlg),
-            NegotiatedSurface {
-                format: TextureFormat::Rgb10a2Unorm,
-                color_space: SurfaceColorSpace::Bt2100Pq,
-                resolved_transfer: DisplayTransfer::Pq,
-            }
-        );
-        let (formats, caps) = scrgb_only();
-        assert_eq!(
-            negotiate(&formats, &caps, DisplayTransfer::Hlg),
-            NegotiatedSurface {
-                format: TextureFormat::Rgba16Float,
-                color_space: SurfaceColorSpace::ExtendedSrgbLinear,
-                resolved_transfer: DisplayTransfer::ScRgbLinear,
-            }
-        );
-        let (formats, caps) = sdr_only();
-        assert_eq!(
-            negotiate(&formats, &caps, DisplayTransfer::Hlg),
-            SDR_SELECTION(TextureFormat::Bgra8UnormSrgb)
-        );
-    }
-
-    #[test]
     fn empty_auto_formats_fall_back_to_an_explicit_color_space() {
         // Weird combo: a driver in OS HDR mode reporting formats only in
         // explicit-opt-in color spaces. Configuring with `Auto` would fail
         // validation, so the negotiation must pick an explicit pair (and
         // must not panic).
-        let caps = vec![fc(TextureFormat::Rgb10a2Unorm, SurfaceColorSpaces::BT2100_PQ)];
+        let caps = vec![fc(
+            TextureFormat::Rgb10a2Unorm,
+            SurfaceColorSpaces::BT2100_PQ,
+        )];
         assert_eq!(
             negotiate(&[], &caps, DisplayTransfer::Srgb),
             NegotiatedSurface {
@@ -1829,7 +1780,7 @@ mod tests {
 
         // Each surface advertises exactly the transfers its negotiation
         // helpers can satisfy, in the stable cycle order, with `Srgb` always
-        // present and `Hlg` never offered in its own right.
+        // present.
         let cases: [(
             &str,
             fn() -> (Vec<TextureFormat>, Vec<SurfaceFormatCapabilities>),

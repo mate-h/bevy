@@ -38,12 +38,6 @@
 //! view). When the backend cannot fulfil the requested transfer, the view's
 //! **resolved** display target degrades (to plain SDR, with warnings), so the
 //! predicate below always reflects what the surface can actually show.
-//! [`DisplayTransfer::Hlg`] requests are fulfilled as PQ/HDR10 at
-//! negotiation (HLG is scene-referred; see the coercion notes on the phase-2
-//! stack resolver,
-//! [`resolve_camera_stack_contracts`](crate::camera_stack::resolve_camera_stack_contracts)),
-//! so a resolved HLG transfer can only reach this pass through manual
-//! (non-window) targets.
 
 use crate::FullscreenShader;
 use bevy_app::{App, Plugin};
@@ -235,9 +229,8 @@ pub(crate) const fn is_gamut_contraction(source: DisplayGamut, display: DisplayG
 /// receive.
 ///
 /// Only the reachable HDR transfers (scRGB, PQ, extended-sRGB) are handled;
-/// [`DisplayTransfer::Srgb`] (hardware-encoded on the blit, no pass) and
-/// [`DisplayTransfer::Hlg`] (coerced to PQ at prepare time) are `unreachable!`,
-/// the same contract as the encoder's
+/// [`DisplayTransfer::Srgb`] (hardware-encoded on the blit, no pass) is
+/// `unreachable!`, the same contract as the encoder's
 /// [`specialize`](DisplayEncodingPipeline::specialize).
 ///
 /// [`display_encoding.wgsl`]: crate::display_encoding
@@ -281,10 +274,9 @@ pub fn encode_out_texture_clear_color(
                 srgb_oetf_extended(scrgb_encode(linear.z, paper_white_nits)),
             )
         }
-        // sRGB never reaches this helper (hardware encode on the blit); HLG is
-        // coerced to PQ at prepare time. Same contract as the encoder's
-        // specialize transfer arm.
-        DisplayTransfer::Srgb | DisplayTransfer::Hlg => {
+        // sRGB never reaches this helper (hardware encode on the blit). Same
+        // contract as the encoder's specialize transfer arm.
+        DisplayTransfer::Srgb => {
             unreachable!(
                 "only HDR transfers (scRGB / PQ / extended-sRGB) encode an out-texture clear color"
             )
@@ -346,7 +338,7 @@ pub fn init_display_encoding_pipeline(
 /// [`ViewStackContract`]: `gamut` and `transfer` are the **resolved** values
 /// after the prepare-time coercions in the phase-2 stack resolver
 /// ([`resolve_camera_stack_contracts`](crate::camera_stack::resolve_camera_stack_contracts);
-/// HLG → PQ, PQ forces Rec.2020, scRGB forces Rec.709 — scRGB signals are by
+/// PQ forces Rec.2020, scRGB forces Rec.709 — scRGB signals are by
 /// definition expressed in extended Rec.709/sRGB coordinates — and extended-sRGB
 /// keeps Rec.709 or Display P3 while coercing Rec.2020 to Rec.709), so the
 /// pipeline hashes on what is actually encoded, not on what was requested. With
@@ -467,9 +459,8 @@ impl SpecializedRenderPipeline for DisplayEncodingPipeline {
             DisplayTransfer::ExtendedSrgb => {
                 shader_defs.push("DISPLAY_TRANSFER_EXTENDED_SRGB".into());
             }
-            // sRGB never reaches this pass (hardware encode on the blit);
-            // HLG is coerced to PQ at prepare time.
-            DisplayTransfer::Srgb | DisplayTransfer::Hlg => unreachable!(
+            // sRGB never reaches this pass (hardware encode on the blit).
+            DisplayTransfer::Srgb => unreachable!(
                 "only HDR transfers (scRGB / PQ / extended-sRGB) are encoded by the \
                  display-encoding pass"
             ),

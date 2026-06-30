@@ -774,7 +774,7 @@ impl Gt7ParamsUniform {
     /// - `params` is passed through [`GranTurismo7Params::sanitized`]
     ///   (non-finite fields reset, ranges clamped, one warning).
     /// - If the display target requests an HDR transfer (scRGB-linear, PQ, or
-    ///   HLG), the operator is configured in **HDR mode**:
+    ///   extended-range sRGB), the operator is configured in **HDR mode**:
     ///   - `paper_white_nits` is sanitized through
     ///     [`DisplayTarget::sanitized_paper_white_nits`] (non-finite or
     ///     non-positive → 100 nits, clamped to the 10000-nit PQ ceiling, each
@@ -1600,12 +1600,6 @@ mod tests {
         );
         assert_eq!(uniform.peak, 100.0);
         assert!((uniform.sdr_correction_factor - 0.01).abs() < 1e-9);
-
-        // HLG counts as an HDR transfer (defined but unreachable through
-        // wgpu surfaces today).
-        let uniform =
-            Gt7ParamsUniform::new(&hdr_target(1000.0, 100.0, DisplayTransfer::Hlg), &params);
-        assert_eq!(uniform.peak, 10.0);
     }
 
     /// The seam renormalization must fold the *exact* value

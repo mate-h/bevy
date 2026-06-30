@@ -169,8 +169,8 @@ pub struct FxaaPipelineKey {
     edge_threshold: Sensitivity,
     edge_threshold_min: Sensitivity,
     target_format: TextureFormat,
-    /// Whether the view's resolved display target transfer is HDR
-    /// (scRGB-linear / PQ / HLG); see [`ViewDisplayTarget::is_hdr_transfer`].
+    /// Whether the view's resolved display target transfer is HDR; see
+    /// [`ViewDisplayTarget::is_hdr_transfer`].
     ///
     /// The post-tonemap input on such views is paper-white-relative
     /// display-linear and exceeds 1.0, which would defeat FXAA's absolute

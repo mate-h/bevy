@@ -491,6 +491,5 @@ fn transfer_short_name(transfer: DisplayTransfer) -> &'static str {
         DisplayTransfer::ScRgbLinear => "scRGB",
         DisplayTransfer::ExtendedSrgb => "ext-sRGB",
         DisplayTransfer::Pq => "PQ",
-        DisplayTransfer::Hlg => "HLG",
     }
 }

@@ -39,8 +39,8 @@ blends transparents in linear light, and tone-maps once. See the migration
 guides for the visual implications on previously-SDR cameras.
 
 The transfer functions themselves — the exact piecewise sRGB OETF/EOTF, the
-odd-symmetric extended-range sRGB OETF/EOTF, scRGB scaling, PQ
-inverse-EOTF/EOTF, and the HLG OETF — live in a new importable WGSL library,
+odd-symmetric extended-range sRGB OETF/EOTF, scRGB scaling, and PQ
+inverse-EOTF/EOTF — live in a new importable WGSL library,
 `bevy_render::transfer_functions`, with CPU mirrors (and parity tests) in the
 matching Rust module, so you can reuse them in your own shaders.
 

@@ -190,8 +190,8 @@ pub fn init_cas_pipeline(
 pub struct CasPipelineKey {
     target_format: TextureFormat,
     denoise: bool,
-    /// Whether the view's resolved display target transfer is HDR
-    /// (scRGB-linear / PQ / HLG); see [`ViewDisplayTarget::is_hdr_transfer`].
+    /// Whether the view's resolved display target transfer is HDR; see
+    /// [`ViewDisplayTarget::is_hdr_transfer`].
     ///
     /// The post-tonemap input on such views is paper-white-relative
     /// display-linear and exceeds 1.0, which breaks RCAS's `[0, 1]` limiter

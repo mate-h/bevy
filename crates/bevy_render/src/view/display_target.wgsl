@@ -19,7 +19,8 @@ const DISPLAY_GAMUT_REC2020: u32 = 2u;
 const DISPLAY_TRANSFER_SRGB: u32 = 0u;
 const DISPLAY_TRANSFER_SCRGB_LINEAR: u32 = 1u;
 const DISPLAY_TRANSFER_PQ: u32 = 2u;
-const DISPLAY_TRANSFER_HLG: u32 = 3u;
+// Index 3 is reserved for a future HLG transfer; `ExtendedSrgb` keeps index 4.
+// const DISPLAY_TRANSFER_HLG: u32 = 3u;
 const DISPLAY_TRANSFER_EXTENDED_SRGB: u32 = 4u;
 
 // The resolved calibration of the display a view is presented on.

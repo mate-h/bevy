@@ -185,8 +185,8 @@ pub struct SmaaNeighborhoodBlendingPipelineKey {
 pub struct SmaaEdgeDetectionPipelineKey {
     /// The quality preset.
     preset: SmaaPreset,
-    /// Whether the view's resolved display target transfer is HDR
-    /// (scRGB-linear / PQ / HLG); see [`ViewDisplayTarget::is_hdr_transfer`].
+    /// Whether the view's resolved display target transfer is HDR; see
+    /// [`ViewDisplayTarget::is_hdr_transfer`].
     ///
     /// The post-tonemap input on such views is paper-white-relative
     /// display-linear and exceeds 1.0, which would shift `SMAA_THRESHOLD`'s

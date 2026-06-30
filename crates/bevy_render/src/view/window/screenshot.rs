@@ -344,8 +344,8 @@ fn extract_screenshots(
 /// decoded, from its resolved [`EffectiveManualDisplayTargets`] entry. Manual
 /// targets resolve to the requested transfer verbatim — there is no surface
 /// negotiation to downgrade them — so this mirrors the encoder's own coercion:
-/// HLG is fulfilled as PQ, and `ExtendedSrgb` keeps a Display-P3 gamut while
-/// coercing every other gamut to Rec.709.
+/// `ExtendedSrgb` keeps a Display-P3 gamut while coercing every other gamut to
+/// Rec.709.
 fn manual_target_decode(
     effective_manual_display_targets: &EffectiveManualDisplayTargets,
     target: &NormalizedRenderTarget,
@@ -354,7 +354,7 @@ fn manual_target_decode(
         .get(target)
         .map(|e| (e.target.transfer, e.target.gamut))
     {
-        Some((DisplayTransfer::Pq | DisplayTransfer::Hlg, _)) => ScreenshotDecode::Pq,
+        Some((DisplayTransfer::Pq, _)) => ScreenshotDecode::Pq,
         Some((DisplayTransfer::ExtendedSrgb, gamut)) => ScreenshotDecode::ExtendedSrgb {
             display_p3: gamut == DisplayGamut::DisplayP3,
         },

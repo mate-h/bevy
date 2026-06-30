@@ -55,9 +55,6 @@ wgpu's surface color-space API:
   HDR mode emits linear Rec.2020 directly, the display-encoding pass applies
   the PQ OETF with no intermediate gamut round-trip, and the encoded signal is
   presented as-is.
-- **`DisplayTransfer::Hlg`** requests are fulfilled as PQ/HDR10: HLG is
-  scene-referred, and encoding tone-mapped output with the HLG OETF would
-  double-tone-map, so Bevy deliberately never configures an HLG swapchain.
 
 The display-encoding pass writes the encoded signal (scRGB scaled by
 `paper_white_nits / 80`; PQ from absolute nits) and the final blit hands it to

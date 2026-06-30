@@ -32,13 +32,6 @@ pub const PQ_C2: f32 = 18.851_563;
 /// ST-2084 constant `c3` = (2392 / 4096) × 32.
 pub const PQ_C3: f32 = 18.6875;
 
-/// HLG (ITU-R BT.2100-2 Table 5) constant `a`.
-pub const HLG_A: f32 = 0.17883277;
-/// HLG constant `b` = 1 − 4a.
-pub const HLG_B: f32 = 0.28466892;
-/// HLG constant `c` = 0.5 − a·ln(4a) = 0.55991073 per BT.2100-2 Table 5.
-pub const HLG_C: f32 = 0.559_910_7;
-
 /// The sRGB (IEC 61966-2-1) OETF (inverse EOTF): display-linear `[0, 1]` →
 /// encoded signal.
 ///
@@ -147,25 +140,6 @@ pub fn pq_eotf(signal: f32) -> f32 {
     let np = ops::powf(n, 1.0 / PQ_M2);
     let l = (np - PQ_C1).max(0.0) / (PQ_C2 - PQ_C3 * np);
     ops::powf(l, 1.0 / PQ_M1)
-}
-
-/// The HLG OETF (ITU-R BT.2100-2 Table 5): scene-linear `E ∈ [0, 1]` →
-/// signal in `[0, 1]`. Negative inputs are clamped to zero.
-///
-/// HLG is **scene-referred** (the display applies the OOTF), so Bevy never
-/// encodes its display-referred tone-mapped output with it: surface
-/// negotiation fulfils [`DisplayTransfer::Hlg`](bevy_window::DisplayTransfer::Hlg)
-/// requests as PQ/HDR10, and the display-encoding pass coerces any remaining
-/// resolved HLG target (manual render targets) to PQ. The function is
-/// implemented and tested for completeness but is unreachable from the
-/// display-encoding pass.
-pub fn hlg_oetf(e: f32) -> f32 {
-    let e = e.max(0.0);
-    if e <= 1.0 / 12.0 {
-        ops::sqrt(3.0 * e)
-    } else {
-        HLG_A * ops::ln(12.0 * e - HLG_B) + HLG_C
-    }
 }
 
 #[cfg(test)]
@@ -328,20 +302,5 @@ mod tests {
         // them).
         assert_eq!(scrgb_encode(0.5, 100.0), 0.625);
         assert_eq!(scrgb_encode(-0.5, 100.0), -0.625);
-    }
-
-    #[test]
-    fn hlg_oetf_matches_bt2100_anchors() {
-        // E = 1/12 is the piecewise breakpoint: sqrt(3/12) = 0.5 exactly.
-        assert!((hlg_oetf(1.0 / 12.0) - 0.5).abs() < 1e-6);
-        // The constants are chosen so OETF(1) = 1.
-        assert!((hlg_oetf(1.0) - 1.0).abs() < 1e-6);
-        // Continuity at the breakpoint.
-        let below = hlg_oetf(1.0 / 12.0 - 1e-6);
-        let above = hlg_oetf(1.0 / 12.0 + 1e-6);
-        assert!((below - above).abs() < 1e-4);
-        // Negative inputs clamp to zero (no NaN from sqrt).
-        assert_eq!(hlg_oetf(-1.0), 0.0);
-        assert_eq!(hlg_oetf(0.0), 0.0);
     }
 }

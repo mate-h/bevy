@@ -278,13 +278,11 @@ pub enum DisplayGamut {
 /// [`ExtendedSrgb`] (encoded extended-range sRGB) on Metal, Vulkan
 /// (Rec.709 gamut only), and browser WebGPU on HDR-capable displays — this is
 /// the web HDR path; [`Pq`] (HDR10) on Vulkan, DX12, and Metal when the OS has
-/// HDR output enabled. [`Hlg`] requests are fulfilled as PQ (see the variant
-/// docs). Unfulfillable requests degrade with a warning.
+/// HDR output enabled. Unfulfillable requests degrade with a warning.
 ///
 /// [`Srgb`]: DisplayTransfer::Srgb
 /// [`ScRgbLinear`]: DisplayTransfer::ScRgbLinear
 /// [`Pq`]: DisplayTransfer::Pq
-/// [`Hlg`]: DisplayTransfer::Hlg
 /// [`ExtendedSrgb`]: DisplayTransfer::ExtendedSrgb
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(
@@ -334,16 +332,6 @@ pub enum DisplayTransfer {
     /// [`ScRgbLinear`](Self::ScRgbLinear) if possible, else to SDR sRGB,
     /// with a warning each step.
     Pq,
-    /// Hybrid Log-Gamma (ITU-R BT.2100), the scene-referred HDR transfer
-    /// function used in broadcast.
-    ///
-    /// Requesting HLG is **fulfilled as [`Pq`](Self::Pq) (HDR10)**, never as
-    /// an HLG swapchain: HLG is scene-referred (the display applies the
-    /// OOTF), and the display pipeline's tone-mapped output is
-    /// display-referred — encoding it with the HLG OETF would
-    /// double-tone-map. A correct HLG output path would need a
-    /// scene-referred encoder input, which Bevy does not have.
-    Hlg,
     /// Extended-range sRGB (IEC 61966-2-2, **encoded** form): the sRGB transfer
     /// function continued past `[0, 1]` by mirroring the curve through the
     /// origin (odd-symmetric, sign-preserving), an HDR signal where `1.0` is
@@ -379,20 +367,15 @@ pub enum DisplayTransfer {
 
 impl DisplayTransfer {
     /// Returns `true` if this is a high-dynamic-range transfer function
-    /// ([`ScRgbLinear`](Self::ScRgbLinear), [`Pq`](Self::Pq),
-    /// [`Hlg`](Self::Hlg), or [`ExtendedSrgb`](Self::ExtendedSrgb)).
+    /// ([`ScRgbLinear`](Self::ScRgbLinear), [`Pq`](Self::Pq), or
+    /// [`ExtendedSrgb`](Self::ExtendedSrgb)).
     ///
     /// This is the single-sourced predicate the display pipeline uses to
     /// decide whether a target takes the HDR path (shader-side transfer
     /// encoding, HDR operator modes) or the plain SDR path (hardware sRGB
-    /// encode). HLG is included even though HLG requests are fulfilled as PQ
-    /// at surface negotiation (see [`Hlg`](Self::Hlg)): an HLG *request* is
-    /// an HDR request.
+    /// encode).
     pub const fn is_hdr(&self) -> bool {
-        matches!(
-            self,
-            Self::ScRgbLinear | Self::Pq | Self::Hlg | Self::ExtendedSrgb
-        )
+        matches!(self, Self::ScRgbLinear | Self::Pq | Self::ExtendedSrgb)
     }
 }
 
@@ -432,9 +415,8 @@ pub struct WindowResolvedTransfer(pub DisplayTransfer);
 /// could be fulfilled with on this surface right now — so an app can offer
 /// only the modes that will actually work instead of requesting one that
 /// silently downgrades. [`DisplayTransfer::Srgb`] (the SDR fallback) is always
-/// present; [`DisplayTransfer::Hlg`] never appears in its own right (HLG
-/// requests are fulfilled as [`DisplayTransfer::Pq`]). The set follows a stable
-/// order suitable for cycling: `Srgb`, `ScRgbLinear`, `ExtendedSrgb`, `Pq`.
+/// present; the set follows a stable order suitable for cycling: `Srgb`,
+/// `ScRgbLinear`, `ExtendedSrgb`, `Pq`.
 ///
 /// Read-only and mirrored from the renderer; writing it has no effect on the
 /// surface. It is absent until the window's first surface configuration (and on
@@ -573,7 +555,6 @@ mod tests {
         assert!(!DisplayTransfer::Srgb.is_hdr());
         assert!(DisplayTransfer::ScRgbLinear.is_hdr());
         assert!(DisplayTransfer::Pq.is_hdr());
-        assert!(DisplayTransfer::Hlg.is_hdr());
         assert!(DisplayTransfer::ExtendedSrgb.is_hdr());
     }
 }

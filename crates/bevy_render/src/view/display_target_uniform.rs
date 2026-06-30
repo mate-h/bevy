@@ -88,8 +88,8 @@ pub struct ViewDisplayTarget {
     /// is [`DisplayTarget::SDR_SRGB`] for a full SDR downgrade (so the
     /// downgraded view takes the same plain SDR path as a natively-SDR view),
     /// or the requested target with only the transfer replaced when the surface
-    /// carries a *different HDR* transfer (PQ downgraded to scRGB-linear, or
-    /// HLG fulfilled as PQ/HDR10) — the user's calibration still applies.
+    /// carries a *different HDR* transfer (PQ downgraded to scRGB-linear) —
+    /// the user's calibration still applies.
     /// See `resolve_window_display_target` in this module.
     pub resolved: DisplayTarget,
 }
@@ -105,9 +105,7 @@ impl ViewDisplayTarget {
     }
 
     /// Returns `true` if the **resolved** transfer function is a high dynamic
-    /// range transfer ([`DisplayTransfer::ScRgbLinear`],
-    /// [`DisplayTransfer::Pq`], or [`DisplayTransfer::Hlg`]; see
-    /// [`DisplayTransfer::is_hdr`]).
+    /// range transfer (see [`DisplayTransfer::is_hdr`]).
     ///
     /// This gates the display-encoding pass and the upscaling blit's
     /// pass-through mode, and HDR-capable operators (e.g.
@@ -132,8 +130,10 @@ pub const DISPLAY_TRANSFER_SRGB: u32 = 0;
 pub const DISPLAY_TRANSFER_SCRGB_LINEAR: u32 = 1;
 /// Index of [`DisplayTransfer::Pq`] in [`DisplayTargetUniform::transfer`].
 pub const DISPLAY_TRANSFER_PQ: u32 = 2;
-/// Index of [`DisplayTransfer::Hlg`] in [`DisplayTargetUniform::transfer`].
-pub const DISPLAY_TRANSFER_HLG: u32 = 3;
+// Index 3 is reserved for a future HLG transfer (see the "HLG output" item in
+// the HDR design doc). `ExtendedSrgb` deliberately keeps index 4 so the GPU
+// contract is unchanged and HLG can be reintroduced without renumbering:
+// pub const DISPLAY_TRANSFER_HLG: u32 = 3;
 /// Index of [`DisplayTransfer::ExtendedSrgb`] in [`DisplayTargetUniform::transfer`].
 pub const DISPLAY_TRANSFER_EXTENDED_SRGB: u32 = 4;
 
@@ -153,7 +153,6 @@ pub const fn display_transfer_index(transfer: DisplayTransfer) -> u32 {
         DisplayTransfer::Srgb => DISPLAY_TRANSFER_SRGB,
         DisplayTransfer::ScRgbLinear => DISPLAY_TRANSFER_SCRGB_LINEAR,
         DisplayTransfer::Pq => DISPLAY_TRANSFER_PQ,
-        DisplayTransfer::Hlg => DISPLAY_TRANSFER_HLG,
         DisplayTransfer::ExtendedSrgb => DISPLAY_TRANSFER_EXTENDED_SRGB,
     }
 }
@@ -173,7 +172,7 @@ pub const fn display_transfer_index(transfer: DisplayTransfer) -> u32 {
 /// | 0 | Rec.709 | | 0 | sRGB |
 /// | 1 | Display P3 | | 1 | scRGB linear |
 /// | 2 | Rec.2020 | | 2 | PQ (ST 2084) |
-/// | | | | 3 | HLG |
+/// | | | | 3 | (reserved for HLG) |
 /// | | | | 4 | extended sRGB (encoded) |
 ///
 /// Gamut conversion matrices are deliberately **not** part of this uniform;
@@ -267,10 +266,10 @@ pub struct ViewDisplayTargetUniformOffset {
 ///   the warning is emitted at negotiation time in `create_surfaces`).
 /// - `Some(transfer)` differing from the requested transfer while both are
 ///   HDR (the negotiation fulfilled the request with a different HDR
-///   encoding: PQ downgraded to scRGB-linear when HDR10 is unavailable, or
-///   HLG fulfilled as PQ/HDR10): the user's calibration (paper white, peak,
-///   gamut) is kept and only the transfer is replaced, so the encoder keys
-///   on what the surface actually carries.
+///   encoding: PQ downgraded to scRGB-linear when HDR10 is unavailable): the
+///   user's calibration (paper white, peak, gamut) is kept and only the
+///   transfer is replaced, so the encoder keys on what the surface actually
+///   carries.
 /// - Equal transfers, `None` (surface not configured yet — transient), or a
 ///   non-window target (`surface_transfer` = `None`): resolved == requested.
 pub(crate) fn resolve_window_display_target(
@@ -421,15 +420,15 @@ mod tests {
 
     #[test]
     fn enum_indices_are_stable() {
-        // These indices are baked into shaders (display_target.wgsl); they
-        // must never change for existing variants.
+        // These indices are mirrored in display_target.wgsl; they must never
+        // change for existing variants. Index 3 is reserved for a future HLG
+        // transfer, so `ExtendedSrgb` keeps index 4.
         assert_eq!(display_gamut_index(DisplayGamut::Rec709), 0);
         assert_eq!(display_gamut_index(DisplayGamut::DisplayP3), 1);
         assert_eq!(display_gamut_index(DisplayGamut::Rec2020), 2);
         assert_eq!(display_transfer_index(DisplayTransfer::Srgb), 0);
         assert_eq!(display_transfer_index(DisplayTransfer::ScRgbLinear), 1);
         assert_eq!(display_transfer_index(DisplayTransfer::Pq), 2);
-        assert_eq!(display_transfer_index(DisplayTransfer::Hlg), 3);
         assert_eq!(display_transfer_index(DisplayTransfer::ExtendedSrgb), 4);
     }
 
@@ -475,7 +474,7 @@ mod tests {
         for transfer in [
             DisplayTransfer::ScRgbLinear,
             DisplayTransfer::Pq,
-            DisplayTransfer::Hlg,
+            DisplayTransfer::ExtendedSrgb,
         ] {
             let hdr = ViewDisplayTarget::fulfilled(DisplayTarget {
                 transfer,
@@ -516,19 +515,6 @@ mod tests {
             DisplayTarget {
                 transfer: DisplayTransfer::ScRgbLinear,
                 ..requested
-            }
-        );
-
-        // HLG fulfilled as PQ/HDR10.
-        let hlg_requested = DisplayTarget {
-            transfer: DisplayTransfer::Hlg,
-            ..requested
-        };
-        assert_eq!(
-            resolve_window_display_target(hlg_requested, Some(DisplayTransfer::Pq)),
-            DisplayTarget {
-                transfer: DisplayTransfer::Pq,
-                ..hlg_requested
             }
         );
 

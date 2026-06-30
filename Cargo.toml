@@ -1453,7 +1453,7 @@ name = "HDR Calibration"
 description = "HGIG-style calibration patterns for tuning a window's DisplayTarget on an HDR display"
 category = "3D Rendering"
 # The calibration patterns need PQ or scRGB output; browser WebGPU exposes no
-# PQ/HLG canvas color space, so the example cannot do its job on wasm
+# PQ canvas color space, so the example cannot do its job on wasm
 wasm = false
 
 [[example]]
