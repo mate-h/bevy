@@ -5,29 +5,42 @@ pull_requests: []
 ---
 
 HDR output is only as good as the calibration values in the window's
-`DisplayTarget`, and no operating system reliably reports them (neither winit
-nor wgpu exposes display luminance metadata yet). The new
-`examples/3d/hdr_calibration.rs` example shows the practical answer — an
-in-app, HGIG-style calibration flow — and doubles as a reference for shipping
-an "HDR settings" screen in your own game:
+`DisplayTarget`. wgpu now senses some of them — `DisplayHdrInfo` feeds peak,
+black, full-frame and SDR-white nits, headroom, and chromaticity into
+`WindowDisplayState` / `MonitorDisplayCapability` — but paper white is a viewing
+preference no display can report, and sensed values are missing or coarse on many
+platforms. So an in-app, HGIG-style calibration flow complements that sensing
+rather than replacing it, and doubles as a reference for shipping an "HDR
+settings" screen in your own game.
 
-- **Peak luminance**: a near-peak checkerboard behind a center patch that
-  tracks `peak_luminance_nits`; if the patch is already invisible, lower the
-  value until it appears, then raise it until it just disappears into the
-  clipped background.
-- **Paper white**: a reference white card at exactly `1.0` (with a 203-nit
-  ITU-R BT.2408 strip for comparison) while adjusting `paper_white_nits`.
-- **Black level**: near-black steps at fixed absolute luminances for picking
-  `min_luminance_nits`.
+`examples/helpers/hdr_calibration.rs` packages the flow as a reusable
+`HdrCalibrationPlugin<S>`: drop it into one of your own `States` and it runs a
+guided three-step wizard, persists the result next to the executable, emits a
+`CalibrationComplete` event on confirm, and prompts to recalibrate when the
+window moves to another monitor (`WindowMonitorChanged`). A `CalibrationStrategy`
+is chosen up front: manual HGIG (you tune every value) or trust-OS (peak, black,
+and gamut auto-resolve from sensed data; you only set paper white).
+`examples/3d/hdr_calibration.rs` is a thin harness around it — it adds the
+`hdr_helper` `HdrPlugin` plus the plugin and wires up `T`/`G`/backtick controls.
 
-All adjustments mutate the primary window's `DisplayTarget` live — including
-cycling the requested transfer with the `T` key (sRGB → scRGB-linear → PQ),
-which renegotiates the swapchain on the fly — and a Gran Turismo 7 preview
-toggle runs the full HDR tone-mapping path on the same patterns. The patterns
-are rendered with `Tonemapping::None` and unlit materials so they reach the
-display encoder at exact paper-white-relative values. The example also listens
-for the new `WindowMonitorChanged` message and suggests recalibrating when the
-window lands on a different monitor.
+The three steps:
+
+- **Peak luminance** (`peak_luminance_nits`): a solid clipped near-peak surround,
+  a true-black separating frame, and a center patch at the candidate peak
+  (`PeakFraction(1.0)`); raise the value until the patch merges into the
+  surround, then back off one tap.
+- **Paper white** (`paper_white_nits`): a reference white card at exactly `1.0`
+  next to a 203-nit ITU-R BT.2408 strip.
+- **Black level** (`min_luminance_nits`): near-black steps at fixed absolute
+  luminances.
+
+All adjustments mutate the primary window's `DisplayTarget` live. The patterns
+render with `Tonemapping::None` and unlit materials so they reach the display
+encoder at exact paper-white-relative values (above `1.0` reaches peak). In the
+harness, `T` cycles the requested transfer through sRGB → scRGB-linear →
+extended-sRGB → PQ, renegotiating the swapchain on the fly; `G` toggles a Gran
+Turismo 7 tone-mapping preview over the same patterns; and backtick shows an
+engine-telemetry overlay.
 
 `DisplayTarget` gained matching builder-style helpers for deriving calibrated
 targets from a base value:
@@ -39,6 +52,6 @@ let hdr = DisplayTarget::SDR_SRGB
     .with_transfer(DisplayTransfer::ScRgbLinear);
 ```
 
-An HDR display is required to calibrate anything real (macOS/iOS Metal,
-Windows Vulkan, or Wayland Vulkan with Mesa 25.1+); on SDR systems the example
-still runs on the documented warn-and-degrade path.
+An HDR display is required to calibrate anything real (macOS/iOS Metal, Windows
+Vulkan, or Wayland Vulkan with Mesa 25.1+); on SDR systems the example still runs
+on the documented warn-and-degrade path.

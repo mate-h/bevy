@@ -9,11 +9,11 @@ operator Polyphony Digital uses in Gran Turismo 7, published with their SIGGRAPH
 "Physically Based Tone Mapping in Gran Turismo 7" (reference implementation MIT licensed,
 Copyright (c) 2025 Polyphony Digital Inc.).
 
-The operator blends a per-channel filmic curve — a power-curve toe, an exactly-linear middle
-section, and a convergent exponential shoulder — with a hue-preserving ICtCp branch
-(60% hue-preserving / 40% per-channel by default), plus a luminance-driven chroma fade so
-colors gracefully desaturate as they approach peak white instead of clipping to hard white.
-The result is a "camera-like" highlight response that still keeps hues stable.
+It blends a per-channel filmic curve with a hue-preserving ICtCp branch (60% hue-preserving /
+40% per-channel by default), plus a luminance-driven chroma fade so colors desaturate as they
+approach peak white instead of clipping to hard white — a "camera-like" highlight response
+that keeps hues stable. Unlike the LUT-based operators (AgX, TonyMcMapface, BlenderFilmic),
+GranTurismo7 is fully algorithmic and does not require the `tonemapping_luts` cargo feature.
 
 ```rust
 commands.spawn((
@@ -22,13 +22,9 @@ commands.spawn((
 ));
 ```
 
-Unlike the LUT-based operators (AgX, TonyMcMapface, BlenderFilmic), GranTurismo7 is fully
-algorithmic and does not require the `tonemapping_luts` cargo feature.
-
-The operator is natively peak-luminance aware and designed to drive both SDR and HDR
-displays, and Bevy wires up both modes end to end: on SDR targets it tone-maps against
-Gran Turismo's 250-nit paper-white calibration and rescales into the sRGB range; on HDR
-targets it runs in HDR mode and feeds the display-encoding pass directly (see below).
+The operator is peak-luminance aware and drives both SDR and HDR displays. On SDR targets it
+tone-maps against Gran Turismo's 250-nit paper-white calibration and rescales into the sRGB
+range; on HDR targets it runs in HDR mode and feeds the display-encoding pass directly.
 
 A new `GranTurismo7Params` component exposes the operator's artistic dials (`blend_ratio`,
 the chroma fade band, and the curve shape parameters). Adding it to a camera that uses
@@ -47,30 +43,25 @@ commands.spawn((
 ```
 
 When the camera renders to a target whose resolved `DisplayTarget` requests an HDR transfer
-(scRGB-linear or PQ), the operator is configured in its HDR mode
-— with or without the `GranTurismo7Params` component (the defaults are used if it is
-absent), matching the source implementation, which initializes HDR mode directly from the
-target's peak: the tone curve is rebuilt around the display's `peak_luminance_nits` (clamped
-to the operator's supported 250–10000 nit range, and to at least `paper_white_nits`), and
-the output is rescaled so `1.0` equals the display's paper white.
+(scRGB-linear, PQ, or extended-range sRGB), the operator is configured in HDR mode — with or
+without `GranTurismo7Params` (defaults are used if absent): the tone curve is rebuilt around
+the display's `peak_luminance_nits` (clamped to the supported 250–10000 nit range, and to at
+least `paper_white_nits`), and the output is rescaled so `1.0` equals the display's paper white.
 
-On those HDR views the full end-to-end pipeline is now active: the operator emits its
-**native linear Rec.2020 display-referred output** — unclamped, `[0, peak / paper_white]` —
-straight into the display-encoding pass (no intermediate Rec.709 conversion and no clamp, so
-no highlight or wide-gamut information is lost between the operator and the display signal).
-The encoder's gamut stage then becomes a true source → display transform:
+On those HDR views the operator emits its native linear Rec.2020 display-referred output —
+unclamped, `[0, peak / paper_white]` — straight into the display-encoding pass, so no highlight
+or wide-gamut information is lost between the operator and the display signal. The encoder's
+gamut stage then becomes a true source → display transform, keyed on the display's primaries
+rather than its transfer (extended-range sRGB pairs with either Rec.709 or Display-P3):
 
-- **PQ / Rec.2020 targets**: identity — GT7's output is already in the signal's primaries.
-- **scRGB targets** (Rec.709-coordinate by definition): a full-precision Rec.2020 → Rec.709
-  conversion, with the ACES-RGC-style perceptual out-of-gamut compression now active by
-  default (`DisplayGamutCompression::Auto`) so wide-gamut colors compress gracefully instead
-  of clipping per channel.
+- **PQ targets** (Rec.2020 primaries): identity — GT7's output is already in the signal's primaries.
+- **Rec.709-primaried targets** (scRGB, and Rec.709 extended-range sRGB / "web HDR"): a
+  full-precision Rec.2020 → Rec.709 contraction.
+- **Display-P3 targets** (Display-P3 extended-range sRGB): a Rec.2020 → Display-P3 contraction.
 
-One documented limitation of the Rec.2020-native path: Bevy UI composites its
-Rec.709-authored colors into the post-tonemap buffer unconverted, so on a GT7-HDR view
-saturated UI colors are reinterpreted in the wider primaries and oversaturate slightly
-(grays and whites are unaffected — the white point is shared). Converting UI colors per
-view to match the display gamut is future work.
+The contraction paths can produce out-of-gamut components, for which the ACES-RGC-style
+out-of-gamut compression is now active by default (`DisplayGamutCompression::Auto`)
+so wide-gamut colors compress gracefully instead of clipping per channel.
 
 On plain SDR targets, cameras without the component are completely unaffected, and SDR
 output remains byte-identical.
