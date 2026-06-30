@@ -27,7 +27,7 @@ use bevy_input::ButtonInput;
 use bevy_log::info;
 use bevy_math::curve::{Interval, SampleAutoCurve};
 use bevy_math::Curve;
-use bevy_math::{ops::exp, Dir3, EulerRot, Quat, StableInterpolate, Vec2, Vec3};
+use bevy_math::{ops::exp, Dir3, Quat, StableInterpolate, Vec2, Vec3};
 use bevy_time::{Real, Time};
 use bevy_transform::prelude::Transform;
 use bevy_window::{CursorGrabMode, CursorOptions, Window};
@@ -129,11 +129,23 @@ pub struct FreeCamera {
     /// (it will be multiplied by a factor of 1.0 per positive and negative unit scroll).
     pub scroll_factor: f32,
     /// Friction factor used to exponentially decay [`velocity`](FreeCameraState::velocity) over time.
+    ///
+    /// Only used when [`damping`](FreeCamera::damping) is zero.
     pub friction: f32,
+    /// Exponential smoothing factor for translation.
+    ///
+    /// Each frame the camera lerps towards [`FreeCameraState::target_translation`].
+    /// Look input is always applied immediately.
+    ///
+    /// Higher values converge faster. A value of `0.0` disables smoothing and applies input
+    /// immediately (using [`friction`](FreeCamera::friction) for movement deceleration instead).
+    pub damping: f32,
     /// Speed of camera rotation to snapped axis in radians/second
     pub rotation_speed: f32,
     /// Whether the vertical inputs translate the camera in world or local space axes.
     pub vertical_movement_axis: VerticalMovementAxis,
+    /// The axis treated as "up" for camera rotation and [`VerticalMovementAxis::World`] movement.
+    pub up_axis: UpAxis,
 }
 
 impl Default for FreeCamera {
@@ -158,9 +170,114 @@ impl Default for FreeCamera {
             // Approximation of ln(1.05)
             scroll_factor: 0.04879016,
             friction: 40.0,
+            damping: 12.0,
             rotation_speed: PI / 16.0 * 60.0,
             vertical_movement_axis: VerticalMovementAxis::default(),
+            up_axis: UpAxis::default(),
         }
+    }
+}
+
+/// The axis treated as "up" for camera rotation and vertical movement.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum UpAxis {
+    /// World +Y.
+    #[default]
+    World,
+    /// The camera's current [`Transform::up`].
+    Local,
+    /// A fixed world-space direction, e.g. a planetary surface normal.
+    Fixed(Dir3),
+}
+
+impl FreeCamera {
+    /// Resolves the configured up axis for the given transform.
+    pub fn resolve_up(&self, transform: &Transform) -> Vec3 {
+        match self.up_axis {
+            UpAxis::World => Vec3::Y,
+            UpAxis::Local => *transform.up(),
+            UpAxis::Fixed(dir) => *dir,
+        }
+    }
+}
+
+fn horizon_forward_reference(up: Vec3) -> Vec3 {
+    let mut forward = Vec3::NEG_Z;
+    if forward.cross(up).length_squared() < 1e-6 {
+        forward = Vec3::X;
+    }
+    (forward - up * up.dot(forward)).normalize()
+}
+
+fn rotation_from_yaw_pitch(yaw: f32, pitch: f32, up: Vec3) -> Quat {
+    let ref_horizon = horizon_forward_reference(up);
+    let yaw_rotation = Quat::from_axis_angle(up, yaw);
+    let forward_after_yaw = yaw_rotation * ref_horizon;
+    let right = forward_after_yaw.cross(up).normalize();
+    let look_dir = (Quat::from_axis_angle(right, pitch) * forward_after_yaw).normalize();
+    Transform::from_rotation(Quat::IDENTITY)
+        .looking_to(look_dir, up)
+        .rotation
+}
+
+fn apply_look_rotation(transform: &mut Transform, delta: Vec2, sensitivity: f32, up: Vec3) {
+    let scale = RADIANS_PER_DOT * sensitivity;
+    if delta.x != 0.0 {
+        transform.rotation = Quat::from_axis_angle(up, -delta.x * scale) * transform.rotation;
+    }
+    if delta.y != 0.0 {
+        let rotation_before_pitch = transform.rotation;
+        let right = transform.rotation * Vec3::X;
+        transform.rotation = Quat::from_axis_angle(right, -delta.y * scale) * transform.rotation;
+
+        let forward = transform.rotation * Vec3::NEG_Z;
+        let pitch = forward.dot(up).asin();
+        if !(pitch.is_finite() && (-FRAC_PI_2..=FRAC_PI_2).contains(&pitch)) {
+            transform.rotation = rotation_before_pitch;
+        }
+    }
+}
+
+fn sync_look_state_from_transform(state: &mut FreeCameraState, transform: &Transform, up: Vec3) {
+    let (yaw, pitch) = yaw_pitch_from_rotation(transform.rotation, up);
+    state.yaw = yaw;
+    state.pitch = pitch;
+    state.target_yaw = yaw;
+    state.target_pitch = pitch;
+}
+
+fn yaw_pitch_from_rotation(rotation: Quat, up: Vec3) -> (f32, f32) {
+    let forward = rotation * Vec3::NEG_Z;
+    let ref_horizon = horizon_forward_reference(up);
+    let pitch = forward.dot(up).asin();
+    let forward_horizon = (forward - up * forward.dot(up)).normalize();
+    let yaw = ref_horizon
+        .cross(forward_horizon)
+        .dot(up)
+        .atan2(ref_horizon.dot(forward_horizon));
+    (yaw, pitch)
+}
+
+/// Frame-rate independent interpolation factor for [`FreeCamera::damping`].
+fn damping_factor(damping: f32, dt: f32) -> f32 {
+    if damping <= 0.0 {
+        1.0
+    } else {
+        (1.0 - (-damping * dt).exp()).clamp(0.0, 1.0)
+    }
+}
+
+/// Keeps the translation target aligned when another system adjusts the camera transform.
+///
+/// This is required for floating-origin plugins such as `big_space`, which periodically
+/// recompute [`Transform::translation`] and [`CellCoord`] to preserve precision.
+fn sync_translation_target_with_external_adjustment(
+    state: &mut FreeCameraState,
+    transform: &Transform,
+) {
+    let translation_delta = transform.translation - state.applied_translation;
+    if translation_delta != Vec3::ZERO {
+        state.target_translation += translation_delta;
     }
 }
 
@@ -227,10 +344,20 @@ pub struct FreeCameraState {
     pub enabled: bool,
     /// Internal flag indicating if this controller has been initialized by the [`FreeCameraPlugin`].
     initialized: bool,
-    /// This [`FreeCamera`]'s pitch rotation.
+    /// This [`FreeCamera`]'s current pitch rotation.
     pub pitch: f32,
-    /// This [`FreeCamera`]'s yaw rotation.
+    /// This [`FreeCamera`]'s current yaw rotation.
     pub yaw: f32,
+    /// Target pitch rotation driven by look input.
+    pub target_pitch: f32,
+    /// Target yaw rotation driven by look input.
+    pub target_yaw: f32,
+    /// Target translation driven by movement input.
+    pub target_translation: Vec3,
+    /// Translation last written by this controller, used to detect external adjustments.
+    applied_translation: Vec3,
+    /// Rotation last written by this controller, used to detect external adjustments.
+    applied_rotation: Quat,
     /// Multiplier applied to movement speed.
     pub speed_multiplier: f32,
     /// This [`FreeCamera`]'s translation velocity.
@@ -247,6 +374,11 @@ impl Default for FreeCameraState {
             initialized: false,
             pitch: 0.0,
             yaw: 0.0,
+            target_pitch: 0.0,
+            target_yaw: 0.0,
+            target_translation: Vec3::ZERO,
+            applied_translation: Vec3::ZERO,
+            applied_rotation: Quat::IDENTITY,
             speed_multiplier: 1.0,
             velocity: Vec3::ZERO,
             rotation_curve: None,
@@ -282,9 +414,11 @@ pub fn run_freecamera_controller(
     };
 
     if !state.initialized {
-        let (yaw, pitch, _roll) = transform.rotation.to_euler(EulerRot::YXZ);
-        state.yaw = yaw;
-        state.pitch = pitch;
+        let up = config.resolve_up(&transform);
+        sync_look_state_from_transform(&mut state, &transform, up);
+        state.target_translation = transform.translation;
+        state.applied_translation = transform.translation;
+        state.applied_rotation = transform.rotation;
         state.initialized = true;
         info!("{}", *config);
     }
@@ -348,8 +482,12 @@ pub fn run_freecamera_controller(
         cursor_grab_change = true;
     }
     let cursor_grab = *mouse_cursor_grab || *toggle_cursor_grab;
+    let look_input = accumulated_mouse_motion.delta != Vec2::ZERO && cursor_grab;
 
-    // Update velocity
+    let up = config.resolve_up(&transform);
+    let damping_enabled = config.damping > 0.0;
+
+    // Update movement target or velocity
     if axis_input != Vec3::ZERO {
         let max_speed = if key_input.pressed(config.key_run) {
             config.run_speed * state.speed_multiplier
@@ -357,25 +495,57 @@ pub fn run_freecamera_controller(
             config.walk_speed * state.speed_multiplier
         };
         state.velocity = axis_input.normalize() * max_speed;
-    } else {
-        let friction = config.friction.clamp(0.0, f32::MAX);
-        state.velocity.smooth_nudge(&Vec3::ZERO, friction, dt);
-        if state.velocity.length_squared() < 1e-6 {
-            state.velocity = Vec3::ZERO;
+
+        if damping_enabled {
+            let target_rotation = rotation_from_yaw_pitch(state.target_yaw, state.target_pitch, up);
+            let forward = target_rotation * Vec3::NEG_Z;
+            let right = target_rotation * Vec3::X;
+            let movement_up = match config.vertical_movement_axis {
+                VerticalMovementAxis::World => up,
+                VerticalMovementAxis::Local => target_rotation * Vec3::Y,
+            };
+            let velocity = state.velocity;
+            state.target_translation +=
+                velocity.x * dt * right + velocity.y * dt * movement_up + velocity.z * dt * forward;
         }
+    } else {
+        state.velocity = Vec3::ZERO;
     }
 
-    // Apply movement update
-    if state.velocity != Vec3::ZERO {
-        let forward = *transform.forward();
-        let right = *transform.right();
-        let up = match config.vertical_movement_axis {
-            VerticalMovementAxis::World => Vec3::Y,
-            VerticalMovementAxis::Local => *transform.up(),
-        };
-        transform.translation += state.velocity.x * dt * right
-            + state.velocity.y * dt * up
-            + state.velocity.z * dt * forward;
+    if !damping_enabled {
+        if axis_input != Vec3::ZERO {
+            let forward = *transform.forward();
+            let right = *transform.right();
+            let movement_up = match config.vertical_movement_axis {
+                VerticalMovementAxis::World => config.resolve_up(&transform),
+                VerticalMovementAxis::Local => *transform.up(),
+            };
+            transform.translation += state.velocity.x * dt * right
+                + state.velocity.y * dt * movement_up
+                + state.velocity.z * dt * forward;
+            state.target_translation = transform.translation;
+            state.applied_translation = transform.translation;
+            state.applied_rotation = transform.rotation;
+        } else {
+            let friction = config.friction.clamp(0.0, f32::MAX);
+            state.velocity.smooth_nudge(&Vec3::ZERO, friction, dt);
+            if state.velocity.length_squared() < 1e-6 {
+                state.velocity = Vec3::ZERO;
+            } else {
+                let forward = *transform.forward();
+                let right = *transform.right();
+                let movement_up = match config.vertical_movement_axis {
+                    VerticalMovementAxis::World => config.resolve_up(&transform),
+                    VerticalMovementAxis::Local => *transform.up(),
+                };
+                transform.translation += state.velocity.x * dt * right
+                    + state.velocity.y * dt * movement_up
+                    + state.velocity.z * dt * forward;
+            }
+            state.target_translation = transform.translation;
+            state.applied_translation = transform.translation;
+            state.applied_rotation = transform.rotation;
+        }
     }
 
     // Handle cursor grab
@@ -399,21 +569,24 @@ pub fn run_freecamera_controller(
 
     // Handle mouse input
     if accumulated_mouse_motion.delta != Vec2::ZERO && cursor_grab {
-        // Apply look update
-        state.pitch = (state.pitch
-            - accumulated_mouse_motion.delta.y * RADIANS_PER_DOT * config.sensitivity)
-            .clamp(-PI / 2., PI / 2.);
-        state.yaw -= accumulated_mouse_motion.delta.x * RADIANS_PER_DOT * config.sensitivity;
-        transform.rotation = Quat::from_euler(EulerRot::ZYX, 0.0, state.yaw, state.pitch);
+        apply_look_rotation(
+            &mut transform,
+            accumulated_mouse_motion.delta,
+            config.sensitivity,
+            up,
+        );
+        sync_look_state_from_transform(&mut state, &transform, up);
+        state.applied_rotation = transform.rotation;
     }
 
     // Handle touch input
+    let mut touch_look_input = false;
     for touch in touch_input.iter() {
         if touch.delta() != Vec2::ZERO {
-            state.pitch = (state.pitch - touch.delta().y * RADIANS_PER_DOT * config.sensitivity)
-                .clamp(-PI / 2., PI / 2.);
-            state.yaw -= touch.delta().x * RADIANS_PER_DOT * config.sensitivity;
-            transform.rotation = Quat::from_euler(EulerRot::ZYX, 0.0, state.yaw, state.pitch);
+            touch_look_input = true;
+            apply_look_rotation(&mut transform, touch.delta(), config.sensitivity, up);
+            sync_look_state_from_transform(&mut state, &transform, up);
+            state.applied_rotation = transform.rotation;
         }
     }
     // Axis snapping
@@ -440,9 +613,9 @@ pub fn run_freecamera_controller(
             rotate_to = Some((Dir3::Y, Dir3::Z));
         }
     }
-    if let Some((dir, up)) = rotate_to {
+    if let Some((dir, snap_up)) = rotate_to {
         let start = transform.rotation;
-        let target = Transform::default().looking_to(dir, up).rotation; // I don't understand why Quat::look_to_rh produce different result.
+        let target = Transform::default().looking_to(dir, snap_up).rotation; // I don't understand why Quat::look_to_rh produce different result.
         let angle = target.angle_between(start);
         let rotation_time = angle / config.rotation_speed;
 
@@ -450,7 +623,29 @@ pub fn run_freecamera_controller(
             let curve = SampleAutoCurve::new(interval, [start, target])
                 .expect("Interval should be in bounds as start and end are finite numbers");
             state.rotation_curve = Some((0.0, curve));
+            let (target_yaw, target_pitch) = yaw_pitch_from_rotation(target, up);
+            state.target_yaw = target_yaw;
+            state.target_pitch = target_pitch;
         }
+    }
+
+    if damping_enabled && state.rotation_curve.is_none() {
+        sync_translation_target_with_external_adjustment(&mut state, &transform);
+
+        let factor = damping_factor(config.damping, dt);
+        let translation_delta = state.target_translation - transform.translation;
+        if translation_delta.length_squared() > 1e-8 {
+            transform.translation += translation_delta * factor;
+        }
+
+        if axis_input == Vec3::ZERO && !look_input && !touch_look_input {
+            if translation_delta.length_squared() < 1e-4 {
+                state.target_translation = transform.translation;
+            }
+        }
+
+        state.applied_translation = transform.translation;
+        state.applied_rotation = transform.rotation;
     }
 }
 
@@ -461,10 +656,10 @@ pub fn run_freecamera_controller(
 ///
 /// This system is typically added via the [`FreeCameraPlugin`].
 pub fn rotate_freecam_to(
-    mut query: Query<(&mut Transform, &mut FreeCameraState), With<Camera>>,
+    mut query: Query<(&mut Transform, &mut FreeCameraState, &FreeCamera), With<Camera>>,
     time: Res<Time<Real>>,
 ) {
-    let Ok((mut transform, mut state)) = query.single_mut() else {
+    let Ok((mut transform, mut state, config)) = query.single_mut() else {
         return;
     };
     if !state.enabled {
@@ -478,7 +673,12 @@ pub fn rotate_freecam_to(
     if !curve.domain().contains(*progress) {
         state.rotation_curve = None;
     }
-    let (yaw, pitch, _roll) = transform.rotation.to_euler(EulerRot::YXZ);
+    let up = config.resolve_up(&transform);
+    let (yaw, pitch) = yaw_pitch_from_rotation(transform.rotation, up);
     state.pitch = pitch;
     state.yaw = yaw;
+    state.target_pitch = pitch;
+    state.target_yaw = yaw;
+    state.applied_rotation = transform.rotation;
+    state.applied_translation = transform.translation;
 }

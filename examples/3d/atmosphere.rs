@@ -299,13 +299,9 @@ fn setup_terrain_scene(
     //     Transform::from_scale(Vec3::new(10.0, 1.0, 10.0)).with_translation(Vec3::Y * 0.5),
     // ));
 
-    commands.spawn((
-        WorldAssetRoot(
-            asset_server.load(
-                GltfAssetLabel::Scene(0).from_asset("porsche.glb"),
-            ),
-        ),
-    ));
+    commands.spawn((WorldAssetRoot(
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("porsche.glb")),
+    ),));
 
     // ground plane
     commands.spawn((
