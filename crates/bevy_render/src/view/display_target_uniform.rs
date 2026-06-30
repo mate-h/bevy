@@ -2,7 +2,8 @@
 //! component and the [`DisplayTargetUniform`] GPU uniform.
 //!
 //! [`DisplayTarget`] is authored in the main world (as a required component of
-//! `Window`, or via [`ManualDisplayTargets`] for non-window targets). This
+//! `Window`, or via [`ManualDisplayTargets`](super::window::ManualDisplayTargets)
+//! for non-window targets). This
 //! module resolves it per view each frame:
 //!
 //! 1. [`prepare_view_display_targets`] runs in

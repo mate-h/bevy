@@ -3,7 +3,7 @@
 //! window event (move / focus / monitor change), or, for the one signal that
 //! drifts with no event (the Apple EDR headroom), every frame while an HDR
 //! surface is auto-calibrating. It folds every platform's reporting asymmetry
-//! into one cross-platform value ([`normalize`]), suppresses sub-threshold
+//! into one cross-platform value (`normalize`), suppresses sub-threshold
 //! jitter ([`DisplayStateStore`]), and mirrors the result back to the main world
 //! as [`WindowDisplayState`] / [`MonitorDisplayCapability`].
 //!
@@ -336,7 +336,7 @@ pub fn poll_display_state(
 /// the window is on (resolved through [`OnMonitor`]). Runs during extraction —
 /// the render world's only window into the main world — so the value lags the
 /// read by one frame. Insert-on-change, so
-/// [`Changed`](bevy_ecs::prelude::Changed) stays a usable signal.
+/// [`Changed`] stays a usable signal.
 ///
 /// [`Monitor`]: bevy_window::Monitor
 pub fn write_back_display_state(mut main_world: ResMut<MainWorld>, store: Res<DisplayStateStore>) {

@@ -52,7 +52,7 @@ impl Sensitivity {
 /// for a [`bevy_camera::Camera`].
 ///
 /// On a view whose resolved compositing space is
-/// [`CompositingSpace::Oklab`](bevy_camera::CompositingSpace::Oklab) the
+/// [`CompositingSpace::Oklab`] the
 /// edge-detection luma reads the Oklab lightness channel directly, since the
 /// Rec.601 luma proxy is undefined on the signed Oklab chroma channels. On a
 /// [`Srgb`](bevy_camera::CompositingSpace::Srgb) view the luma proxy is left

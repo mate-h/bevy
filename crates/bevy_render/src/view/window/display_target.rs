@@ -1,6 +1,6 @@
 //! Render-world plumbing for [`DisplayTarget`].
 //!
-//! [`DisplayTarget`] lives on [`Window`](bevy_window::Window) entities as a
+//! [`DisplayTarget`] lives on [`Window`] entities as a
 //! required component (see `bevy_window`). This module covers the two cases a
 //! window component cannot:
 //!
@@ -27,7 +27,7 @@ use bevy_window::{
 use super::ExtractedWindows;
 
 /// Resource that stores the [`DisplayTarget`] for render targets that are not
-/// backed by a [`Window`](bevy_window::Window) entity.
+/// backed by a [`Window`] entity.
 ///
 /// [`RenderTarget::Window`] targets carry their [`DisplayTarget`] as a
 /// (required) component on the window entity; [`RenderTarget::Image`] and
