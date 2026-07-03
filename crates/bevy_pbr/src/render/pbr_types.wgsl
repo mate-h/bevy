@@ -119,6 +119,9 @@ struct PbrInput {
     anisotropy_B: vec3<f32>,
     is_orthographic: bool,
     flags: u32,
+    // Multiplier applied to all directional lights before cascade/contact shadows.
+    // Defaults to 1.0. Ignores the shadow-receiver flag.
+    directional_shadow_factor: f32,
 };
 
 // Creates a PbrInput with default values
@@ -146,6 +149,8 @@ fn pbr_input_new() -> PbrInput {
     pbr_input.lightmap_light = vec3<f32>(0.0);
 
     pbr_input.flags = 0u;
+
+    pbr_input.directional_shadow_factor = 1.0;
 
     return pbr_input;
 }
