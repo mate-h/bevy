@@ -23,7 +23,7 @@ use bevy_ecs::{
 };
 use bevy_image::{
     CompressedImageFormats, Image, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
-    ImageType, TextureError,
+    ImageType, SourceColorPrimaries, TextureError,
 };
 use bevy_light::{DirectionalLight, PointLight, SpotLight};
 use bevy_math::{Mat4, Vec3};
@@ -116,10 +116,10 @@ pub enum GltfError {
     InvalidImageUri(String, ParseAssetPathError),
     /// Failed to read bytes from an asset path.
     #[error("failed to read bytes from an asset path: {0}")]
-    ReadAssetBytesError(#[from] Box<ReadAssetBytesError>),
+    ReadAssetBytesError(#[from] ReadAssetBytesError),
     /// Failed to load asset from an asset path.
     #[error("failed to load asset from an asset path: {0}")]
-    AssetLoadError(#[from] Box<AssetLoadError>),
+    AssetLoadError(#[from] AssetLoadError),
     /// Missing sampler for an animation.
     #[error("Missing sampler for animation {0}")]
     #[from(ignore)]
@@ -1224,7 +1224,7 @@ async fn load_image<'a, 'b>(
             let start = view.offset();
             let end = view.offset() + view.length();
             let buffer = &buffer_data[view.buffer().index()][start..end];
-            let image = Image::from_buffer(
+            let mut image = Image::from_buffer(
                 buffer,
                 ImageType::MimeType(mime_type),
                 supported_compressed_formats,
@@ -1232,6 +1232,10 @@ async fn load_image<'a, 'b>(
                 ImageSampler::Descriptor(sampler_descriptor),
                 settings.load_materials,
             )?;
+            // glTF 2.0 core mandates sRGB (BT.709) color primaries for all textures,
+            // so stamp them explicitly. Support for a wide-gamut KHR extension would
+            // arrive together with that extension.
+            image.source_primaries = SourceColorPrimaries::Bt709;
             Ok(ImageOrPath::Image {
                 image,
                 label: GltfAssetLabel::Texture(gltf_texture.index()),
@@ -1245,15 +1249,19 @@ async fn load_image<'a, 'b>(
             if let Ok(data_uri) = DataUri::parse(uri) {
                 let bytes = data_uri.decode()?;
                 let image_type = ImageType::MimeType(data_uri.mime_type);
+                let mut image = Image::from_buffer(
+                    &bytes,
+                    mime_type.map(ImageType::MimeType).unwrap_or(image_type),
+                    supported_compressed_formats,
+                    is_srgb,
+                    ImageSampler::Descriptor(sampler_descriptor),
+                    settings.load_materials,
+                )?;
+                // glTF 2.0 core mandates sRGB (BT.709) color primaries for all
+                // textures, so stamp them explicitly.
+                image.source_primaries = SourceColorPrimaries::Bt709;
                 Ok(ImageOrPath::Image {
-                    image: Image::from_buffer(
-                        &bytes,
-                        mime_type.map(ImageType::MimeType).unwrap_or(image_type),
-                        supported_compressed_formats,
-                        is_srgb,
-                        ImageSampler::Descriptor(sampler_descriptor),
-                        settings.load_materials,
-                    )?,
+                    image,
                     label: GltfAssetLabel::Texture(gltf_texture.index()),
                 })
             } else {
@@ -1502,15 +1510,16 @@ fn load_material(
         anisotropy_texture: anisotropy.anisotropy_texture,
         // From the `KHR_materials_specular` spec:
         // <https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular#materials-with-reflectance-parameter>
-        reflectance: specular.specular_factor.unwrap_or(1.0) as f32 * 0.5,
+        reflectance: specular.specular_factor * 0.5,
         #[cfg(feature = "pbr_specular_textures")]
         specular_channel: specular.specular_channel,
         #[cfg(feature = "pbr_specular_textures")]
         specular_texture: specular.specular_texture,
-        specular_tint: match specular.specular_color_factor {
-            Some(color) => Color::linear_rgb(color[0] as f32, color[1] as f32, color[2] as f32),
-            None => Color::WHITE,
-        },
+        specular_tint: Color::linear_rgb(
+            specular.specular_color_factor[0],
+            specular.specular_color_factor[1],
+            specular.specular_color_factor[2],
+        ),
         #[cfg(feature = "pbr_specular_textures")]
         specular_tint_channel: specular.specular_color_channel,
         #[cfg(feature = "pbr_specular_textures")]
@@ -1943,10 +1952,7 @@ async fn load_buffers(
                             .path()
                             .resolve_embed_str(uri)
                             .map_err(|err| GltfError::InvalidBufferUri(uri.to_owned(), err))?;
-                        load_context
-                            .read_asset_bytes(buffer_path)
-                            .await
-                            .map_err(Box::new)?
+                        load_context.read_asset_bytes(buffer_path).await?
                     }
                 };
                 buffer_data.push(buffer_bytes);
@@ -2038,6 +2044,10 @@ impl ImageOrPath {
                 .load_builder()
                 .with_settings(move |settings: &mut ImageLoaderSettings| {
                     settings.is_srgb = is_srgb;
+                    // glTF 2.0 core mandates sRGB (BT.709) color primaries for all
+                    // textures, so stamp them explicitly. Support for a wide-gamut
+                    // KHR extension would arrive together with that extension.
+                    settings.source_primaries = Some(SourceColorPrimaries::Bt709);
                     settings.sampler = ImageSampler::Descriptor(sampler_descriptor.clone());
                     settings.asset_usage = render_asset_usages;
                 })

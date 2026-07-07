@@ -4,6 +4,7 @@ use bevy_camera::{Camera, Camera3d};
 use bevy_core_pipeline::{
     prepass::{DepthPrepass, MotionVectorPrepass, ViewPrepassTextures},
     schedule::{Core3d, Core3dSystems},
+    tonemapping::Tonemapping,
     FullscreenShader,
 };
 use bevy_diagnostic::FrameCount;
@@ -34,7 +35,7 @@ use bevy_render::{
     sync_component::{SyncComponent, SyncComponentPlugin},
     sync_world::RenderEntity,
     texture::{CachedTexture, TextureCache},
-    view::{ExtractedView, Msaa, ViewTarget},
+    view::{ExtractedView, Msaa, ViewDisplayTarget, ViewTarget},
     ExtractSchedule, MainWorld, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_utils::default;
@@ -443,12 +444,24 @@ fn prepare_taa_pipelines(
         &ExtractedCamera,
         &ExtractedView,
         &TemporalAntiAliasing,
+        Option<&Tonemapping>,
+        Option<&ViewDisplayTarget>,
     )>,
 ) -> Result<(), BevyError> {
-    for (entity, camera, view, taa_settings) in &cameras {
+    for (entity, camera, view, taa_settings, tonemapping, display_target) in &cameras {
         let mut pipeline_key = TaaPipelineKey {
             target_format: view.target_format,
-            tonemap: camera.hdr,
+            // The reversible tonemapper (`TONEMAP` def) must be applied whenever the
+            // main texture holds unbounded scene-referred values at TAA time, so that
+            // history blending and neighborhood clamping operate on a compressed
+            // range. That is the case for `Hdr` cameras, for any camera whose
+            // tonemapping operator runs in the post-process tonemapping node, which
+            // executes after TAA (i.e. every camera with `Tonemapping != None`),
+            // and for cameras on HDR-transfer display targets, whose main texture
+            // is forced to an unclamped fp16 format even with `Tonemapping::None`.
+            tonemap: camera.hdr
+                || tonemapping.is_some_and(Tonemapping::is_enabled)
+                || display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
             reset: taa_settings.reset,
         };
         let pipeline_id = pipeline

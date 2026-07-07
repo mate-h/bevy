@@ -74,8 +74,13 @@ pub struct SurfaceTexture {
 }
 
 impl SurfaceTexture {
-    pub fn present(self) {
-        self.value.into_inner().present();
+    /// Schedules this texture to be presented on its surface.
+    ///
+    /// wgpu moved presentation from `SurfaceTexture::present()` to
+    /// [`wgpu::Queue::present`], so the queue used to render to the texture
+    /// must be supplied.
+    pub fn present(self, queue: &wgpu::Queue) {
+        queue.present(self.value.into_inner());
     }
 }
 

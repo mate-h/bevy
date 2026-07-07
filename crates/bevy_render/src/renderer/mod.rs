@@ -94,6 +94,7 @@ pub fn render_system(
 
         world.resource_scope(|world, mut windows: Mut<ExtractedWindows>| {
             let views = state.get(world).unwrap();
+            let queue = world.resource::<RenderQueue>().clone();
             for window in windows.values_mut() {
                 let view_needs_present = views.iter().any(|(view_target, camera)| {
                     matches!(
@@ -103,7 +104,7 @@ pub fn render_system(
                 });
 
                 if view_needs_present || window.needs_initial_present {
-                    window.present();
+                    window.present(&queue);
                     window.needs_initial_present = false;
                 }
             }
@@ -204,7 +205,10 @@ pub async fn initialize_renderer(
                 force_shader_model: ForceShaderModelToken::default(),
                 agility_sdk: None,
             },
-            noop: wgpu::NoopBackendOptions { enable: false },
+            noop: wgpu::NoopBackendOptions {
+                enable: false,
+                ..Default::default()
+            },
         },
     };
 
@@ -250,6 +254,9 @@ pub async fn initialize_renderer(
         power_preference: options.power_preference,
         compatible_surface: surface.as_ref(),
         force_fallback_adapter,
+        // Keep adapter limits exactly as reported by the driver (wgpu's new
+        // limit-bucketing is opt-in and defaults to `false`).
+        apply_limit_buckets: false,
     };
 
     #[cfg(not(target_family = "wasm"))]

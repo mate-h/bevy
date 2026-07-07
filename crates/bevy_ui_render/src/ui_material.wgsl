@@ -3,6 +3,7 @@
     globals::Globals,
 }
 #import bevy_ui::ui_vertex_output::UiVertexOutput
+#import bevy_ui::ui_node::encode_output
 
 @group(0) @binding(0)
 var<uniform> view: View;
@@ -28,5 +29,11 @@ fn vertex(
 
 @fragment
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0);
+    let color = vec4<f32>(1.0);
+
+    // Gamut convert (Rec.709 -> buffer primaries) and writer-encode into the
+    // resolved compositing space; a no-op on default Rec.709 / Linear views.
+    // Custom UI materials that supply their own fragment shader opt in by
+    // importing and calling `encode_output` themselves.
+    return encode_output(color);
 }

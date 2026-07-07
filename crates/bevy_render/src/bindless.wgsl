@@ -10,6 +10,8 @@
 // `materials` is the bindless index table and `slot` is the index into that
 // table (which can be found in the `Mesh`).
 
+enable wgpu_binding_array;
+
 #define_import_path bevy_render::bindless
 
 #ifdef BINDLESS

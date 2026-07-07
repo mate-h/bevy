@@ -4,12 +4,18 @@ use bevy_math::{ops, Vec3, Vec4};
 /// guaranteed to produce consistent results across color spaces,
 /// but will be within a given space.
 pub trait Luminance: Sized {
-    /// Return the luminance of this color (0.0 - 1.0).
+    /// Return the luminance of this color (0.0 - 1.0 for SDR colors; HDR colors may
+    /// exceed 1.0).
     fn luminance(&self) -> f32;
 
-    /// Return a new version of this color with the given luminance. The resulting color will
-    /// be clamped to the valid range for the color space; for some color spaces, clamping
-    /// may cause the hue or chroma to change.
+    /// Return a new version of this color with the given luminance.
+    ///
+    /// For colors and target luminances within the standard SDR range (`[0.0, 1.0]`),
+    /// the resulting color is clamped to the valid SDR range for the color space; for
+    /// some color spaces, clamping may cause the hue or chroma to change. HDR colors
+    /// or HDR target luminances (above 1.0) are passed through without clamping in
+    /// color spaces that support them (such as [`LinearRgba`](crate::LinearRgba) and
+    /// [`LinearRec2020`](crate::LinearRec2020)).
     fn with_luminance(&self, value: f32) -> Self;
 
     /// Return a darker version of this color. The `amount` should be between 0.0 and 1.0.
@@ -22,8 +28,15 @@ pub trait Luminance: Sized {
 
     /// Return a lighter version of this color. The `amount` should be between 0.0 and 1.0.
     /// The amount represents an absolute increase in luminance, and is distributive:
-    /// `color.lighter(a).lighter(b) == color.lighter(a + b)`. Colors are clamped to white
-    /// if the amount would cause them to go above white.
+    /// `color.lighter(a).lighter(b) == color.lighter(a + b)`.
+    ///
+    /// Colors within the standard SDR range are clamped to white if the amount would
+    /// cause them to go above white. Colors that are already brighter than standard
+    /// white (HDR) are lightened without an upper clamp. In component-based RGB
+    /// spaces ([`LinearRgba`](crate::LinearRgba), [`LinearRec2020`](crate::LinearRec2020))
+    /// a color counts as HDR when its luminance *or* any color channel exceeds `1.0`
+    /// (the same predicate as [`Luminance::with_luminance`]); in
+    /// luminance/lightness-based spaces, when its luminance/lightness exceeds `1.0`.
     ///
     /// For a relative increase in luminance, you can simply `mix()` with white.
     fn lighter(&self, amount: f32) -> Self;
@@ -217,6 +230,7 @@ mod tests {
         verify_gray::<crate::Hwba>();
         verify_gray::<crate::Laba>();
         verify_gray::<crate::Lcha>();
+        verify_gray::<crate::LinearRec2020>();
         verify_gray::<crate::LinearRgba>();
         verify_gray::<crate::Oklaba>();
         verify_gray::<crate::Oklcha>();

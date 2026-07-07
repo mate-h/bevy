@@ -8,6 +8,12 @@
     fullscreen_vertex_shader::FullscreenVertexOutput,
     tonemapping::{tone_mapping, screen_space_dither},
 }
+#ifdef SRGB_COMPOSITING
+#import bevy_render::color_operations::{srgb_to_linear, linear_to_srgb}
+#endif
+#ifdef OKLAB_COMPOSITING
+#import bevy_render::color_operations::{oklab_to_linear_rgb, linear_rgb_to_oklab}
+#endif
 
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -20,7 +26,20 @@
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let hdr_color = textureSample(hdr_texture, hdr_sampler, in.uv);
 
+    // When the view composites in an encoded space (`CompositingSpace::Srgb`
+    // or `CompositingSpace::Oklab`), the main pass shaders encode their
+    // scene-linear output before writing it (so blending happens in the
+    // encoded space) and the upscaling blit decodes on the way out. This pass
+    // must respect the same buffer convention: decode to scene-linear before
+    // tone mapping, and re-encode the tone-mapped result before writing it
+    // back.
+#ifdef SRGB_COMPOSITING
+    var output_rgb = tone_mapping(vec4(srgb_to_linear(hdr_color.rgb), hdr_color.a), view.color_grading).rgb;
+#else ifdef OKLAB_COMPOSITING
+    var output_rgb = tone_mapping(vec4(oklab_to_linear_rgb(hdr_color.rgb), hdr_color.a), view.color_grading).rgb;
+#else
     var output_rgb = tone_mapping(hdr_color, view.color_grading).rgb;
+#endif
 
 #ifdef DEBAND_DITHER
     output_rgb = powsafe(output_rgb.rgb, 1.0 / 2.2);
@@ -28,6 +47,13 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // This conversion back to linear space is required because our output texture format is
     // SRGB; the GPU will assume our output is linear and will apply an SRGB conversion.
     output_rgb = powsafe(output_rgb.rgb, 2.2);
+#endif
+
+#ifdef SRGB_COMPOSITING
+    output_rgb = linear_to_srgb(output_rgb);
+#endif
+#ifdef OKLAB_COMPOSITING
+    output_rgb = linear_rgb_to_oklab(output_rgb);
 #endif
 
     return vec4<f32>(output_rgb, hdr_color.a);

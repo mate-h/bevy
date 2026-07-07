@@ -63,8 +63,10 @@ pub mod storage;
 pub mod sync_component;
 pub mod sync_world;
 pub mod texture;
+pub mod transfer_functions;
 pub mod uniform;
 pub mod view;
+pub mod working_color_space;
 
 /// The render prelude.
 ///
@@ -93,6 +95,7 @@ use crate::{
     storage::StoragePlugin,
     texture::TexturePlugin,
     view::{ViewPlugin, WindowRenderPlugin},
+    working_color_space::WorkingColorSpace,
 };
 use alloc::sync::Arc;
 use batching::gpu_preprocessing::BatchingPlugin;
@@ -128,6 +131,17 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct RenderPlugin {
     pub render_creation: RenderCreation,
+    /// The color primaries of the renderer's scene-referred working space.
+    ///
+    /// Defaults to [`WorkingColorSpace::Rec709`], where the working-space
+    /// conversions are identities. This is a project-global axis read
+    /// exactly once, when the plugin builds: changing the extracted
+    /// [`WorkingColorSpace`] resource at runtime has no effect, because
+    /// render pipelines are specialized against it at startup.
+    ///
+    /// See [`working_color_space`] for the full semantics of
+    /// [`WorkingColorSpace::Rec2020`].
+    pub working_color_space: WorkingColorSpace,
     /// If `true`, disables asynchronous pipeline compilation.
     /// This has no effect on macOS, Wasm, iOS, or without the `multi_threaded` feature.
     pub synchronous_pipeline_compilation: bool,
@@ -353,7 +367,16 @@ impl Plugin for RenderPlugin {
         load_shader_library!(app, "utils.wgsl");
         load_shader_library!(app, "maths.wgsl");
         load_shader_library!(app, "color_operations.wgsl");
+        load_shader_library!(app, "transfer_functions.wgsl");
+        load_shader_library!(app, "working_color_space.wgsl");
         load_shader_library!(app, "bindless.wgsl");
+
+        // The working color space is a project-global, immutable axis: insert
+        // it into the main world (for user introspection and extract-side
+        // reads) and, below, into the render world (where pipelines
+        // specialize against it in `RenderStartup`).
+        app.insert_resource(self.working_color_space);
+        app.register_type::<WorkingColorSpace>();
 
         if insert_future_resources(&self.render_creation, app.world_mut()) {
             // We only create the render world and set up extraction if we
@@ -388,6 +411,9 @@ impl Plugin for RenderPlugin {
         app.init_resource::<RenderAssetBytesPerFrame>()
             .init_resource::<RenderErrorHandler>();
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            // Immutable copy for `RenderStartup` pipeline initialization and
+            // render-world prepare/extract systems.
+            render_app.insert_resource(self.working_color_space);
             render_app.init_resource::<RenderScheduleOrder>();
             render_app.init_resource::<RenderAssetBytesPerFrameLimiter>();
             render_app.init_gpu_resource::<renderer::PendingCommandBuffers>();

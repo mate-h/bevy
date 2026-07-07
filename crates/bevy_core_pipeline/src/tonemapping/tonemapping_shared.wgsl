@@ -11,6 +11,18 @@
     dt_lut_sampler,
 }
 
+// Only pulled in when the Gran Turismo 7 operator is selected, so no other
+// specialization references this import.
+#ifdef TONEMAP_METHOD_GRAN_TURISMO_7
+#import bevy_core_pipeline::tonemapping_gt7::tone_mapping_gran_turismo_7
+#endif
+
+// Only pulled in when the project opted into the Rec.2020 working space, so
+// default (Rec.709) projects do not reference this import.
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec2020_to_rec709
+#endif
+
 // Half the size of the crossfade region between shadows and midtones and
 // between midtones and highlights. This value, 0.1, corresponds to 10% of the
 // gamut on either side of the cutoff point.
@@ -377,6 +389,34 @@ fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     var color = max(in.rgb, vec3(0.0));
     var color_grading = in_color_grading;   // So we can take pointers to it.
 
+#ifdef WORKING_COLOR_SPACE_REC2020
+#ifndef TONEMAP_METHOD_GRAN_TURISMO_7
+    // The scene buffer holds linear Rec.2020 working-space values, but every
+    // operator below (and the color grading stack: white balance, sectional
+    // grading, saturation) is fit to Rec.709 primaries and cannot be rebaked
+    // (the AgX / Tony McMapface / Blender Filmic LUTs have no algorithmic
+    // source). Convert to Rec.709 at the pass entry; the output contract of
+    // this pass for these operators (Rec.709 display-linear, 1.0 = paper
+    // white) is unchanged, so the UI pass, FXAA/SMAA luma weights, the
+    // display encoder, and the sRGB blit chain all see exactly what they saw
+    // before. Working-space colors outside the Rec.709 gamut are clipped
+    // here (documented limitation of Rec.709-fit operators under the wide
+    // working space).
+    //
+    // The Gran Turismo 7 operator is Rec.2020-native and instead skips its
+    // own Rec.709 → Rec.2020 input expansion (see gt7.wgsl); for GT7 the
+    // grading stack above the operator runs on Rec.2020 values with its
+    // Rec.709-fit constants (documented caveat). GT7 is also the one
+    // operator whose OUTPUT can be Rec.2020: under TONEMAP_OUTPUT_REC2020
+    // (HDR-transfer targets only) it emits native Rec.2020 for the display
+    // encoder, and the post-tonemapping `saturation()` below, the deband
+    // dither, and FXAA/SMAA luma weights run on Rec.2020 values with
+    // Rec.709-fit constants on those views (documented caveat; SDR views are
+    // unaffected).
+    color = max(rec2020_to_rec709(color), vec3(0.0));
+#endif
+#endif
+
     // Rotate hue if needed, by converting to and from HSV. Remember that hue is
     // an angle, so it needs to be modulo 2π.
 #ifdef HUE_ROTATE
@@ -405,6 +445,10 @@ fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     // tone_mapping
 #ifdef TONEMAP_METHOD_NONE
     color = color;
+#else ifdef TONEMAP_METHOD_LINEAR
+    // No tone curve: grading, dither, and the working-space conversion at
+    // the pass entry still apply; output stays unbounded display-linear.
+    color = color;
 #else ifdef TONEMAP_METHOD_REINHARD
     color = tonemapping_reinhard(color.rgb);
 #else ifdef TONEMAP_METHOD_REINHARD_LUMINANCE
@@ -422,6 +466,8 @@ fn tone_mapping(in: vec4<f32>, in_color_grading: ColorGrading) -> vec4<f32> {
     color = sample_blender_filmic_lut(color.rgb);
 #else ifdef TONEMAP_METHOD_PBR_NEUTRAL
     color = tonemapping_pbr_neutral(color.rgb);
+#else ifdef TONEMAP_METHOD_GRAN_TURISMO_7
+    color = tone_mapping_gran_turismo_7(color.rgb);
 #endif
 
     // Perceptual post tonemapping grading

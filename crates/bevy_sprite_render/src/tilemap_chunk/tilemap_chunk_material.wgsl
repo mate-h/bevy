@@ -4,6 +4,10 @@
     mesh2d_vertex_output::VertexOutput,
 }
 
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec709_to_rec2020
+#endif
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var tileset: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var tileset_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var tile_data: texture_2d<u32>;
@@ -65,7 +69,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let tex_color = textureSample(tileset, tileset_sampler, local_uv, tile.tileset_index);
+#ifdef WORKING_COLOR_SPACE_REC2020
+    // The composed color converts into the Rec.2020 working space once,
+    // after composition (see the working-space release notes).
+    let composed_color = tex_color * tile.color;
+    let final_color = vec4(rec709_to_rec2020(composed_color.rgb), composed_color.a);
+#else
     let final_color = tex_color * tile.color;
+#endif
 
     if (final_color.a < 0.001) {
         discard;

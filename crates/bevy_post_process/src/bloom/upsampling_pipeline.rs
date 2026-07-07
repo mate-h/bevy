@@ -1,7 +1,7 @@
 use bevy_core_pipeline::FullscreenShader;
 
 use super::{
-    downsampling_pipeline::BloomUniforms, Bloom, BloomCompositeMode, BLOOM_TEXTURE_FORMAT,
+    bloom_texture_format, downsampling_pipeline::BloomUniforms, Bloom, BloomCompositeMode,
 };
 use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_ecs::{
@@ -14,10 +14,11 @@ use bevy_render::{
         binding_types::{sampler, texture_2d, uniform_buffer},
         *,
     },
-    view::ExtractedView,
+    view::{ExtractedView, ViewDisplayTarget},
 };
 use bevy_shader::Shader;
-use bevy_utils::default;
+use bevy_utils::{default, once};
+use tracing::warn;
 
 #[derive(Component)]
 pub struct UpsamplingPipelineIds {
@@ -134,15 +135,29 @@ pub fn prepare_upsampling_pipeline(
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<BloomUpsamplingPipeline>>,
     pipeline: Res<BloomUpsamplingPipeline>,
-    views: Query<(&ExtractedView, Entity, &Bloom)>,
+    views: Query<(&ExtractedView, Entity, &Bloom, Option<&ViewDisplayTarget>)>,
 ) {
-    for (view, entity, bloom) in &views {
+    for (view, entity, bloom, display_target) in &views {
+        // `effective_composite_mode`: the GT7 glare scatter model derives
+        // its blend constants as energy-conserving lerp factors and forces
+        // that blend state; `Aesthetic` uses the configured mode unchanged.
+        let composite_mode = bloom.effective_composite_mode();
+        if composite_mode != bloom.composite_mode {
+            once!(warn!(
+                "Bloom composite_mode Additive is ignored under BloomScatterModel::Gt7Glare: \
+                the glare blend constants are solved as an energy-conserving lerp chain"
+            ));
+        }
+
         let pipeline_id = pipelines.specialize(
             &pipeline_cache,
             &pipeline,
             BloomUpsamplingPipelineKeys {
-                composite_mode: bloom.composite_mode,
-                target_format: BLOOM_TEXTURE_FORMAT,
+                composite_mode,
+                // The intermediate upsample passes render into the bloom
+                // pyramid, whose format is per-view (fp16 on HDR display
+                // targets); the final pass below targets the view target.
+                target_format: bloom_texture_format(display_target),
             },
         );
 
@@ -150,7 +165,7 @@ pub fn prepare_upsampling_pipeline(
             &pipeline_cache,
             &pipeline,
             BloomUpsamplingPipelineKeys {
-                composite_mode: bloom.composite_mode,
+                composite_mode,
                 target_format: view.target_format,
             },
         );

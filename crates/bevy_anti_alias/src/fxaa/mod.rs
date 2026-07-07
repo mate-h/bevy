@@ -1,6 +1,6 @@
 use bevy_app::prelude::*;
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
-use bevy_camera::Camera;
+use bevy_camera::{Camera, CompositingSpace};
 use bevy_core_pipeline::{
     schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems},
     tonemapping::tonemapping,
@@ -16,10 +16,10 @@ use bevy_render::{
         *,
     },
     renderer::RenderDevice,
-    view::ExtractedView,
+    view::{ExtractedView, ResolvedCompositionSpaces, ViewDisplayTarget},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 use bevy_utils::default;
 
 mod node;
@@ -50,6 +50,15 @@ impl Sensitivity {
 
 /// A component for enabling Fast Approximate Anti-Aliasing (FXAA)
 /// for a [`bevy_camera::Camera`].
+///
+/// On a view whose resolved compositing space is
+/// [`CompositingSpace::Oklab`] the
+/// edge-detection luma reads the Oklab lightness channel directly, since the
+/// Rec.601 luma proxy is undefined on the signed Oklab chroma channels. On a
+/// [`Srgb`](bevy_camera::CompositingSpace::Srgb) view the luma proxy is left
+/// unchanged: FXAA's reference design expects a nonlinear signal, and the
+/// `sqrt` proxy on an already-sRGB-encoded buffer only double-compresses the
+/// thresholds rather than breaking them.
 #[derive(Reflect, Component, Clone, ExtractComponent)]
 #[reflect(Component, Default, Clone)]
 #[extract_component_filter(With<Camera>)]
@@ -160,22 +169,61 @@ pub struct FxaaPipelineKey {
     edge_threshold: Sensitivity,
     edge_threshold_min: Sensitivity,
     target_format: TextureFormat,
+    /// Whether the view's resolved display target transfer is HDR; see
+    /// [`ViewDisplayTarget::is_hdr_transfer`].
+    ///
+    /// The post-tonemap input on such views is paper-white-relative
+    /// display-linear and exceeds 1.0, which would defeat FXAA's absolute
+    /// `EDGE_THRESHOLD_MIN` presets and its `sqrt` perceptual luma proxy, so
+    /// the shader compiles with the `HDR_DISPLAY_TARGET` def and saturates
+    /// the edge-detection luma to [0, 1]. SDR views keep the def-less
+    /// pipeline byte-for-byte.
+    hdr: bool,
+    /// Whether the view's resolved compositing space is
+    /// [`CompositingSpace::Oklab`] (the phase-1 [`ResolvedCompositionSpaces`]
+    /// value, never the camera's raw request).
+    ///
+    /// An Oklab buffer holds Oklab triplets whose a/b chroma channels are
+    /// signed, so the Rec.601 luma dot can go negative and the `sqrt`
+    /// perceptual proxy then yields a NaN edge metric. Under this flag the
+    /// shader compiles with the `OKLAB_COMPOSITING` def and reads the Oklab L
+    /// channel directly as the edge-detection luma. Non-Oklab views keep the
+    /// def-less pipeline byte-for-byte.
+    oklab_compositing: bool,
+}
+
+/// The shader-def vector for an [`FxaaPipelineKey`]. Pure so the def-vector
+/// contract can be unit-tested without a render device.
+///
+/// Every conditional def is pushed only when its key field is set, so the
+/// default `hdr: false, oklab_compositing: false` key yields the same vector
+/// as a key without either field.
+fn fxaa_shader_defs(key: &FxaaPipelineKey) -> Vec<ShaderDefVal> {
+    let mut shader_defs = vec![
+        format!("EDGE_THRESH_{}", key.edge_threshold.get_str()).into(),
+        format!("EDGE_THRESH_MIN_{}", key.edge_threshold_min.get_str()).into(),
+    ];
+    if key.hdr {
+        shader_defs.push("HDR_DISPLAY_TARGET".into());
+    }
+    if key.oklab_compositing {
+        shader_defs.push("OKLAB_COMPOSITING".into());
+    }
+    shader_defs
 }
 
 impl SpecializedRenderPipeline for FxaaPipeline {
     type Key = FxaaPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let shader_defs = fxaa_shader_defs(&key);
         RenderPipelineDescriptor {
             label: Some("fxaa".into()),
             layout: vec![self.texture_bind_group.clone()],
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.fragment_shader.clone(),
-                shader_defs: vec![
-                    format!("EDGE_THRESH_{}", key.edge_threshold.get_str()).into(),
-                    format!("EDGE_THRESH_MIN_{}", key.edge_threshold_min.get_str()).into(),
-                ],
+                shader_defs,
                 targets: vec![Some(ColorTargetState {
                     format: key.target_format,
                     blend: None,
@@ -193,9 +241,16 @@ pub fn prepare_fxaa_pipelines(
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<FxaaPipeline>>,
     fxaa_pipeline: Res<FxaaPipeline>,
-    cameras: Query<(Entity, &ExtractedView, &Fxaa), With<ExtractedCamera>>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
+    cameras: Query<(
+        Entity,
+        &ExtractedCamera,
+        &ExtractedView,
+        &Fxaa,
+        Option<&ViewDisplayTarget>,
+    )>,
 ) {
-    for (entity, view, fxaa) in &cameras {
+    for (entity, camera, view, fxaa, display_target) in &cameras {
         if !fxaa.enabled {
             continue;
         }
@@ -206,11 +261,85 @@ pub fn prepare_fxaa_pipelines(
                 edge_threshold: fxaa.edge_threshold,
                 edge_threshold_min: fxaa.edge_threshold_min,
                 target_format: view.target_format,
+                // Missing `ViewDisplayTarget` means plain SDR (see its docs).
+                hdr: display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer),
+                // The phase-1 resolved space, not the camera's raw request: a
+                // signed-a/b Oklab buffer needs the Oklab-L luma path.
+                oklab_compositing: resolved_spaces.get(entity, camera.compositing_space)
+                    == Some(CompositingSpace::Oklab),
             },
         );
 
         commands
             .entity(entity)
             .insert(CameraFxaaPipeline { pipeline_id });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_key(hdr: bool, oklab_compositing: bool) -> FxaaPipelineKey {
+        FxaaPipelineKey {
+            edge_threshold: Sensitivity::High,
+            edge_threshold_min: Sensitivity::High,
+            target_format: TextureFormat::Rgba8UnormSrgb,
+            hdr,
+            oklab_compositing,
+        }
+    }
+
+    /// The default `oklab_compositing: false` key produces the same def vector
+    /// as before the field existed, for both `hdr` values: no `OKLAB_COMPOSITING`
+    /// def is pushed, so non-Oklab pipelines stay byte-identical.
+    #[test]
+    fn non_oklab_def_vector_is_byte_identical() {
+        let sdr = fxaa_shader_defs(&base_key(false, false));
+        assert_eq!(
+            sdr,
+            vec![
+                ShaderDefVal::from("EDGE_THRESH_HIGH"),
+                ShaderDefVal::from("EDGE_THRESH_MIN_HIGH"),
+            ]
+        );
+        assert!(!sdr.contains(&ShaderDefVal::from("OKLAB_COMPOSITING")));
+
+        let hdr = fxaa_shader_defs(&base_key(true, false));
+        assert_eq!(
+            hdr,
+            vec![
+                ShaderDefVal::from("EDGE_THRESH_HIGH"),
+                ShaderDefVal::from("EDGE_THRESH_MIN_HIGH"),
+                ShaderDefVal::from("HDR_DISPLAY_TARGET"),
+            ]
+        );
+        assert!(!hdr.contains(&ShaderDefVal::from("OKLAB_COMPOSITING")));
+    }
+
+    /// `oklab_compositing: true` appends exactly the `OKLAB_COMPOSITING` def,
+    /// independently of the `hdr` flag.
+    #[test]
+    fn oklab_def_present_only_when_set() {
+        let sdr = fxaa_shader_defs(&base_key(false, true));
+        assert_eq!(
+            sdr,
+            vec![
+                ShaderDefVal::from("EDGE_THRESH_HIGH"),
+                ShaderDefVal::from("EDGE_THRESH_MIN_HIGH"),
+                ShaderDefVal::from("OKLAB_COMPOSITING"),
+            ]
+        );
+
+        let hdr = fxaa_shader_defs(&base_key(true, true));
+        assert_eq!(
+            hdr,
+            vec![
+                ShaderDefVal::from("EDGE_THRESH_HIGH"),
+                ShaderDefVal::from("EDGE_THRESH_MIN_HIGH"),
+                ShaderDefVal::from("HDR_DISPLAY_TARGET"),
+                ShaderDefVal::from("OKLAB_COMPOSITING"),
+            ]
+        );
     }
 }

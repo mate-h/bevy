@@ -16,8 +16,8 @@ use bevy::{
     light::{
         atmosphere::{Falloff, PhaseFunction, ScatteringMedium, ScatteringTerm},
         light_consts::lux,
-        Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume,
-        VolumetricFog, VolumetricLight,
+        Atmosphere, AtmosphereEnvironmentMapLight, FogVolume, SunDisk, VolumetricFog,
+        VolumetricLight,
     },
     pbr::{
         AtmosphereMode, AtmosphereSettings, CloudLayer, DefaultOpaqueRendererMethod,
@@ -84,6 +84,7 @@ fn atmosphere_controls(
     mut camera_settings: Query<&mut AtmosphereSettings, With<Camera3d>>,
     mut atmosphere_entities: Query<(Entity, Option<&mut CloudLayer>), With<Atmosphere>>,
     mut commands: Commands,
+    mut sun_disks: Query<&mut SunDisk, With<DirectionalLight>>,
     atmosphere_presets: Res<AtmospherePresets>,
     mut game_state: ResMut<GameState>,
     mut camera_exposure: Query<&mut Exposure, With<Camera3d>>,
@@ -93,16 +94,22 @@ fn atmosphere_controls(
         for (mut atmosphere, mut transform) in &mut planet_atmosphere {
             *atmosphere = Atmosphere::earth(atmosphere_presets.earth.clone());
             *transform = GlobalTransform::from_translation(-Vec3::Y * atmosphere.inner_radius);
-            println!("Switched to Earth atmosphere");
         }
+        for mut sun_disk in &mut sun_disks {
+            sun_disk.angular_size = SunDisk::EARTH.angular_size;
+        }
+        println!("Switched to Earth atmosphere");
     }
 
     if keyboard_input.just_pressed(KeyCode::Digit4) {
         for (mut atmosphere, mut transform) in &mut planet_atmosphere {
             *atmosphere = Atmosphere::mars(atmosphere_presets.mars.clone());
             *transform = GlobalTransform::from_translation(-Vec3::Y * atmosphere.inner_radius);
-            println!("Switched to Mars atmosphere");
         }
+        for mut sun_disk in &mut sun_disks {
+            sun_disk.angular_size = SunDisk::MARS.angular_size;
+        }
+        println!("Switched to Mars atmosphere");
     }
 
     if keyboard_input.just_pressed(KeyCode::Digit1) {
@@ -317,6 +324,7 @@ fn setup_terrain_scene(
         },
         Transform::from_xyz(1.0, 0.4, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         VolumetricLight,
+        SunDisk::EARTH,
     ));
 
     // // spawn the fog volume

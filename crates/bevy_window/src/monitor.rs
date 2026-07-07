@@ -17,6 +17,24 @@ use {bevy_ecs::prelude::ReflectComponent, bevy_reflect::Reflect};
 ///
 /// This component is synchronized with `winit` through `bevy_winit`, but is effectively
 /// read-only as `winit` does not support changing monitor properties.
+///
+/// # HDR capability metadata
+///
+/// `Monitor` itself carries only geometry and refresh information. A display's
+/// luminance, primaries, and bit depth — when the platform reports them — live
+/// in the additive [`MonitorDisplayCapability`](crate::MonitorDisplayCapability)
+/// component on the same entity, populated by the renderer's display-sensing
+/// poll. Its absence means the platform reports nothing, never that the display
+/// is SDR.
+///
+/// Display *calibration* (the values the renderer encodes for) remains the
+/// user-authoritative [`DisplayTarget`](crate::DisplayTarget) on each
+/// [`Window`](crate::Window); the engine merges sensed capability into the
+/// derived [`EffectiveDisplayTarget`](crate::EffectiveDisplayTarget) only for
+/// fields whose [`DisplayCalibrationPolicy`](crate::DisplayCalibrationPolicy)
+/// opts in. The [`WindowMonitorChanged`](crate::WindowMonitorChanged) event
+/// signals when a window moves to a different monitor and recalibration may be
+/// warranted.
 #[derive(Component, Debug, Clone)]
 #[require(HasWindows)]
 #[cfg_attr(

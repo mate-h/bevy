@@ -5,7 +5,7 @@ use crate::{
 };
 use bevy_asset::{AssetId, RenderAssetUsages};
 use bevy_ecs::system::{lifetimeless::SRes, SystemParamItem};
-use bevy_image::{Image, ImageSampler};
+use bevy_image::{Image, ImageSampler, SourceColorPrimaries};
 use bevy_log::warn;
 use bevy_math::{AspectRatio, UVec2};
 use wgpu::{Extent3d, TexelCopyBufferLayout, TextureFormat, TextureUsages};
@@ -21,6 +21,17 @@ pub struct GpuImage {
     pub texture_descriptor: TextureDescriptor<Option<&'static str>, &'static [TextureFormat]>,
     pub texture_view_descriptor: Option<TextureViewDescriptor<Option<&'static str>>>,
     pub had_data: bool,
+    /// The color primaries the source [`Image`]'s pixel data was authored
+    /// against, propagated verbatim from [`Image::source_primaries`].
+    ///
+    /// This is metadata only: no conversion is performed at upload time.
+    /// Under `WorkingColorSpace::Rec2020` the shader-side sampling seams
+    /// currently assume Rec.709-authored color textures globally; this field
+    /// exists so that working-space-aware consumers can grow a per-texture
+    /// escape hatch (e.g. skipping the conversion for textures stamped
+    /// [`SourceColorPrimaries::Bt2020`]) without re-plumbing the asset
+    /// pipeline.
+    pub source_primaries: SourceColorPrimaries,
 }
 
 impl RenderAsset for GpuImage {
@@ -176,6 +187,7 @@ impl RenderAsset for GpuImage {
             texture_descriptor: image.texture_descriptor,
             texture_view_descriptor: image.texture_view_descriptor,
             had_data,
+            source_primaries: image.source_primaries,
         })
     }
 }

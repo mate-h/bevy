@@ -9,6 +9,12 @@
 #import bevy_pbr::lighting::{F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT}
 #import bevy_pbr::clustered_forward::ClusterableObjectIndexRanges
 
+// Only pulled in when the project opted into the Rec.2020 working space, so
+// default (Rec.709) projects do not reference this import.
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec709_to_rec2020
+#endif
+
 // The maximum representable value in a 32-bit floating point number.
 const FLOAT_MAX: f32 = 3.40282347e+38;
 
@@ -212,6 +218,14 @@ fn compute_radiances(
         radiances.radiance /= total_weight;
     }
 
+#ifdef WORKING_COLOR_SPACE_REC2020
+    // Environment maps are assumed Rec.709-authored: convert the sampled
+    // radiance into the Rec.2020 working space (no per-texture escape hatch
+    // yet; see `GpuImage::source_primaries`).
+    radiances.irradiance = rec709_to_rec2020(radiances.irradiance);
+    radiances.radiance = rec709_to_rec2020(radiances.radiance);
+#endif
+
     return radiances;
 }
 
@@ -278,6 +292,14 @@ fn compute_radiances(
         bindings::environment_map_sampler,
         radiance_sample_dir,
         radiance_level).rgb * intensity;
+
+#ifdef WORKING_COLOR_SPACE_REC2020
+    // Environment maps are assumed Rec.709-authored: convert the sampled
+    // radiance into the Rec.2020 working space (no per-texture escape hatch
+    // yet; see `GpuImage::source_primaries`).
+    radiances.irradiance = rec709_to_rec2020(radiances.irradiance);
+    radiances.radiance = rec709_to_rec2020(radiances.radiance);
+#endif
 
     return radiances;
 }

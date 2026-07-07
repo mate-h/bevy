@@ -20,11 +20,15 @@ mod buffers;
 mod compensation_curve;
 mod pipeline;
 mod settings;
+#[cfg(test)]
+mod tests;
+mod white_balance;
 
 use buffers::{extract_buffers, prepare_buffers, AutoExposureBuffers};
 pub use compensation_curve::{AutoExposureCompensationCurve, AutoExposureCompensationCurveError};
 use pipeline::{AutoExposurePass, AutoExposurePipeline, ViewAutoExposurePipeline};
-pub use settings::AutoExposure;
+pub use settings::{AutoExposure, AutoExposureExternalReference, PhysiologicalAdaptation};
+pub use white_balance::AutoWhiteBalance;
 
 use crate::auto_exposure::{
     compensation_curve::GpuAutoExposureCompensationCurve, pipeline::init_auto_exposure_pipeline,
@@ -34,14 +38,22 @@ use bevy_core_pipeline::{
     tonemapping::tonemapping,
 };
 
-/// Plugin for the auto exposure feature.
+/// Plugin for the auto exposure and auto white balance features, which share
+/// one metering compute pass (the Gran Turismo 7 pattern: one scene
+/// measurement feeds both adaptations).
 ///
-/// See [`AutoExposure`] for more details.
+/// See [`AutoExposure`] and [`AutoWhiteBalance`] for more details.
 pub struct AutoExposurePlugin;
 
 #[derive(Resource)]
 struct AutoExposureResources {
     histogram: Buffer,
+    /// Fixed-point accumulators for the auto-white-balance chromaticity
+    /// measurement (`x·Y`, `y·Y`, `Y` sums). Like [`Self::histogram`], a
+    /// single global buffer shared by all views: each view's `compute_average`
+    /// dispatch drains and clears it before the next view's histogram pass
+    /// runs.
+    chroma: Buffer,
 }
 
 impl Plugin for AutoExposurePlugin {
@@ -56,7 +68,14 @@ impl Plugin for AutoExposurePlugin {
             .insert(&Handle::default(), AutoExposureCompensationCurve::default())
             .unwrap();
 
-        app.add_plugins(ExtractComponentPlugin::<AutoExposure>::default());
+        app.add_plugins((
+            ExtractComponentPlugin::<AutoExposure>::default(),
+            // Also inserts the `ExternalWhiteBalance` marker on the
+            // render-world view entity, which keeps the tonemapping pass's
+            // `WHITE_BALANCE` shader path active for the GPU-composed
+            // correction matrix.
+            ExtractComponentPlugin::<AutoWhiteBalance>::default(),
+        ));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -94,6 +113,12 @@ pub fn init_auto_exposure_resources(mut commands: Commands, render_device: Res<R
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         }),
+        chroma: render_device.create_buffer(&BufferDescriptor {
+            label: Some("auto white balance chroma buffer"),
+            size: pipeline::CHROMA_ACCUMULATOR_SIZE,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }),
     });
 }
 
@@ -102,7 +127,10 @@ fn queue_view_auto_exposure_pipelines(
     pipeline_cache: Res<PipelineCache>,
     mut compute_pipelines: ResMut<SpecializedComputePipelines<AutoExposurePipeline>>,
     pipeline: Res<AutoExposurePipeline>,
-    view_targets: Query<(Entity, &AutoExposure)>,
+    view_targets: Query<
+        (Entity, Option<&AutoExposure>),
+        Or<(With<AutoExposure>, With<AutoWhiteBalance>)>,
+    >,
 ) {
     for (entity, auto_exposure) in view_targets.iter() {
         let histogram_pipeline =
@@ -110,11 +138,17 @@ fn queue_view_auto_exposure_pipelines(
         let average_pipeline =
             compute_pipelines.specialize(&pipeline_cache, &pipeline, AutoExposurePass::Average);
 
+        // Cameras running only auto white balance use the default (white)
+        // metering mask and the default (flat) compensation curve.
         commands.entity(entity).insert(ViewAutoExposurePipeline {
             histogram_pipeline,
             mean_luminance_pipeline: average_pipeline,
-            compensation_curve: auto_exposure.compensation_curve.clone(),
-            metering_mask: auto_exposure.metering_mask.clone(),
+            compensation_curve: auto_exposure
+                .map(|auto_exposure| auto_exposure.compensation_curve.clone())
+                .unwrap_or_default(),
+            metering_mask: auto_exposure
+                .map(|auto_exposure| auto_exposure.metering_mask.clone())
+                .unwrap_or_default(),
         });
     }
 }
@@ -183,6 +217,7 @@ fn auto_exposure(
                 size: Some(ViewUniform::min_size()),
                 offset: 0,
             },
+            resources.chroma.as_entire_buffer_binding(),
         )),
     );
 

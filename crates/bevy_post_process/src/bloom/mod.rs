@@ -1,9 +1,10 @@
 mod downsampling_pipeline;
+mod glare;
 mod settings;
 mod upsampling_pipeline;
 
 use bevy_image::ToExtents;
-pub use settings::{Bloom, BloomCompositeMode, BloomPrefilter};
+pub use settings::{Bloom, BloomCompositeMode, BloomPrefilter, BloomScatterModel};
 
 use crate::bloom::{
     downsampling_pipeline::init_bloom_downsampling_pipeline,
@@ -27,7 +28,7 @@ use bevy_render::{
     render_resource::*,
     renderer::{RenderContext, RenderDevice, ViewQuery},
     texture::{CachedTexture, TextureCache},
-    view::ViewTarget,
+    view::{ViewDisplayTarget, ViewTarget},
     GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use downsampling_pipeline::{
@@ -38,7 +39,42 @@ use upsampling_pipeline::{
     prepare_upsampling_pipeline, BloomUpsamplingPipeline, UpsamplingPipelineIds,
 };
 
+/// The bloom pyramid format used for views on SDR display targets.
+///
+/// `Rg11b10Ufloat` halves the bandwidth/memory of `Rgba16Float` and its range
+/// (~`[6.1e-5, 65504]`, no sign bit, no alpha) is sufficient for the
+/// scene-linear input, but its mantissa is coarse above ~1.0.
 const BLOOM_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rg11b10Ufloat;
+
+/// The bloom pyramid format used for views whose resolved display target has
+/// an HDR transfer.
+///
+/// On HDR output, above-paper-white scene content survives all the way to the
+/// display, and `Rg11b10Ufloat`'s coarse mantissa above 1.0 produces visible
+/// quantization banding in the Karis-averaged downsample sums. `Rgba16Float`
+/// has uniform precision across the HDR range at twice the memory cost
+/// (~89 MB/frame vs ~44 MB/frame at 4K with the default 8-level chain) —
+/// spent only on views that can actually show the difference. SDR views keep
+/// [`BLOOM_TEXTURE_FORMAT`] bit-for-bit.
+const BLOOM_TEXTURE_FORMAT_HDR: TextureFormat = TextureFormat::Rgba16Float;
+
+/// The paper white assumed when a view has no resolved display target
+/// (mirrors `DisplayTarget::SDR_SRGB.paper_white_nits`).
+const DEFAULT_PAPER_WHITE_NITS: f32 = 100.0;
+
+/// Returns the bloom pyramid texture format for a view, keyed on whether the
+/// view's resolved display target transfer is HDR.
+///
+/// Used by texture creation ([`prepare_bloom_textures`]) and both pipeline
+/// specializations so they can never disagree about the format. A missing
+/// [`ViewDisplayTarget`] means plain SDR (see its docs).
+pub(crate) fn bloom_texture_format(display_target: Option<&ViewDisplayTarget>) -> TextureFormat {
+    if display_target.is_some_and(ViewDisplayTarget::is_hdr_transfer) {
+        BLOOM_TEXTURE_FORMAT_HDR
+    } else {
+        BLOOM_TEXTURE_FORMAT
+    }
+}
 
 #[derive(Default)]
 pub struct BloomPlugin;
@@ -55,6 +91,13 @@ impl Plugin for BloomPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+
+        // Build the glare weight table now (a few ms of Bessel quadrature)
+        // instead of lazily inside the bloom node's command-encoding loop,
+        // which would hitch the render thread on the first frame a view
+        // enables `BloomScatterModel::Gt7Glare`.
+        glare::warm();
+
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<BloomDownsamplingPipeline>>()
             .init_gpu_resource::<SpecializedRenderPipelines<BloomUpsamplingPipeline>>()
@@ -68,6 +111,12 @@ impl Plugin for BloomPlugin {
             .add_systems(
                 Render,
                 (
+                    // Runs in `Queue`: after `PrepareViews` (so the
+                    // `ViewDisplayTarget` insertions are applied) and before
+                    // `PrepareResources`, where `UniformComponentPlugin`
+                    // writes the (possibly re-resolved) `BloomUniforms`
+                    // components to the GPU.
+                    resolve_bloom_threshold_nits.in_set(RenderSystems::Queue),
                     prepare_downsampling_pipeline.in_set(RenderSystems::Prepare),
                     prepare_upsampling_pipeline.in_set(RenderSystems::Prepare),
                     prepare_bloom_textures.in_set(RenderSystems::PrepareResources),
@@ -314,13 +363,39 @@ impl BloomTexture {
     }
 }
 
+/// Re-resolves nits-based bloom thresholds
+/// ([`BloomPrefilter::threshold_nits`]) against the paper white of the view's
+/// resolved display target, overwriting the provisional (100-nit) packing
+/// done at extract time.
+///
+/// Must run after the `ViewDisplayTarget` insertions from
+/// `RenderSystems::PrepareViews` are applied and before
+/// `RenderSystems::PrepareResources` writes the [`BloomUniforms`] components
+/// to the GPU; it is therefore scheduled in `RenderSystems::Queue`.
+fn resolve_bloom_threshold_nits(
+    mut views: Query<(&Bloom, &mut BloomUniforms, Option<&ViewDisplayTarget>)>,
+) {
+    for (bloom, mut uniforms, display_target) in &mut views {
+        if bloom.prefilter.threshold_nits.is_none() {
+            continue;
+        }
+        let paper_white_nits = display_target
+            .map(|target| target.resolved.sanitized_paper_white_nits())
+            .unwrap_or(DEFAULT_PAPER_WHITE_NITS);
+        uniforms.threshold_precomputations = BloomUniforms::threshold_precomputations(
+            bloom.prefilter.resolve_threshold(paper_white_nits),
+            bloom.prefilter.threshold_softness,
+        );
+    }
+}
+
 fn prepare_bloom_textures(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
-    views: Query<(Entity, &ExtractedCamera, &Bloom)>,
+    views: Query<(Entity, &ExtractedCamera, &Bloom, Option<&ViewDisplayTarget>)>,
 ) {
-    for (entity, camera, bloom) in &views {
+    for (entity, camera, bloom, display_target) in &views {
         if let Some(viewport) = camera.physical_viewport_size {
             // How many times we can halve the resolution minus one so we don't go unnecessarily low
             let mip_count = bloom.max_mip_dimension.ilog2().max(2) - 1;
@@ -340,7 +415,7 @@ fn prepare_bloom_textures(
                 mip_level_count: mip_count,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: BLOOM_TEXTURE_FORMAT,
+                format: bloom_texture_format(display_target),
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             };
@@ -483,19 +558,141 @@ fn prepare_bloom_bind_groups(
 ///
 /// This function can be visually previewed for all values of *mip* (normalized) with tweakable
 /// [`Bloom`] parameters on [Desmos graphing calculator](https://www.desmos.com/calculator/ncc8xbhzzl).
+///
+/// For [`BloomScatterModel::Gt7Glare`] the parametric curve is replaced by
+/// blend constants realizing the physically derived diffraction weights; see
+/// [`glare::blend_factor`]. The glare weights are tied to the absolute texel
+/// scale of the pyramid levels (a point-spread function has a physical size),
+/// not normalized to the chain depth, so that branch does not use `max_mip`.
 fn compute_blend_factor(bloom: &Bloom, mip: f32, max_mip: f32) -> f32 {
-    let mut lf_boost =
-        (1.0 - ops::powf(
-            1.0 - (mip / max_mip),
-            1.0 / (1.0 - bloom.low_frequency_boost_curvature),
-        )) * bloom.low_frequency_boost;
-    let high_pass_lq = 1.0
-        - (((mip / max_mip) - bloom.high_pass_frequency) / bloom.high_pass_frequency)
-            .clamp(0.0, 1.0);
-    lf_boost *= match bloom.composite_mode {
-        BloomCompositeMode::EnergyConserving => 1.0 - bloom.intensity,
-        BloomCompositeMode::Additive => 1.0,
-    };
+    match bloom.scatter {
+        BloomScatterModel::Aesthetic => {
+            let mut lf_boost =
+                (1.0 - ops::powf(
+                    1.0 - (mip / max_mip),
+                    1.0 / (1.0 - bloom.low_frequency_boost_curvature),
+                )) * bloom.low_frequency_boost;
+            let high_pass_lq = 1.0
+                - (((mip / max_mip) - bloom.high_pass_frequency) / bloom.high_pass_frequency)
+                    .clamp(0.0, 1.0);
+            lf_boost *= match bloom.composite_mode {
+                BloomCompositeMode::EnergyConserving => 1.0 - bloom.intensity,
+                BloomCompositeMode::Additive => 1.0,
+            };
 
-    (bloom.intensity + lf_boost) * high_pass_lq
+            (bloom.intensity + lf_boost) * high_pass_lq
+        }
+        BloomScatterModel::Gt7Glare { f_number } => {
+            glare::blend_factor(f_number, bloom.intensity, mip as u32)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_math::Vec2;
+
+    /// A verbatim copy of the historical `compute_blend_factor` body, used
+    /// to lock the default ([`BloomScatterModel::Aesthetic`]) path
+    /// bit-for-bit.
+    fn legacy_compute_blend_factor(bloom: &Bloom, mip: f32, max_mip: f32) -> f32 {
+        let mut lf_boost =
+            (1.0 - ops::powf(
+                1.0 - (mip / max_mip),
+                1.0 / (1.0 - bloom.low_frequency_boost_curvature),
+            )) * bloom.low_frequency_boost;
+        let high_pass_lq = 1.0
+            - (((mip / max_mip) - bloom.high_pass_frequency) / bloom.high_pass_frequency)
+                .clamp(0.0, 1.0);
+        lf_boost *= match bloom.composite_mode {
+            BloomCompositeMode::EnergyConserving => 1.0 - bloom.intensity,
+            BloomCompositeMode::Additive => 1.0,
+        };
+
+        (bloom.intensity + lf_boost) * high_pass_lq
+    }
+
+    /// All `BloomScatterModel::Aesthetic` settings combinations must produce
+    /// the same blend factors as the dedicated aesthetic implementation,
+    /// independent of the glare code path.
+    #[test]
+    fn aesthetic_blend_factors_match_dedicated_implementation() {
+        let presets = [
+            Bloom::NATURAL,
+            Bloom::ANAMORPHIC,
+            Bloom::OLD_SCHOOL,
+            Bloom::SCREEN_BLUR,
+            Bloom {
+                intensity: 0.37,
+                low_frequency_boost: 0.21,
+                low_frequency_boost_curvature: 0.5,
+                high_pass_frequency: 0.66,
+                composite_mode: BloomCompositeMode::Additive,
+                scale: Vec2::new(2.0, 1.0),
+                ..Bloom::NATURAL
+            },
+        ];
+        for bloom in &presets {
+            for max_mip in [3.0f32, 7.0, 9.0] {
+                for mip in 0..=(max_mip as u32) {
+                    let mip = mip as f32;
+                    assert_eq!(
+                        compute_blend_factor(bloom, mip, max_mip).to_bits(),
+                        legacy_compute_blend_factor(bloom, mip, max_mip).to_bits(),
+                        "mismatch at mip {mip}/{max_mip}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The glare scatter model ignores the prefilter (no threshold; the PSF
+    /// integrates total energy) and forces energy-conserving compositing,
+    /// while `Aesthetic` keeps the configured behavior.
+    #[test]
+    fn glare_overrides_threshold_and_composite_mode() {
+        let mut bloom = Bloom {
+            composite_mode: BloomCompositeMode::Additive,
+            ..Bloom::OLD_SCHOOL
+        };
+        assert!(bloom.thresholding_active());
+        assert_eq!(
+            bloom.effective_composite_mode(),
+            BloomCompositeMode::Additive
+        );
+
+        bloom.scatter = BloomScatterModel::Gt7Glare { f_number: 8.0 };
+        assert!(!bloom.thresholding_active());
+        assert_eq!(
+            bloom.effective_composite_mode(),
+            BloomCompositeMode::EnergyConserving
+        );
+    }
+
+    /// The glare branch's final-pass blend constant is the intensity (total
+    /// scattered energy), and the curve-shape parameters of the parametric
+    /// model have no effect on it.
+    #[test]
+    fn glare_blend_factor_uses_psf_not_parametric_curve() {
+        let glare = Bloom {
+            scatter: BloomScatterModel::Gt7Glare { f_number: 5.6 },
+            ..Bloom::NATURAL
+        };
+        assert_eq!(compute_blend_factor(&glare, 0.0, 7.0), glare.intensity);
+
+        // Parametric-curve dials are inert under the glare model.
+        let tweaked = Bloom {
+            low_frequency_boost: 0.0,
+            low_frequency_boost_curvature: 0.1,
+            high_pass_frequency: 0.5,
+            ..glare.clone()
+        };
+        for mip in 0..8 {
+            assert_eq!(
+                compute_blend_factor(&glare, mip as f32, 7.0).to_bits(),
+                compute_blend_factor(&tweaked, mip as f32, 7.0).to_bits()
+            );
+        }
+    }
 }

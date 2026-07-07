@@ -24,14 +24,13 @@ use bevy_light::{EnvironmentMapLight, IrradianceVolume};
 use bevy_math::Vec4;
 use bevy_platform::sync::Arc;
 use bevy_render::{
-    camera::ExtractedCamera,
     globals::{GlobalsBuffer, GlobalsUniform},
     render_asset::RenderAssets,
     render_resource::{binding_types::*, *},
     renderer::{RenderAdapter, RenderDevice},
     texture::{FallbackImage, FallbackImageZero, GpuImage},
     view::{
-        Msaa, RenderVisibilityRanges, ViewUniform, ViewUniformOffset, ViewUniforms,
+        ExtractedView, Msaa, RenderVisibilityRanges, ViewUniform, ViewUniformOffset, ViewUniforms,
         VISIBILITY_RANGES_STORAGE_BUFFER_COUNT,
     },
 };
@@ -640,7 +639,7 @@ pub fn prepare_mesh_view_bind_groups(
     ),
     views: Query<(
         Entity,
-        Option<&ExtractedCamera>,
+        &ExtractedView,
         &ViewShadowBindings,
         &ViewClusterBindings,
         &Msaa,
@@ -713,7 +712,7 @@ pub fn prepare_mesh_view_bind_groups(
     ) {
         for (
             entity,
-            camera,
+            view,
             shadow_bindings,
             cluster_bindings,
             msaa,
@@ -752,7 +751,9 @@ pub fn prepare_mesh_view_bind_groups(
                     .collect();
             }
 
-            let tonemap_in_shader = camera.is_none_or(|camera| !camera.hdr);
+            let tonemap_in_shader = (view.target_format == TextureFormat::Rgba8UnormSrgb
+                || view.target_format == TextureFormat::Rgba8Unorm)
+                && *tonemapping != Tonemapping::None;
             let mut layout_key = MeshPipelineViewLayoutKey::from(*msaa)
                 | MeshPipelineViewLayoutKey::from(prepass_textures);
             let mut offsets = ArrayVec::from_iter([

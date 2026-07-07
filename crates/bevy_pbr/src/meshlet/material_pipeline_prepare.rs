@@ -20,7 +20,7 @@ use bevy_mesh::{
     MeshVertexBufferLayouts,
 };
 use bevy_platform::collections::{HashMap, HashSet};
-use bevy_render::{camera::ExtractedCamera, erased_render_asset::ErasedRenderAssets};
+use bevy_render::erased_render_asset::ErasedRenderAssets;
 use bevy_render::{camera::TemporalJitter, render_resource::*, view::ExtractedView};
 use bevy_utils::default;
 use core::any::TypeId;
@@ -46,7 +46,6 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
     mut views: Query<
         (
             &mut MeshletViewMaterialsMainOpaquePass,
-            &ExtractedCamera,
             &ExtractedView,
             Option<&Tonemapping>,
             Option<&DebandDither>,
@@ -70,7 +69,6 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
 
     for (
         mut materials,
-        camera,
         view,
         tonemapping,
         dither,
@@ -131,13 +129,17 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
             }
         }
 
-        if !camera.hdr {
+        if view.target_format == TextureFormat::Rgba8UnormSrgb
+            || view.target_format == TextureFormat::Rgba8Unorm
+        {
             if let Some(tonemapping) = tonemapping {
-                view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
-                view_key |= tonemapping_pipeline_key(*tonemapping);
-            }
-            if let Some(DebandDither::Enabled) = dither {
-                view_key |= MeshPipelineKey::DEBAND_DITHER;
+                if *tonemapping != Tonemapping::None {
+                    view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
+                    view_key |= tonemapping_pipeline_key(*tonemapping);
+                    if let Some(DebandDither::Enabled) = dither {
+                        view_key |= MeshPipelineKey::DEBAND_DITHER;
+                    }
+                }
             }
         }
 
@@ -219,6 +221,7 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
                         shader: meshlet_pipelines.meshlet_mesh_material.clone(),
                         shader_defs: shader_defs.clone(),
                         entry_point: material_pipeline_descriptor.vertex.entry_point,
+                        constants: material_pipeline_descriptor.vertex.constants,
                         buffers: Vec::new(),
                     },
                     primitive: PrimitiveState::default(),
@@ -238,6 +241,7 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass(
                         shader_defs,
                         entry_point: material_fragment.entry_point,
                         targets: material_fragment.targets,
+                        constants: material_fragment.constants,
                     }),
                     zero_initialize_workgroup_memory: false,
                 };
@@ -413,6 +417,7 @@ pub fn prepare_material_meshlet_meshes_prepass(
                         shader: meshlet_pipelines.meshlet_mesh_material.clone(),
                         shader_defs: shader_defs.clone(),
                         entry_point: material_pipeline_descriptor.vertex.entry_point,
+                        constants: material_pipeline_descriptor.vertex.constants,
                         ..default()
                     },
                     primitive: PrimitiveState::default(),
@@ -428,6 +433,7 @@ pub fn prepare_material_meshlet_meshes_prepass(
                         shader_defs,
                         entry_point,
                         targets: material_fragment.targets,
+                        constants: material_fragment.constants,
                     }),
                     ..default()
                 };

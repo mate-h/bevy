@@ -1,6 +1,7 @@
 use crate::ui_material::{MaterialNode, UiMaterial, UiMaterialKey};
 use crate::*;
 use bevy_asset::*;
+use bevy_core_pipeline::camera_stack::ViewStackContract;
 use bevy_ecs::{
     prelude::{Component, With},
     query::ROQueryItem,
@@ -142,7 +143,9 @@ where
                 VertexFormat::Float32x4,
             ],
         );
-        let shader_defs = Vec::new();
+        let mut shader_defs = Vec::new();
+        push_compositing_space_defs(&mut shader_defs, key.compositing_space);
+        push_working_gamut_defs(&mut shader_defs, key.source_gamut_rec2020);
 
         let mut descriptor = RenderPipelineDescriptor {
             vertex: VertexState {
@@ -601,6 +604,8 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut render_views: Query<&UiCameraView, With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
+    view_contracts: Query<&ViewStackContract>,
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
 {
@@ -632,6 +637,11 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
             UiMaterialKey {
                 target_format: view.target_format,
                 bind_group_data: material.key.clone(),
+                compositing_space: resolved_spaces
+                    .get(extracted_uinode.extracted_camera_entity, None),
+                source_gamut_rec2020: view_contracts
+                    .get(extracted_uinode.extracted_camera_entity)
+                    .is_ok_and(ViewStackContract::source_gamut_is_rec2020),
             },
         );
         if transparent_phase.items.capacity() < extracted_uinodes.uinodes.len() {

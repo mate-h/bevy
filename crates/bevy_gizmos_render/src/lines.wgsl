@@ -1,5 +1,14 @@
 // TODO use common view binding
 #import bevy_render::{view::View, maths::affine3_to_square}
+#ifdef SRGB_OUTPUT
+#import bevy_render::color_operations::linear_to_srgb
+#endif
+#ifdef OKLAB_OUTPUT
+#import bevy_render::color_operations::linear_rgb_to_oklab
+#endif
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec709_to_rec2020
+#endif
 
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -161,9 +170,28 @@ struct FragmentOutput {
     @location(0) color: vec4<f32>,
 };
 
+// Gizmos render pre-tonemap in the scene working space and, in 2D, blend into
+// the camera's compositing-space buffer. Convert the Rec.709 vertex color to the
+// Rec.2020 working primaries when active, then writer-encode it into the Srgb or
+// Oklab compositing space (2D only). Default Rec.709 / Linear views compile both
+// steps to a pass-through; the alpha channel is left untouched.
+fn encode_output(color_in: vec4<f32>) -> vec4<f32> {
+    var color = color_in;
+#ifdef WORKING_COLOR_SPACE_REC2020
+    color = vec4(rec709_to_rec2020(color.rgb), color.a);
+#endif
+#ifdef SRGB_OUTPUT
+    color = vec4(linear_to_srgb(color.rgb), color.a);
+#endif
+#ifdef OKLAB_OUTPUT
+    color = vec4(linear_rgb_to_oklab(color.rgb), color.a);
+#endif
+    return color;
+}
+
 @fragment
 fn fragment_solid(in: FragmentInput) -> FragmentOutput {
-    return FragmentOutput(in.color);
+    return FragmentOutput(encode_output(in.color));
 }
 @fragment
 fn fragment_dotted(in: FragmentInput) -> FragmentOutput {
@@ -173,8 +201,8 @@ fn fragment_dotted(in: FragmentInput) -> FragmentOutput {
 #else
     alpha = 1 - floor((in.uv * in.position.w) % 2.0);
 #endif
-    
-    return FragmentOutput(vec4(in.color.xyz, in.color.w * alpha));
+
+    return FragmentOutput(encode_output(vec4(in.color.xyz, in.color.w * alpha)));
 }
 
 @fragment
@@ -185,6 +213,6 @@ fn fragment_dashed(in: FragmentInput) -> FragmentOutput {
     let uv = in.uv * in.position.w;
 #endif
     let alpha = 1.0 - floor(min((uv % 2.0) / in.line_fraction, 1.0));
-    
-    return FragmentOutput(vec4(in.color.xyz, in.color.w * alpha));
+
+    return FragmentOutput(encode_output(vec4(in.color.xyz, in.color.w * alpha)));
 }

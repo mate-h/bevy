@@ -2,7 +2,7 @@ use core::ops::Range;
 
 use crate::ComputedTextureSlices;
 use bevy_asset::{load_embedded_asset, AssetEvent, AssetId, AssetServer, Assets, Handle};
-use bevy_camera::visibility::ViewVisibility;
+use bevy_camera::{visibility::ViewVisibility, Camera2d, CompositingSpace};
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_core_pipeline::{
     core_2d::{Transparent2d, CORE_2D_DEPTH_FORMAT},
@@ -23,7 +23,7 @@ use bevy_mesh::VertexBufferLayout;
 use bevy_platform::collections::HashMap;
 use bevy_render::{
     camera::ExtractedCamera,
-    view::{RenderVisibleEntities, RetainedViewEntity},
+    view::{RenderVisibleEntities, ResolvedCompositionSpaces, RetainedViewEntity},
 };
 use bevy_render::{
     render_asset::RenderAssets,
@@ -42,6 +42,7 @@ use bevy_render::{
         texture_format_from_code, texture_format_to_code, ExtractedView, Msaa, ViewUniform,
         ViewUniformOffset, ViewUniforms,
     },
+    working_color_space::{WorkingColorSpace, WORKING_COLOR_SPACE_REC2020_SHADER_DEF},
     Extract,
 };
 use bevy_shader::{Shader, ShaderDefVal};
@@ -56,9 +57,18 @@ pub struct SpritePipeline {
     view_layout: BindGroupLayoutDescriptor,
     material_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
+    /// The project-global working color space, captured at `RenderStartup`.
+    /// Under `WorkingColorSpace::Rec2020` the sprite fragment shader
+    /// converts its composed color (instance tint × texture sample) into the
+    /// working space (`WORKING_COLOR_SPACE_REC2020` shader def).
+    working_color_space: WorkingColorSpace,
 }
 
-pub fn init_sprite_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub fn init_sprite_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    working_color_space: Res<WorkingColorSpace>,
+) {
     let tonemapping_lut_entries = get_lut_bind_group_layout_entries();
     let view_layout = BindGroupLayoutDescriptor::new(
         "sprite_view_layout",
@@ -87,6 +97,7 @@ pub fn init_sprite_pipeline(mut commands: Commands, asset_server: Res<AssetServe
         view_layout,
         material_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "sprite.wgsl"),
+        working_color_space: *working_color_space,
     });
 }
 
@@ -113,6 +124,8 @@ bitflags::bitflags! {
         const TONEMAP_METHOD_TONY_MC_MAPFACE    = 6 << Self::TONEMAP_METHOD_SHIFT_BITS;
         const TONEMAP_METHOD_BLENDER_FILMIC     = 7 << Self::TONEMAP_METHOD_SHIFT_BITS;
         const TONEMAP_METHOD_PBR_NEUTRAL        = 8 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_LINEAR             = 9 << Self::TONEMAP_METHOD_SHIFT_BITS;
+        const TONEMAP_METHOD_GRAN_TURISMO_7     = 10 << Self::TONEMAP_METHOD_SHIFT_BITS;
 
     }
 }
@@ -156,6 +169,19 @@ impl SpritePipelineKey {
         texture_format_from_code(code)
             .expect("Unknown bits in `COLOR_TARGET_FORMAT_MASK_BITS` of the pipeline key")
     }
+
+    /// Key bits for a view's RESOLVED [`CompositingSpace`] (the phase-1
+    /// [`ResolvedCompositionSpaces`] value, never the camera's raw request):
+    /// `Some(Srgb)` / `Some(Oklab)` select the matching writer-encode bit;
+    /// linear views (`Some(Linear)` or no space) set no bits.
+    #[inline]
+    pub fn from_compositing_space(space: Option<CompositingSpace>) -> Self {
+        match space {
+            Some(CompositingSpace::Srgb) => Self::SRGB_COMPOSITING,
+            Some(CompositingSpace::Oklab) => Self::OKLAB_COMPOSITING,
+            Some(CompositingSpace::Linear) | None => Self::NONE,
+        }
+    }
 }
 
 impl SpecializedRenderPipeline for SpritePipeline {
@@ -163,6 +189,14 @@ impl SpecializedRenderPipeline for SpritePipeline {
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let mut shader_defs = Vec::new();
+
+        // Project-global working-space axis: pushed for every specialization
+        // when (and only when) the app opted into the Rec.2020 working
+        // space, so default projects compose byte-identically.
+        if self.working_color_space.is_rec2020() {
+            shader_defs.push(WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into());
+        }
+
         if key.contains(SpritePipelineKey::TONEMAP_IN_SHADER) {
             shader_defs.push("TONEMAP_IN_SHADER".into());
             shader_defs.push(ShaderDefVal::UInt(
@@ -178,6 +212,8 @@ impl SpecializedRenderPipeline for SpritePipeline {
 
             if method == SpritePipelineKey::TONEMAP_METHOD_NONE {
                 shader_defs.push("TONEMAP_METHOD_NONE".into());
+            } else if method == SpritePipelineKey::TONEMAP_METHOD_LINEAR {
+                shader_defs.push("TONEMAP_METHOD_LINEAR".into());
             } else if method == SpritePipelineKey::TONEMAP_METHOD_REINHARD {
                 shader_defs.push("TONEMAP_METHOD_REINHARD".into());
             } else if method == SpritePipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE {
@@ -195,6 +231,8 @@ impl SpecializedRenderPipeline for SpritePipeline {
                 shader_defs.push("TONEMAP_METHOD_TONY_MC_MAPFACE".into());
             } else if method == SpritePipelineKey::TONEMAP_METHOD_PBR_NEUTRAL {
                 shader_defs.push("TONEMAP_METHOD_PBR_NEUTRAL".into());
+            } else if method == SpritePipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7 {
+                shader_defs.push("TONEMAP_METHOD_GRAN_TURISMO_7".into());
             }
 
             // Debanding is tied to tonemapping in the shader, cannot run without it.
@@ -505,6 +543,7 @@ pub fn queue_sprites(
     extracted_sprites: Res<ExtractedSprites>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
     mut cameras: Query<(
+        Entity,
         &RenderVisibleEntities,
         &ExtractedCamera,
         &ExtractedView,
@@ -512,50 +551,51 @@ pub fn queue_sprites(
         Option<&Tonemapping>,
         Option<&DebandDither>,
     )>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
 ) {
     let draw_sprite_function = draw_functions.read().id::<DrawSprite>();
 
-    for (visible_entities, camera, view, msaa, tonemapping, dither) in &mut cameras {
+    for (entity, visible_entities, camera, view, msaa, tonemapping, dither) in &mut cameras {
         let Some(transparent_phase) = transparent_render_phases.get_mut(&view.retained_view_entity)
         else {
             continue;
         };
 
-        let msaa_key = SpritePipelineKey::from_msaa_samples(msaa.samples());
-        let mut view_key = SpritePipelineKey::from_target_format(view.target_format) | msaa_key;
+        let mut view_key = SpritePipelineKey::from_target_format(view.target_format)
+            | SpritePipelineKey::from_msaa_samples(msaa.samples())
+            | SpritePipelineKey::from_compositing_space(
+                resolved_spaces.get(entity, camera.compositing_space),
+            );
 
-        if camera
-            .compositing_space
-            .is_some_and(|s| s == bevy_camera::CompositingSpace::Srgb)
+        // In-shader tonemapping fast path: an eligible SDR camera (8-bit
+        // main texture) with an active operator folds tonemapping (and
+        // optional debanding) into the sprite shader, skipping the separate
+        // tonemapping pass. Eligibility rides `view.target_format`, which the
+        // extract format fork drives to an 8-bit format only for eligible
+        // cameras.
+        if (view.target_format == TextureFormat::Rgba8UnormSrgb
+            || view.target_format == TextureFormat::Rgba8Unorm)
+            && let Some(tonemapping) = tonemapping
+            && *tonemapping != Tonemapping::None
         {
-            view_key |= SpritePipelineKey::SRGB_COMPOSITING;
-        }
-        if camera
-            .compositing_space
-            .is_some_and(|s| s == bevy_camera::CompositingSpace::Oklab)
-        {
-            view_key |= SpritePipelineKey::OKLAB_COMPOSITING;
-        }
-
-        if !camera.hdr {
-            if let Some(tonemapping) = tonemapping {
-                view_key |= SpritePipelineKey::TONEMAP_IN_SHADER;
-                view_key |= match tonemapping {
-                    Tonemapping::None => SpritePipelineKey::TONEMAP_METHOD_NONE,
-                    Tonemapping::Reinhard => SpritePipelineKey::TONEMAP_METHOD_REINHARD,
-                    Tonemapping::ReinhardLuminance => {
-                        SpritePipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE
-                    }
-                    Tonemapping::AcesFitted => SpritePipelineKey::TONEMAP_METHOD_ACES_FITTED,
-                    Tonemapping::AgX => SpritePipelineKey::TONEMAP_METHOD_AGX,
-                    Tonemapping::SomewhatBoringDisplayTransform => {
-                        SpritePipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM
-                    }
-                    Tonemapping::TonyMcMapface => SpritePipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE,
-                    Tonemapping::BlenderFilmic => SpritePipelineKey::TONEMAP_METHOD_BLENDER_FILMIC,
-                    Tonemapping::PbrNeutral => SpritePipelineKey::TONEMAP_METHOD_PBR_NEUTRAL,
-                };
-            }
+            view_key |= SpritePipelineKey::TONEMAP_IN_SHADER;
+            view_key |= match tonemapping {
+                Tonemapping::None => SpritePipelineKey::TONEMAP_METHOD_NONE,
+                Tonemapping::Linear => SpritePipelineKey::TONEMAP_METHOD_LINEAR,
+                Tonemapping::Reinhard => SpritePipelineKey::TONEMAP_METHOD_REINHARD,
+                Tonemapping::ReinhardLuminance => {
+                    SpritePipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE
+                }
+                Tonemapping::AcesFitted => SpritePipelineKey::TONEMAP_METHOD_ACES_FITTED,
+                Tonemapping::AgX => SpritePipelineKey::TONEMAP_METHOD_AGX,
+                Tonemapping::SomewhatBoringDisplayTransform => {
+                    SpritePipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM
+                }
+                Tonemapping::TonyMcMapface => SpritePipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE,
+                Tonemapping::BlenderFilmic => SpritePipelineKey::TONEMAP_METHOD_BLENDER_FILMIC,
+                Tonemapping::KhronosPbrNeutral => SpritePipelineKey::TONEMAP_METHOD_PBR_NEUTRAL,
+                Tonemapping::GranTurismo7 => SpritePipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7,
+            };
             if let Some(DebandDither::Enabled) = dither {
                 view_key |= SpritePipelineKey::DEBAND_DITHER;
             }
@@ -611,7 +651,10 @@ pub fn prepare_sprite_view_bind_groups(
     pipeline_cache: Res<PipelineCache>,
     sprite_pipeline: Res<SpritePipeline>,
     view_uniforms: Res<ViewUniforms>,
-    views: Query<(Entity, &Tonemapping), With<ExtractedView>>,
+    // Sprites only draw through Transparent2d phases, which exist solely on
+    // `Camera2d` views; shadow, light-probe, and 3D camera views never need
+    // this bind group.
+    views: Query<(Entity, &Tonemapping), (With<ExtractedView>, With<Camera2d>)>,
     tonemapping_luts: Res<TonemappingLuts>,
     images: Res<RenderAssets<GpuImage>>,
     fallback_image: Res<FallbackImage>,
@@ -624,7 +667,7 @@ pub fn prepare_sprite_view_bind_groups(
         let lut_bindings =
             get_lut_bindings(&images, &tonemapping_luts, tonemapping, &fallback_image);
         let view_bind_group = render_device.create_bind_group(
-            "mesh2d_view_bind_group",
+            "sprite_view_bind_group",
             &pipeline_cache.get_bind_group_layout(&sprite_pipeline.view_layout),
             &BindGroupEntries::sequential((view_binding.clone(), lut_bindings.0, lut_bindings.1)),
         );
@@ -1053,5 +1096,60 @@ fn apply_scaling(
                 *quad_size = new_quad;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Key-derivation: a solo default camera's view key carries no
+    /// compositing bits — byte-identical to a hand-constructed key without
+    /// the compositing-space term.
+    #[test]
+    fn solo_sdr_default_view_key_has_no_compositing_bits() {
+        let view_key = SpritePipelineKey::from_target_format(TextureFormat::Rgba8UnormSrgb)
+            | SpritePipelineKey::from_msaa_samples(4)
+            | SpritePipelineKey::from_compositing_space(None);
+        assert_eq!(
+            view_key,
+            SpritePipelineKey::from_target_format(TextureFormat::Rgba8UnormSrgb)
+                | SpritePipelineKey::from_msaa_samples(4)
+        );
+    }
+
+    /// Key-derivation: the resolved space selects exactly its writer-encode
+    /// bit; `Some(Linear)` keys like no space.
+    #[test]
+    fn resolved_space_selects_exactly_its_bit() {
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Srgb)),
+            SpritePipelineKey::SRGB_COMPOSITING
+        );
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Oklab)),
+            SpritePipelineKey::OKLAB_COMPOSITING
+        );
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Linear)),
+            SpritePipelineKey::NONE
+        );
+        assert_eq!(
+            SpritePipelineKey::from_compositing_space(None),
+            SpritePipelineKey::NONE
+        );
+    }
+
+    /// Key-derivation: an Oklab 2d solo view (fp16 main texture) keys the
+    /// Oklab writer-encode bit alongside its format and msaa bits.
+    #[test]
+    fn oklab_solo_view_key_sets_the_oklab_bit() {
+        let view_key = SpritePipelineKey::from_target_format(TextureFormat::Rgba16Float)
+            | SpritePipelineKey::from_msaa_samples(4)
+            | SpritePipelineKey::from_compositing_space(Some(CompositingSpace::Oklab));
+        assert!(view_key.contains(SpritePipelineKey::OKLAB_COMPOSITING));
+        assert!(!view_key.contains(SpritePipelineKey::SRGB_COMPOSITING));
+        assert_eq!(view_key.target_format(), TextureFormat::Rgba16Float);
+        assert_eq!(view_key.msaa_samples(), 4);
     }
 }

@@ -1,5 +1,6 @@
 #import bevy_render::view::View;
 #import bevy_render::globals::Globals;
+#import bevy_ui::ui_node::encode_output
 
 @group(0) @binding(0)
 var<uniform> view: View;
@@ -123,5 +124,9 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     // map the slice coords to texture coords
     let atlas_uv = in.atlas_rect.xy + uv * (in.atlas_rect.zw - in.atlas_rect.xy);
 
-    return in.color * textureSample(sprite_texture, sprite_sampler, atlas_uv);
+    let color = in.color * textureSample(sprite_texture, sprite_sampler, atlas_uv);
+
+    // Gamut convert (Rec.709 -> buffer primaries) and writer-encode into the
+    // resolved compositing space; a no-op on default Rec.709 / Linear views.
+    return encode_output(color);
 }

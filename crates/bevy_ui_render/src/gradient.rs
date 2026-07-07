@@ -8,6 +8,7 @@ use super::shader_flags::BORDER_ALL;
 use crate::*;
 use bevy_asset::*;
 use bevy_color::{ColorToComponents, Hsla, Hsva, LinearRgba, Oklaba, Oklcha, Srgba};
+use bevy_core_pipeline::camera_stack::ViewStackContract;
 use bevy_ecs::{
     prelude::Component,
     system::{
@@ -139,6 +140,15 @@ pub struct UiGradientPipelineKey {
     anti_alias: bool,
     color_space: InterpolationColorSpace,
     pub target_format: TextureFormat,
+    /// Resolved [`CompositingSpace`](bevy_camera::CompositingSpace) of the view
+    /// this gradient renders into, driving the writer-side encode of the
+    /// fragment output (see
+    /// [`push_compositing_space_defs`](crate::pipeline::push_compositing_space_defs)).
+    compositing_space: Option<bevy_camera::CompositingSpace>,
+    /// Whether the post-tonemap buffer this gradient composites into uses
+    /// Rec.2020 primaries (see
+    /// [`push_working_gamut_defs`](crate::pipeline::push_working_gamut_defs)).
+    source_gamut_rec2020: bool,
 }
 
 impl SpecializedRenderPipeline for GradientPipeline {
@@ -190,11 +200,13 @@ impl SpecializedRenderPipeline for GradientPipeline {
             InterpolationColorSpace::HsvaLong => "IN_HSV_LONG",
         };
 
-        let shader_defs = if key.anti_alias {
+        let mut shader_defs = if key.anti_alias {
             vec![color_space.into(), "ANTI_ALIAS".into()]
         } else {
             vec![color_space.into()]
         };
+        push_compositing_space_defs(&mut shader_defs, key.compositing_space);
+        push_working_gamut_defs(&mut shader_defs, key.source_gamut_rec2020);
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -584,6 +596,8 @@ pub fn queue_gradient(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut render_views: Query<(&UiCameraView, Option<&UiAntiAlias>), With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
+    view_contracts: Query<&ViewStackContract>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
 ) {
@@ -611,6 +625,10 @@ pub fn queue_gradient(
                 anti_alias: matches!(ui_anti_alias, None | Some(UiAntiAlias::On)),
                 color_space: gradient.color_space,
                 target_format: view.target_format,
+                compositing_space: resolved_spaces.get(gradient.extracted_camera_entity, None),
+                source_gamut_rec2020: view_contracts
+                    .get(gradient.extracted_camera_entity)
+                    .is_ok_and(ViewStackContract::source_gamut_is_rec2020),
             },
         );
 

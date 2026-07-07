@@ -1,6 +1,15 @@
 #define_import_path bevy_ui::ui_node
 
 #import bevy_render::view::View
+#ifdef SRGB_OUTPUT
+#import bevy_render::color_operations::linear_to_srgb
+#endif
+#ifdef OKLAB_OUTPUT
+#import bevy_render::color_operations::linear_rgb_to_oklab
+#endif
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec709_to_rec2020
+#endif
 
 const TEXTURED = 1u;
 const RIGHT_VERTEX = 2u;
@@ -143,6 +152,29 @@ fn nearest_border_active(point_vs_mid: vec2<f32>, size: vec2<f32>, width: vec4<f
         (enabled(flags, BORDER_BOTTOM) && min_dist == bottom);
 }
 
+// Writer-side gamut convert and compositing encode. UI runs after tone mapping,
+// so it composites into the post-tonemap buffer:
+//   1. On a GT7 HDR view the buffer holds Rec.2020 primaries; UI colors are
+//      authored in Rec.709, so they convert with `rec709_to_rec2020` first.
+//   2. When the buffer's resolved CompositingSpace is Srgb or Oklab it holds
+//      values in that encoded space, so the straight-alpha output is encoded to
+//      match (the terminal decode reverses it).
+// Default Rec.709 / Linear views compile both steps to a pass-through. The alpha
+// channel is left untouched.
+fn encode_output(color_in: vec4<f32>) -> vec4<f32> {
+    var color = color_in;
+#ifdef WORKING_COLOR_SPACE_REC2020
+    color = vec4(rec709_to_rec2020(color.rgb), color.a);
+#endif
+#ifdef SRGB_OUTPUT
+    return vec4(linear_to_srgb(color.rgb), color.a);
+#else ifdef OKLAB_OUTPUT
+    return vec4(linear_rgb_to_oklab(color.rgb), color.a);
+#else
+    return color;
+#endif
+}
+
 // get alpha for antialiasing for sdf
 fn antialias(distance: f32) -> f32 {
     // Using the fwidth(distance) was causing artifacts, so just use the distance.
@@ -220,9 +252,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // This allows us to draw both textured and untextured shapes together in the same batch.
     let color = select(in.color, in.color * texture_color, enabled(in.flags, TEXTURED));
 
+    var out: vec4<f32>;
     if enabled(in.flags, BORDER_ANY) {
-        return draw_uinode_border(color, in.point, in.size, in.radius, in.border, in.flags);
+        out = draw_uinode_border(color, in.point, in.size, in.radius, in.border, in.flags);
     } else {
-        return draw_uinode_background(color, in.point, in.size, in.radius, in.border, in.flags);
+        out = draw_uinode_background(color, in.point, in.size, in.radius, in.border, in.flags);
     }
+    return encode_output(out);
 }

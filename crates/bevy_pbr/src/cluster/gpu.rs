@@ -612,6 +612,7 @@ impl SpecializedRenderPipeline for ClusteringRasterPipeline {
                         shader_location: 0,
                     }],
                 }],
+                constants: vec![],
             },
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
@@ -623,6 +624,7 @@ impl SpecializedRenderPipeline for ClusteringRasterPipeline {
                     // Disable writing.
                     write_mask: ColorWrites::empty(),
                 })],
+                constants: vec![],
             }),
             ..default()
         }
@@ -1157,7 +1159,10 @@ fn cluster_on_gpu(
 
             {
                 // Use `encase` to populate a `ClusterMetadata`.
-                let buffer_view = captured_staging_buffer.slice(..).get_mapped_range();
+                let buffer_view = captured_staging_buffer
+                    .slice(..)
+                    .get_mapped_range()
+                    .expect("cluster readback staging buffer should be mapped");
                 let Ok(mut buffer_reader) =
                     Reader::new::<ClusterMetadata>(buffer_view[..].to_vec(), 0)
                 else {

@@ -19,7 +19,6 @@ use bevy_core_pipeline::{
 use bevy_ecs::prelude::*;
 use bevy_light::{EnvironmentMapLight, IrradianceVolume, ShadowFilteringMethod};
 use bevy_render::{
-    camera::ExtractedCamera,
     extract_component::{
         ComponentUniforms, ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin,
     },
@@ -206,6 +205,18 @@ impl SpecializedRenderPipeline for DeferredLightingLayout {
         // Let the shader code know that it's running in a deferred pipeline.
         shader_defs.push("DEFERRED_LIGHTING_PIPELINE".into());
 
+        // Project-global working-space axis (mirrors `MeshPipeline`): the
+        // deferred lighting pass samples environment maps, which convert
+        // into the working space under this def. Material colors in the
+        // G-buffer were already converted by the (prepass) material
+        // pipelines, so there is no double conversion here. Not pushed for
+        // the default Rec.709 working space.
+        if self.mesh_pipeline.working_color_space.is_rec2020() {
+            shader_defs.push(
+                bevy_render::working_color_space::WORKING_COLOR_SPACE_REC2020_SHADER_DEF.into(),
+            );
+        }
+
         #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
         shader_defs.push("WEBGL2".into());
 
@@ -240,6 +251,10 @@ impl SpecializedRenderPipeline for DeferredLightingLayout {
                 shader_defs.push("TONEMAP_METHOD_TONY_MC_MAPFACE".into());
             } else if method == MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL {
                 shader_defs.push("TONEMAP_METHOD_PBR_NEUTRAL".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_LINEAR {
+                shader_defs.push("TONEMAP_METHOD_LINEAR".into());
+            } else if method == MeshPipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7 {
+                shader_defs.push("TONEMAP_METHOD_GRAN_TURISMO_7".into());
             }
 
             // Debanding is tied to tonemapping in the shader, cannot run without it.
@@ -396,7 +411,6 @@ pub fn prepare_deferred_lighting_pipelines(
     deferred_lighting_layout: Res<DeferredLightingLayout>,
     cameras: Query<(
         Entity,
-        &ExtractedCamera,
         &ExtractedView,
         Option<&Tonemapping>,
         Option<&DebandDither>,
@@ -422,7 +436,6 @@ pub fn prepare_deferred_lighting_pipelines(
 ) {
     for (
         entity,
-        camera,
         view,
         tonemapping,
         dither,
@@ -478,27 +491,39 @@ pub fn prepare_deferred_lighting_pipelines(
         // Always true, since we're in the deferred lighting pipeline
         view_key |= MeshPipelineKey::DEFERRED_PREPASS;
 
-        if !camera.hdr {
+        if view.target_format == TextureFormat::Rgba8UnormSrgb
+            || view.target_format == TextureFormat::Rgba8Unorm
+        {
             if let Some(tonemapping) = tonemapping {
-                view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
-                view_key |= match tonemapping {
-                    Tonemapping::None => MeshPipelineKey::TONEMAP_METHOD_NONE,
-                    Tonemapping::Reinhard => MeshPipelineKey::TONEMAP_METHOD_REINHARD,
-                    Tonemapping::ReinhardLuminance => {
-                        MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE
+                if *tonemapping != Tonemapping::None {
+                    view_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
+                    view_key |= match tonemapping {
+                        Tonemapping::None => MeshPipelineKey::TONEMAP_METHOD_NONE,
+                        Tonemapping::Reinhard => MeshPipelineKey::TONEMAP_METHOD_REINHARD,
+                        Tonemapping::ReinhardLuminance => {
+                            MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE
+                        }
+                        Tonemapping::AcesFitted => MeshPipelineKey::TONEMAP_METHOD_ACES_FITTED,
+                        Tonemapping::AgX => MeshPipelineKey::TONEMAP_METHOD_AGX,
+                        Tonemapping::SomewhatBoringDisplayTransform => {
+                            MeshPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM
+                        }
+                        Tonemapping::TonyMcMapface => {
+                            MeshPipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE
+                        }
+                        Tonemapping::BlenderFilmic => {
+                            MeshPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC
+                        }
+                        Tonemapping::KhronosPbrNeutral => {
+                            MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL
+                        }
+                        Tonemapping::Linear => MeshPipelineKey::TONEMAP_METHOD_LINEAR,
+                        Tonemapping::GranTurismo7 => MeshPipelineKey::TONEMAP_METHOD_GRAN_TURISMO_7,
+                    };
+                    if let Some(DebandDither::Enabled) = dither {
+                        view_key |= MeshPipelineKey::DEBAND_DITHER;
                     }
-                    Tonemapping::AcesFitted => MeshPipelineKey::TONEMAP_METHOD_ACES_FITTED,
-                    Tonemapping::AgX => MeshPipelineKey::TONEMAP_METHOD_AGX,
-                    Tonemapping::SomewhatBoringDisplayTransform => {
-                        MeshPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM
-                    }
-                    Tonemapping::TonyMcMapface => MeshPipelineKey::TONEMAP_METHOD_TONY_MC_MAPFACE,
-                    Tonemapping::BlenderFilmic => MeshPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC,
-                    Tonemapping::PbrNeutral => MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL,
-                };
-            }
-            if let Some(DebandDither::Enabled) = dither {
-                view_key |= MeshPipelineKey::DEBAND_DITHER;
+                }
             }
         }
 

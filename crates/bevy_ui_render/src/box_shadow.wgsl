@@ -1,5 +1,6 @@
 #import bevy_render::view::View;
 #import bevy_render::globals::Globals;
+#import bevy_ui::ui_node::encode_output
 
 const PI: f32 = 3.14159265358979323846;
 const SAMPLES: i32 = #SHADOW_SAMPLES;
@@ -91,7 +92,9 @@ fn fragment(
     in: BoxShadowVertexOutput,
 ) -> @location(0) vec4<f32> {
     let g = in.color.a * roundedBoxShadow(-0.5 * in.size, 0.5 * in.size, in.point, max(in.blur, 0.01), in.radius);
-    return vec4(in.color.rgb, g);
+    // Gamut convert (Rec.709 -> buffer primaries) and writer-encode into the
+    // resolved compositing space; a no-op on default Rec.709 / Linear views.
+    return encode_output(vec4(in.color.rgb, g));
 }
 
 

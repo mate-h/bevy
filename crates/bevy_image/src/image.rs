@@ -1,4 +1,4 @@
-use crate::ImageLoader;
+use crate::{ImageLoader, SourceColorPrimaries};
 
 #[cfg(feature = "basis-universal")]
 use super::basis::*;
@@ -215,6 +215,8 @@ impl Plugin for ImagePlugin {
         app.init_asset::<Image>();
         #[cfg(feature = "bevy_reflect")]
         app.register_asset_reflect::<Image>();
+        #[cfg(feature = "bevy_reflect")]
+        app.register_type::<SourceColorPrimaries>();
 
         let mut image_assets = app.world_mut().resource_mut::<Assets<Image>>();
 
@@ -600,7 +602,14 @@ impl ToExtents for UVec3 {
 ///
 /// ## Remote Inspection
 ///
-/// To transmit an [`Image`] between two running Bevy apps, e.g. through BRP, use [`SerializedImage`](crate::SerializedImage).
+#[cfg_attr(
+    feature = "serialize",
+    doc = "To transmit an [`Image`] between two running Bevy apps, e.g. through BRP, use [`SerializedImage`](crate::SerializedImage)."
+)]
+#[cfg_attr(
+    not(feature = "serialize"),
+    doc = "To transmit an [`Image`] between two running Bevy apps, e.g. through BRP, use `SerializedImage` (requires the `serialize` feature)."
+)]
 /// This type is only meant for short-term transmission between same versions and should not be stored anywhere.
 #[derive(Asset, Debug, Clone, PartialEq)]
 #[cfg_attr(
@@ -643,6 +652,20 @@ pub struct Image {
     pub asset_usage: RenderAssetUsages,
     /// Whether this image should be copied on the GPU when resized.
     pub copy_on_resize: bool,
+    /// The color primaries the image data is expressed in. See
+    /// [`SourceColorPrimaries`] for details.
+    ///
+    /// This is *metadata only* and does not currently affect rendering: it records
+    /// the source gamut so that a wide working color space can convert the data
+    /// correctly at sample or upload time. Defaults to
+    /// [`SourceColorPrimaries::Bt709`] (the sRGB / Rec. 709 primaries), matching
+    /// the previously implicit assumption for all image data.
+    ///
+    /// Loaders stamp this field from explicit loader settings when provided (for
+    /// example [`ImageLoaderSettings::source_primaries`](crate::ImageLoaderSettings)),
+    /// falling back to color metadata carried by the file itself, and finally to
+    /// [`SourceColorPrimaries::Bt709`].
+    pub source_primaries: SourceColorPrimaries,
 }
 
 #[cfg(feature = "serialize")]
@@ -1144,6 +1167,7 @@ impl Image {
             texture_view_descriptor: None,
             asset_usage,
             copy_on_resize: false,
+            source_primaries: SourceColorPrimaries::default(),
         }
     }
 
@@ -1275,6 +1299,7 @@ impl Image {
             }),
             asset_usage: RenderAssetUsages::default(),
             copy_on_resize: true,
+            source_primaries: SourceColorPrimaries::default(),
         }
     }
 
@@ -1519,6 +1544,7 @@ impl Image {
             texture_view_descriptor: self.texture_view_descriptor.clone(),
             asset_usage: self.asset_usage,
             copy_on_resize: self.copy_on_resize,
+            source_primaries: self.source_primaries,
         };
 
         Ok(new_image)
@@ -1549,7 +1575,11 @@ impl Image {
                 }
                 _ => None,
             })
-            .map(|(dyn_img, is_srgb)| Self::from_dynamic(dyn_img, is_srgb, self.asset_usage))
+            .map(|(dyn_img, is_srgb)| {
+                let mut image = Self::from_dynamic(dyn_img, is_srgb, self.asset_usage);
+                image.source_primaries = self.source_primaries;
+                image
+            })
     }
 
     /// Load a bytes buffer in a [`Image`], according to type `image_type`, using the `image`
@@ -2468,6 +2498,26 @@ mod test {
         let image = Image::default();
         assert_eq!(UVec2::ONE, image.size());
         assert_eq!(Vec2::ONE, image.size_f32());
+    }
+
+    #[test]
+    fn image_source_primaries_default_to_bt709() {
+        // Every constructor must preserve the previously implicit BT.709 assumption.
+        for image in [
+            Image::default(),
+            Image::default_uninit(),
+            Image::transparent(),
+            Image::new_target_texture(1, 1, TextureFormat::Rgba8UnormSrgb, None),
+            Image::new_fill(
+                Extent3d::default(),
+                TextureDimension::D2,
+                &[0, 0, 0, 255],
+                TextureFormat::Rgba8Unorm,
+                RenderAssetUsages::MAIN_WORLD,
+            ),
+        ] {
+            assert_eq!(image.source_primaries, SourceColorPrimaries::Bt709);
+        }
     }
 
     #[test]

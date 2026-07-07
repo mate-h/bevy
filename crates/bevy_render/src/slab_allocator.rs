@@ -994,7 +994,10 @@ where
                     mapped_at_creation: true,
                 });
                 {
-                    let mut slice = buffer.slice(..).get_mapped_range_mut();
+                    let mut slice = buffer
+                        .slice(..)
+                        .get_mapped_range_mut()
+                        .expect("buffer mapped at creation should be mappable");
 
                     fill_data(slice.slice(..len));
                 }

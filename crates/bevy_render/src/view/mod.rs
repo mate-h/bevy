@@ -1,3 +1,5 @@
+pub mod composition;
+pub mod display_target_uniform;
 pub mod visibility;
 pub mod window;
 
@@ -6,6 +8,8 @@ use bevy_camera::{
     Exposure, MainPassResolutionOverride, NormalizedRenderTarget,
 };
 use bevy_diagnostic::FrameCount;
+pub use composition::*;
+pub use display_target_uniform::*;
 pub use visibility::*;
 pub use window::*;
 
@@ -22,6 +26,7 @@ use crate::{
         CachedTexture, ColorAttachment, DepthAttachment, GpuImage, ManualTextureViews,
         OutputColorAttachment, TextureCache,
     },
+    working_color_space::{linear_rgba_rec709_to_working, WorkingColorSpace},
     GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 use alloc::sync::{Arc, Weak};
@@ -169,6 +174,7 @@ pub struct ViewPlugin;
 impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "view.wgsl");
+        load_shader_library!(app, "display_target.wgsl");
 
         app
             // NOTE: windows.is_changed() handles cases where a window was resized
@@ -179,6 +185,14 @@ impl Plugin for ViewPlugin {
             ));
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .init_resource::<ResolvedCompositionSpaces>()
+                .add_systems(
+                    Render,
+                    resolve_composition_spaces
+                        .in_set(RenderSystems::CreateViews)
+                        .after(crate::camera::sort_cameras),
+                );
             render_app.add_systems(
                 Render,
                 (
@@ -199,6 +213,16 @@ impl Plugin for ViewPlugin {
                         .after(crate::render_asset::prepare_assets::<GpuImage>)
                         .ambiguous_with(crate::camera::sort_cameras), // doesn't use `sorted_camera_index_for_target`
                     prepare_view_uniforms.in_set(RenderSystems::PrepareResources),
+                    // After `create_surfaces` so the surface's resolved
+                    // transfer (`ExtractedWindow::resolved_transfer`) is
+                    // fresh for this frame's requested `DisplayTarget`;
+                    // before `prepare_windows` to keep resource access on
+                    // `ExtractedWindows` unambiguous.
+                    prepare_view_display_targets
+                        .in_set(RenderSystems::PrepareViews)
+                        .after(create_surfaces)
+                        .before(prepare_windows),
+                    prepare_display_target_uniforms.in_set(RenderSystems::PrepareResources),
                     collect_visible_cpu_culled_entities.in_set(RenderSystems::PrepareAssets),
                 ),
             );
@@ -209,6 +233,7 @@ impl Plugin for ViewPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_gpu_resource::<ViewUniforms>()
+                .init_gpu_resource::<DisplayTargetUniforms>()
                 .init_gpu_resource::<ViewTargetAttachments>();
         }
     }
@@ -701,8 +726,6 @@ pub struct ViewTarget {
     main_texture: Arc<AtomicUsize>,
     /// The final output attachment this view will present to, if available.
     out_texture: Option<OutputColorAttachment>,
-    /// Color space of values stored in the main texture (for blit conversion to output)
-    pub compositing_space: Option<CompositingSpace>,
 }
 
 /// Contains [`OutputColorAttachment`] used for each target present on any view in the current
@@ -1182,23 +1205,49 @@ pub fn cleanup_view_targets_for_resize(
     for (entity, camera) in &cameras {
         if let Some(NormalizedRenderTarget::Window(window_ref)) = &camera.target
             && let Some(window) = windows.get(&window_ref.entity())
-            && (window.size_changed || window.present_mode_changed)
+            && (window.size_changed
+                || window.present_mode_changed
+                // A `DisplayTarget::transfer` change makes `create_surfaces`
+                // re-select the surface format, so the stale `ViewTarget`'s
+                // `out_texture` (and pipelines specialized on its
+                // `out_texture_view_format`) must be invalidated too.
+                || window.display_target_transfer_changed)
         {
             commands.entity(entity).remove::<ViewTarget>();
         }
     }
 }
 
-type MainTextureKey = (
+/// The identity key of a camera's main-texture ping-pong. Cameras with equal
+/// keys share one ping-pong allocation in [`prepare_view_targets`]; the
+/// phase-1 composition resolver ([`resolve_composition_spaces`]) groups by
+/// the same key so space resolution and texture sharing can never disagree.
+pub(crate) type MainTextureKey = (
     Option<NormalizedRenderTarget>,
     TextureUsages,
     TextureFormat,
     Msaa,
 );
 
+/// Builds a camera view's [`MainTextureKey`].
+pub(crate) fn main_texture_key(
+    camera: &ExtractedCamera,
+    view: &ExtractedView,
+    texture_usage: &CameraMainTextureUsages,
+    msaa: Msaa,
+) -> MainTextureKey {
+    (
+        camera.target.clone(),
+        texture_usage.0,
+        view.target_format,
+        msaa,
+    )
+}
+
 pub fn prepare_view_targets(
     mut commands: Commands,
     clear_color_global: Res<ClearColor>,
+    working_color_space: Res<WorkingColorSpace>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
     cameras: Query<(
@@ -1209,6 +1258,7 @@ pub fn prepare_view_targets(
         &Msaa,
     )>,
     view_target_attachments: Res<ViewTargetAttachments>,
+    resolved_spaces: Res<ResolvedCompositionSpaces>,
     mut main_texture_atomics: Local<HashMap<MainTextureKey, Weak<AtomicUsize>>>,
 ) {
     main_texture_atomics.retain(|_, weak| weak.strong_count() > 0);
@@ -1241,21 +1291,56 @@ pub fn prepare_view_targets(
             _ => Some(clear_color_global.0),
         };
 
-        // Convert clear color to the format expected by the main texture
+        // Convert clear color to the format expected by the main texture.
+        //
+        // The main texture holds scene-referred working-space values, so the
+        // clear color converts Rec.709 → working space first (a bit-for-bit
+        // identity for the default `WorkingColorSpace::Rec709`). Under
+        // `WorkingColorSpace::Rec2020` the 2D shaders convert composed colors
+        // to Rec.2020 BEFORE the Oklab compositing encode, so cleared pixels
+        // must follow the same `oklab(working-space values)` buffer
+        // convention or the tonemapping decode's working→Rec.709 step would
+        // mis-convert them. Oklab's LMS matrices remain Rec.709-fit, so
+        // perceptual blending of Rec.2020 values is approximate (documented
+        // caveat: `CompositingSpace::Oklab` degrades under
+        // `WorkingColorSpace::Rec2020`).
+        //
+        // The phase-1 resolved space — not the camera's raw request — decides
+        // the buffer convention: stack members share one main texture, so the
+        // cleared pixels must use the one space the whole stack resolves to.
+        let resolved_space = resolved_spaces.get(entity, camera.compositing_space);
         let converted_clear_color: Option<WgpuColor> =
-            clear_color.map(|color| match camera.compositing_space {
+            clear_color.map(|color| match resolved_space {
                 // If main texture stores Oklab or Srgb, convert Color to it for correct clear.
-                Some(CompositingSpace::Oklab) => Oklaba::from(color).into(),
-                Some(CompositingSpace::Srgb) => Srgba::from(color).into(),
-                Some(CompositingSpace::Linear) | None => LinearRgba::from(color).into(),
+                // Keep the direct conversion for Rec.709 (bit-for-bit with
+                // the pre-working-space behavior); only Rec.2020 routes
+                // through linear for the primaries conversion.
+                Some(CompositingSpace::Oklab) => match *working_color_space {
+                    WorkingColorSpace::Rec709 => Oklaba::from(color).into(),
+                    WorkingColorSpace::Rec2020 => Oklaba::from(linear_rgba_rec709_to_working(
+                        LinearRgba::from(color),
+                        WorkingColorSpace::Rec2020,
+                    ))
+                    .into(),
+                },
+                // Keep the direct conversion for Rec.709 (bit-for-bit with
+                // the pre-working-space behavior); only Rec.2020 routes
+                // through linear for the primaries conversion.
+                Some(CompositingSpace::Srgb) => match *working_color_space {
+                    WorkingColorSpace::Rec709 => Srgba::from(color).into(),
+                    WorkingColorSpace::Rec2020 => Srgba::from(linear_rgba_rec709_to_working(
+                        LinearRgba::from(color),
+                        WorkingColorSpace::Rec2020,
+                    ))
+                    .into(),
+                },
+                Some(CompositingSpace::Linear) | None => {
+                    linear_rgba_rec709_to_working(LinearRgba::from(color), *working_color_space)
+                        .into()
+                }
             });
 
-        let key: MainTextureKey = (
-            camera.target.clone(),
-            texture_usage.0,
-            main_texture_format,
-            *msaa,
-        );
+        let key = main_texture_key(camera, view, texture_usage, *msaa);
         let (a, b, sampled, main_texture) = textures.entry(key.clone()).or_insert_with(|| {
             let descriptor = TextureDescriptor {
                 label: None,
@@ -1330,7 +1415,6 @@ pub fn prepare_view_targets(
             main_textures,
             main_texture_format,
             out_texture: out_attachment.cloned(),
-            compositing_space: camera.compositing_space,
         });
     }
 }

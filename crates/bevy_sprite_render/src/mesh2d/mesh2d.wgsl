@@ -14,6 +14,9 @@
 #ifdef OKLAB_OUTPUT
 #import bevy_render::color_operations::linear_rgb_to_oklab
 #endif
+#ifdef WORKING_COLOR_SPACE_REC2020
+#import bevy_render::working_color_space::rec709_to_rec2020
+#endif
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
@@ -57,6 +60,11 @@ fn fragment(
     var color = in.color;
 #ifdef TONEMAP_IN_SHADER
     color = tonemapping::tone_mapping(color, view.color_grading);
+#endif
+#ifdef WORKING_COLOR_SPACE_REC2020
+    // The composed color converts into the Rec.2020 working space once,
+    // after composition (see the working-space release notes).
+    color = vec4(rec709_to_rec2020(color.rgb), color.a);
 #endif
 #ifdef SRGB_OUTPUT
     color = vec4(linear_to_srgb(color.rgb), color.a);

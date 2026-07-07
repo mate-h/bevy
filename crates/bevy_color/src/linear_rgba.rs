@@ -25,11 +25,14 @@ use bytemuck::{Pod, Zeroable};
 )]
 #[repr(C)]
 pub struct LinearRgba {
-    /// The red channel. [0.0, 1.0]
+    /// The red channel. Typically `[0.0, 1.0]` for SDR display-referred
+    /// colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub red: f32,
-    /// The green channel. [0.0, 1.0]
+    /// The green channel. Typically `[0.0, 1.0]` for SDR display-referred
+    /// colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub green: f32,
-    /// The blue channel. [0.0, 1.0]
+    /// The blue channel. Typically `[0.0, 1.0]` for SDR display-referred
+    /// colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub blue: f32,
     /// The alpha channel. [0.0, 1.0]
     pub alpha: f32,
@@ -114,9 +117,13 @@ impl LinearRgba {
     ///
     /// # Arguments
     ///
-    /// * `red` - Red channel. [0.0, 1.0]
-    /// * `green` - Green channel. [0.0, 1.0]
-    /// * `blue` - Blue channel. [0.0, 1.0]
+    /// * `red` - Red channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
+    /// * `green` - Green channel. Typically `[0.0, 1.0]` for SDR
+    ///   display-referred colors; HDR/scene-referred values may exceed `1.0`
+    ///   and are preserved.
+    /// * `blue` - Blue channel. Typically `[0.0, 1.0]` for SDR display-referred
+    ///   colors; HDR/scene-referred values may exceed `1.0` and are preserved.
     pub const fn rgb(red: f32, green: f32, blue: f32) -> Self {
         Self {
             red,
@@ -141,16 +148,43 @@ impl LinearRgba {
         Self { blue, ..self }
     }
 
-    /// Make the color lighter or darker by some amount
+    /// Make the color lighter or darker by some amount.
+    ///
+    /// For colors within the standard SDR range (luminance and every color channel
+    /// at most `1.0`), the target luminance is clamped to `[0.0, 1.0]`, preserving
+    /// the documented clamp-to-black / clamp-to-white behavior of
+    /// [`Luminance::darker`] and [`Luminance::lighter`]. Colors that are already
+    /// brighter than standard white (HDR) — that is, whose luminance *or* any
+    /// individual channel exceeds `1.0`, matching the SDR predicate used by
+    /// [`Luminance::with_luminance`] — are adjusted without an upper clamp,
+    /// scaling the color and preserving its chromaticity.
     fn adjust_lightness(&mut self, amount: f32) {
         let luminance = self.luminance();
-        let target_luminance = (luminance + amount).clamp(0.0, 1.0);
+        // A color is SDR only if neither its luminance nor any channel exceeds
+        // standard white; a saturated color can have channels above 1.0 while its
+        // luminance stays below 1.0.
+        let is_sdr = luminance <= 1.0 && self.red <= 1.0 && self.green <= 1.0 && self.blue <= 1.0;
+        let target_luminance = if is_sdr {
+            // SDR contract: luminance stays within [0, 1].
+            (luminance + amount).clamp(0.0, 1.0)
+        } else {
+            // HDR: extend without an upper clamp.
+            (luminance + amount).max(0.0)
+        };
         if target_luminance < luminance {
             let adjustment = (luminance - target_luminance) / luminance;
             self.mix_assign(Self::new(0.0, 0.0, 0.0, self.alpha), adjustment);
         } else if target_luminance > luminance {
-            let adjustment = (target_luminance - luminance) / (1. - luminance);
-            self.mix_assign(Self::new(1.0, 1.0, 1.0, self.alpha), adjustment);
+            if is_sdr {
+                let adjustment = (target_luminance - luminance) / (1. - luminance);
+                self.mix_assign(Self::new(1.0, 1.0, 1.0, self.alpha), adjustment);
+            } else {
+                // HDR: scale the color, preserving its chromaticity.
+                let scale = target_luminance / luminance;
+                self.red *= scale;
+                self.green *= scale;
+                self.blue *= scale;
+            }
         }
     }
 
@@ -177,15 +211,41 @@ impl Luminance for LinearRgba {
         self.red * 0.2126 + self.green * 0.7152 + self.blue * 0.0722
     }
 
+    /// Scales the color so that it has the target luminance, preserving its
+    /// chromaticity.
+    ///
+    /// When both the input color and the target luminance are within the standard
+    /// SDR range (components and target in `[0.0, 1.0]`), the result is clamped to
+    /// that range, preserving the documented SDR behavior (which may change the
+    /// resulting hue or luminance). HDR or out-of-gamut inputs and HDR targets are
+    /// passed through without clamping.
     #[inline]
     fn with_luminance(&self, luminance: f32) -> Self {
         let current_luminance = self.luminance();
         let adjustment = luminance / current_luminance;
-        Self {
-            red: (self.red * adjustment).clamp(0., 1.),
-            green: (self.green * adjustment).clamp(0., 1.),
-            blue: (self.blue * adjustment).clamp(0., 1.),
-            alpha: self.alpha,
+        let (red, green, blue) = (
+            self.red * adjustment,
+            self.green * adjustment,
+            self.blue * adjustment,
+        );
+        let sdr = |c: f32| (0.0..=1.0).contains(&c);
+        // The target check only excludes HDR targets (> 1.0): a negative
+        // target is nonphysical, not HDR, and keeps the clamp-to-black
+        // behavior (NaN targets fail the comparison and pass through).
+        if sdr(self.red) && sdr(self.green) && sdr(self.blue) && luminance <= 1.0 {
+            Self {
+                red: red.clamp(0., 1.),
+                green: green.clamp(0., 1.),
+                blue: blue.clamp(0., 1.),
+                alpha: self.alpha,
+            }
+        } else {
+            Self {
+                red,
+                green,
+                blue,
+                alpha: self.alpha,
+            }
         }
     }
 
@@ -459,6 +519,69 @@ mod tests {
         let a = LinearRgba::rgb(0.0, 100.0, -100.0).to_u8_array_no_alpha();
         let b = [0, 255, 0];
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hdr_clamp_relaxation() {
+        // SDR input and SDR target: results keep the documented clamped behavior.
+        let sdr = LinearRgba::new(0.0, 0.0, 1.0, 1.0);
+        let adjusted = sdr.with_luminance(0.5);
+        assert_eq!(adjusted.blue, 1.0);
+
+        // HDR input passes through `with_luminance` unclamped.
+        let hdr = LinearRgba::new(2.0, 4.0, 8.0, 1.0);
+        let adjusted = hdr.with_luminance(2.0 * hdr.luminance());
+        assert!((adjusted.red - 4.0).abs() < 1e-4);
+        assert!((adjusted.green - 8.0).abs() < 1e-4);
+        assert!((adjusted.blue - 16.0).abs() < 1e-4);
+
+        // An HDR target luminance on an SDR color extends past 1.0.
+        let gray = LinearRgba::new(0.5, 0.5, 0.5, 1.0);
+        let bright = gray.with_luminance(2.0);
+        assert!((bright.red - 2.0).abs() < 1e-4);
+        assert!((bright.green - 2.0).abs() < 1e-4);
+        assert!((bright.blue - 2.0).abs() < 1e-4);
+
+        // A negative target is nonphysical, not HDR: an SDR input keeps the
+        // clamp-to-black behavior (consistent with `darker`), never negative
+        // components.
+        let crushed = gray.with_luminance(-0.5);
+        assert_eq!(crushed.red, 0.0);
+        assert_eq!(crushed.green, 0.0);
+        assert_eq!(crushed.blue, 0.0);
+
+        // `lighter` on an SDR color still clamps at white...
+        let almost_white = LinearRgba::new(0.9, 0.9, 0.9, 1.0);
+        let lighter = almost_white.lighter(0.5);
+        assert!((lighter.luminance() - 1.0).abs() < 1e-4);
+
+        // ...but an HDR color keeps getting brighter (and darker works above 1.0).
+        let hdr_gray = LinearRgba::new(2.0, 2.0, 2.0, 1.0);
+        let lighter = hdr_gray.lighter(0.5);
+        assert!((lighter.luminance() - 2.5).abs() < 1e-4);
+        let darker = hdr_gray.darker(0.5);
+        assert!((darker.luminance() - 1.5).abs() < 1e-4);
+
+        // A saturated HDR color (channel above 1.0, luminance below 1.0) is treated
+        // as HDR, consistently with `with_luminance`: `lighter` scales it while
+        // preserving its chromaticity instead of crushing it to SDR white.
+        let saturated_hdr = LinearRgba::new(4.0, 0.0, 0.0, 1.0);
+        let luminance = saturated_hdr.luminance();
+        assert!(luminance < 1.0);
+        let lighter = saturated_hdr.lighter(0.3);
+        assert!((lighter.luminance() - (luminance + 0.3)).abs() < 1e-4);
+        assert!(lighter.red > 4.0);
+        assert_eq!(lighter.green, 0.0);
+        assert_eq!(lighter.blue, 0.0);
+        // ... and it matches `with_luminance` for the same target.
+        let via_with_luminance = saturated_hdr.with_luminance(luminance + 0.3);
+        assert!((lighter.red - via_with_luminance.red).abs() < 1e-4);
+        // `darker` keeps its chromaticity-preserving scale on the same input.
+        let darker = saturated_hdr.darker(0.3);
+        assert!((darker.luminance() - (luminance - 0.3)).abs() < 1e-4);
+        assert!(darker.red < 4.0 && darker.red > 0.0);
+        assert_eq!(darker.green, 0.0);
+        assert_eq!(darker.blue, 0.0);
     }
 
     #[test]

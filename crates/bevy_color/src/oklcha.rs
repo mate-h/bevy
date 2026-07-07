@@ -182,8 +182,13 @@ impl Luminance for Oklcha {
     }
 
     fn lighter(&self, amount: f32) -> Self {
+        let lightness = self.lightness + amount;
         Self::new(
-            (self.lightness + amount).min(1.),
+            if self.lightness <= 1.0 {
+                lightness.min(1.)
+            } else {
+                lightness
+            },
             self.chroma,
             self.hue,
             self.alpha,
