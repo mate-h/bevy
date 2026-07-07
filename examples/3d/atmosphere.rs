@@ -1,11 +1,20 @@
-//! This example showcases pbr atmospheric scattering
+//! This example showcases pbr atmospheric scattering with HDR output.
+//!
+//! Uses [`Tonemapping::GranTurismo7`] and requests the best HDR transfer the
+//! surface supports (PQ/HDR10, scRGB-linear, or extended-range sRGB; SDR
+//! otherwise) via [`HdrPlugin`](hdr::HdrPlugin). Pass `--rec2020` to render in
+//! the wide Rec.2020 working color space (GT7's native input space).
+
+#[path = "../helpers/hdr.rs"]
+mod hdr;
+
 #[cfg(feature = "free_camera")]
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use std::f32::consts::PI;
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
-    camera::Exposure,
+    camera::{Exposure, Hdr},
     color::palettes::css::BLACK,
     core_pipeline::tonemapping::Tonemapping,
     image::{
@@ -27,6 +36,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
+    window::{DisplayGamut, DisplayTransfer},
 };
 
 #[derive(Resource)]
@@ -47,16 +57,32 @@ struct AtmospherePresets {
 }
 
 fn main() {
+    let working_color_space = if std::env::args().any(|arg| arg == "--rec2020") {
+        bevy::render::working_color_space::WorkingColorSpace::Rec2020
+    } else {
+        bevy::render::working_color_space::WorkingColorSpace::Rec709
+    };
+
     App::new()
         .insert_resource(DefaultOpaqueRendererMethod::deferred())
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GameState::default())
         .insert_resource(GlobalAmbientLight::NONE)
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(bevy::render::RenderPlugin {
+                working_color_space,
+                ..default()
+            }),
             #[cfg(feature = "free_camera")]
             FreeCameraPlugin,
         ))
+        .add_plugins(hdr::HdrPlugin {
+            preference: vec![
+                (DisplayTransfer::Pq, DisplayGamut::Rec2020),
+                (DisplayTransfer::ScRgbLinear, DisplayGamut::Rec709),
+                (DisplayTransfer::ExtendedSrgb, DisplayGamut::Rec709),
+            ],
+        })
         .add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, Water>>::default())
         .add_systems(
             Startup,
@@ -235,6 +261,7 @@ fn setup_camera_fog(
 
     commands.spawn((
         Camera3d::default(),
+        Hdr,
         Transform::from_xyz(-2.8, 0.045, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         // Can be adjusted to change the scene scale and rendering quality
         AtmosphereSettings {
@@ -246,9 +273,8 @@ fn setup_camera_fog(
         // quite bright, so raising the exposure compensation helps
         // bring the scene to a nicer brightness range.
         Exposure { ev100: 13.0 },
-        // Tonemapper chosen just because it looked good with the scene, any
-        // tonemapper would be fine :)
-        Tonemapping::AcesFitted,
+        // GT7 is HDR-aware and pairs with the requested display transfer.
+        Tonemapping::GranTurismo7,
         // Bloom gives the sun a much more natural look.
         Bloom::NATURAL,
         // Enables the atmosphere to drive reflections and ambient lighting (IBL) for this view
