@@ -312,6 +312,12 @@ pub struct AtmosphereEnvironmentMapLight {
     pub intensity: f32,
     /// Whether the diffuse contribution should affect meshes that already have lightmaps.
     pub affects_lightmapped_mesh_diffuse: bool,
+    /// Whether volumetric clouds are baked into the generated environment map.
+    ///
+    /// Clouds are still rendered in the sky pass when a [`CloudLayer`](bevy_pbr::CloudLayer) is
+    /// present; this only affects image-based lighting probes, which are too low-resolution to
+    /// represent cloud detail well.
+    pub include_clouds: bool,
     /// Cubemap resolution in pixels (must be a power-of-two).
     pub size: UVec2,
 }
@@ -321,6 +327,7 @@ impl Default for AtmosphereEnvironmentMapLight {
         Self {
             intensity: 1.0,
             affects_lightmapped_mesh_diffuse: true,
+            include_clouds: false,
             size: UVec2::new(512, 512),
         }
     }

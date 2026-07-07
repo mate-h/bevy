@@ -38,6 +38,7 @@ use crate::GpuScatteringMedium;
 pub struct AtmosphereEnvironmentMap {
     pub environment_map: Handle<Image>,
     pub size: UVec2,
+    pub include_clouds: bool,
 }
 
 #[derive(Component)]
@@ -421,6 +422,7 @@ pub fn prepare_atmosphere_probe_components(
         commands.entity(entity).insert(AtmosphereEnvironmentMap {
             environment_map: environment_handle.clone(),
             size: new_size,
+            include_clouds: env_map_light.include_clouds,
         });
 
         commands
@@ -462,7 +464,9 @@ pub fn atmosphere_environment(
     ) = view.into_inner();
 
     for (bind_groups, env_map_light) in probe_query.iter() {
-        let use_clouds = cloud_layer_offset.is_some() && bind_groups.environment_clouds.is_some();
+        let use_clouds = env_map_light.include_clouds
+            && cloud_layer_offset.is_some()
+            && bind_groups.environment_clouds.is_some();
 
         let pipeline = if use_clouds {
             pipeline_cache.get_compute_pipeline(pipelines.environment_clouds)
