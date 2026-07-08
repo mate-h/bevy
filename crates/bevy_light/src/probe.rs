@@ -98,6 +98,29 @@ impl LightProbe {
     }
 }
 
+/// How specular image-based lighting is integrated for an [`EnvironmentMapLight`].
+///
+/// This selects both **mip roughness parameterization** and **runtime sampling** so generation
+/// and shading stay consistent. See Manson & Sloan (EGSR 2015), *Fast Filtering of Reflection
+/// Probes*, esp. §2 (split sum, eq. 3: prefilter ∫ L(l) D(h) dl) vs Frostbite / Karis split-sum
+/// with Listing 22 and a standard BRDF LUT.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+#[reflect(Default)]
+pub enum SpecularEnvironmentIntegration {
+    /// **Frostbite / Karis** split-sum IBL: prefiltered mips in **GGX α** space (typical baked
+    /// tools), Listing 22 for the dominant reflection direction, and the usual `F_ab` /
+    /// multiscatter terms from the BRDF LUT (GGX-aligned prefiltered radiance).
+    #[default]
+    GgxSplitSum,
+    /// **Manson–Sloan** pipeline: GPU pass-2 approximates the split-sum **radiance** term for
+    /// isotropic GGX NDF (paper eq. 3); mips are driven in **perceptual** roughness to match the
+    /// generator (`bevy_pbr::light_probe::generate`). Runtime sampling uses **reflection vector**
+    /// `R`
+    /// (no Listing 22). The BRDF LUT still uses the GGX `F_ab` path until an MS-specific DFG is
+    /// available.
+    MansonSloan,
+}
+
 /// A pair of cubemap textures that represent the surroundings of a specific
 /// area in space.
 ///
@@ -136,6 +159,14 @@ pub struct EnvironmentMapLight {
     ///
     /// By default, this is set to true.
     pub affects_lightmapped_mesh_diffuse: bool,
+
+    /// Specular IBL integration model (GGX split-sum vs Manson–Sloan); must match how the
+    /// specular cubemap was filtered.
+    ///
+    /// Use [`SpecularEnvironmentIntegration::GgxSplitSum`] for prebaked probes; Bevy sets
+    /// [`SpecularEnvironmentIntegration::MansonSloan`] when inserting [`EnvironmentMapLight`]
+    /// from [`GeneratedEnvironmentMapLight`].
+    pub specular_environment_integration: SpecularEnvironmentIntegration,
 }
 
 impl EnvironmentMapLight {
@@ -220,6 +251,7 @@ impl Default for EnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
+            specular_environment_integration: SpecularEnvironmentIntegration::default(),
         }
     }
 }
@@ -280,6 +312,11 @@ pub struct GeneratedEnvironmentMapLight {
     /// Whether this light contributes diffuse lighting to meshes that already
     /// have baked lightmaps.
     pub affects_lightmapped_mesh_diffuse: bool,
+
+    /// When greater than zero, blends the newly filtered specular cubemap toward the previous
+    /// frame (`out = lerp(history, filtered, clamp(alpha, 0, 1))`) to reduce flicker on dynamic probes.
+    #[reflect(ignore)]
+    pub temporal_blend: f32,
 }
 
 impl Default for GeneratedEnvironmentMapLight {
@@ -289,6 +326,7 @@ impl Default for GeneratedEnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
+            temporal_blend: 0.0,
         }
     }
 }

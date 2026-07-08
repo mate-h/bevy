@@ -241,6 +241,7 @@ pub fn prepare_atmosphere_probe_components(
                 intensity: env_map_light.intensity,
                 rotation: Quat::IDENTITY,
                 affects_lightmapped_mesh_diffuse: env_map_light.affects_lightmapped_mesh_diffuse,
+                temporal_blend: 0.0,
             });
     }
 }
