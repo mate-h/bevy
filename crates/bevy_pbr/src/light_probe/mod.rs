@@ -48,16 +48,13 @@ pub mod irradiance_volume;
 
 pub(crate) mod manson_sloan;
 
-/// Total size in bytes of the embedded `manson_sloan_poly_table.bin` blob.
+/// Size in bytes of the embedded Manson–Sloan polynomial filter table.
 pub const MANSON_SLOAN_FILTER_TABLE_BYTE_LEN: usize = manson_sloan::FILTER_TABLE_BYTES.len();
 
-/// Polynomial table rows (one per reference cubemap mip128²…1²).
+/// Number of roughness levels in the Manson–Sloan polynomial table.
 pub const MANSON_SLOAN_FILTER_TABLE_MIPS: usize = manson_sloan::SPECULAR_TABLE_LEVELS;
 
-/// Returns a copy of the embedded Manson–Sloan polynomial filter table for [`GeneratedEnvironmentMapLight`](bevy_light::probe::GeneratedEnvironmentMapLight).
-///
-/// The renderer uploads [`manson_sloan::FILTER_TABLE_BYTES`] at startup; regenerate
-/// `assets/manson_sloan_poly_table.bin` with `assets/build_manson_sloan_poly_table.py` to swap coefficients.
+/// Returns a copy of the embedded Manson–Sloan polynomial filter table.
 #[inline]
 pub fn manson_sloan_filter_table_bytes() -> Vec<u8> {
     manson_sloan::FILTER_TABLE_BYTES.to_vec()
@@ -175,7 +172,7 @@ pub struct LightProbesUniform {
     /// This will be 1 if the map does affect lightmapped meshes or 0 otherwise.
     view_environment_map_affects_lightmapped_mesh_diffuse: u32,
 
-    /// 1 if the view uses Manson–Sloan specular IBL, else 0 (GGX split-sum).
+    /// Whether the view uses Manson–Sloan specular IBL.
     view_manson_sloan_environment_ibl: u32,
 }
 
@@ -261,7 +258,7 @@ bitflags! {
         /// See the comments in [`bevy_light::NoParallaxCorrection`] for more
         /// information.
         const ENABLE_PARALLAX_CORRECTION = 2;
-        /// Specular IBL uses the Manson–Sloan integration path (`SpecularEnvironmentIntegration::MansonSloan`).
+        /// Specular IBL uses the Manson–Sloan integration path.
         const MANSON_SLOAN_ENVIRONMENT_IBL = 4;
     }
 }

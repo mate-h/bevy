@@ -135,7 +135,7 @@ pub struct EnvironmentMapViewLightProbeInfo {
     /// Whether this lightmap affects the diffuse lighting of lightmapped
     /// meshes.
     pub(crate) affects_lightmapped_mesh_diffuse: bool,
-    /// Matches [`EnvironmentMapLight::specular_environment_integration`] for the view cubemap.
+    /// Whether this view environment map uses Manson–Sloan specular IBL.
     pub(crate) manson_sloan_environment_ibl: bool,
     /// World space rotation applied to the environment light cubemaps.
     pub(crate) rotation: Quat,

@@ -1,6 +1,4 @@
-// Pass-1 mip generation per Manson & Sloan EGSR 2015 §4, matching `downsample_cubemap.txt`:
-// four bilinear cubemap samples at Jacobian-weighted corners (not the paper’s full 16-tap
-// quadratic recurrence). Pass-2 polynomial tables assume this preconditioner.
+// Manson–Sloan cubemap downsample.
 
 struct QuadraticDownsampleUniforms {
     src_mip_level: u32,
@@ -13,8 +11,6 @@ struct QuadraticDownsampleUniforms {
 @group(0) @binding(1) var dst_texture: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(2) var<uniform> uniforms: QuadraticDownsampleUniforms;
 
-// Unnormalized direction for face-local (u, v) in [-1, 1] — same layout as `get_dir_*` in
-// `downsample_cubemap.txt` (differs from `sample_cube_dir`’s uvc layout; pass-2 uses Bevy UV).
 fn unorm_dir_from_corner_params(face: u32, u: f32, v: f32) -> vec3f {
     switch face {
         case 0u: { return vec3f(1.0, v, -u); }
@@ -26,14 +22,13 @@ fn unorm_dir_from_corner_params(face: u32, u: f32, v: f32) -> vec3f {
     }
 }
 
-// Cube-map Jacobian weight: ||p||² = dot(p,p) for unnormalized face corner p; weight = ||p||³.
+// Cube-map Jacobian weight for an unnormalized direction.
 fn jacobian_weight_unorm(p_unnorm: vec3f) -> f32 {
     let l2 = dot(p_unnorm, p_unnorm);
     return l2 * sqrt(l2);
 }
 
-// Map reference (u, v) corner params to Bevy face UV in [0, 1] for the same direction as
-// `sample_cube_dir`: (1, v, -u) ≡ (1, -uvc.y, -uvc.x) ⇒ uvc.x = u, uvc.y = -v.
+// Map reference corner parameters to Bevy face UV.
 fn corner_params_to_face_uv01(u: f32, v: f32) -> vec2f {
     let uvc_x = u;
     let uvc_y = -v;
@@ -68,11 +63,10 @@ fn downsample_quadratic_mip(@builtin(global_invocation_id) global_id: vec3u) {
         return;
     }
 
-    // `src_texture` is bound as a single-mip view at the parent mip `uniforms.src_mip_level`.
     let src_size = dst_size * 2u;
     let inv_lo = 1.0 / f32(dst_size);
 
-    // `downsample_cubemap.txt`: offset ±0.75 texel in normalized [-1,1] face space.
+    // Sample four Jacobian-weighted corners.
     let u0 = (f32(coord.x) * 2.0 + 1.0 - 0.75) * inv_lo - 1.0;
     let u1 = (f32(coord.x) * 2.0 + 1.0 + 0.75) * inv_lo - 1.0;
     let v0 = (f32(coord.y) * 2.0 + 1.0 - 0.75) * (-inv_lo) + 1.0;

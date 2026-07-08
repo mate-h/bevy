@@ -10,7 +10,6 @@ struct FilteringConstants {
     noise_size_bits: vec2u,
 }
 
-/// Activision `coeffs_quad_32`: 7 × 5 × 3 × 24 vec4<f32>.
 const MS_POLY_VEC4S: u32 = 2520u;
 const NUM_MS_TAPS_DIV_4: u32 = 8u;
 
@@ -34,9 +33,7 @@ fn dir_axis(v: vec3f, ax: u32) -> f32 {
     }
 }
 
-// Unnormalized direction for this texel — same layout as `sample_cube_dir` (bevy_pbr::utils).
-// Activision reference used +uvc.y on ±X; Bevy uses −uvc.y, so we follow Bevy or mip0 (mirror)
-// and rougher mips disagree on +X/−X (vertical flip).
+// Unnormalized face direction for this cubemap texel.
 fn cube_face_dir_unorm(uv: vec2f, face: u32) -> vec3f {
     let uvc = 2.0 * uv - 1.0;
     switch face {
@@ -57,10 +54,7 @@ fn ms_poly(level: u32, band: u32, term: u32, ix: u32) -> vec4f {
     return ms_poly_table[t * stride + ix];
 }
 
-// Linearly interpolate polynomial coeffs between adjacent table rows. The Activision table has
-// only **7** roughness rows (128²…1²); hard `round(perceptual * 6)` jumps the kernel centroid and
-// reads as horizontal/vertical drift on cube faces when roughness changes. See Manson & Sloan
-// EGSR 2015 §5–6 (spatially varying polynomials; one row per mip in the reference optimizer).
+// Interpolate polynomial coefficients between adjacent table rows.
 fn ms_poly_lerp(table_t: f32, band: u32, term: u32, ix: u32) -> vec4f {
     let lo = u32(clamp(floor(table_t), 0.0, 6.0));
     let hi = u32(clamp(ceil(table_t), 0.0, 6.0));
@@ -72,7 +66,6 @@ fn ms_poly_lerp(table_t: f32, band: u32, term: u32, ix: u32) -> vec4f {
 
 @compute @workgroup_size(8, 8, 1)
 fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
-    // Guard: (0,0) extent → inf UVs → NaN directions → black; encase/uniform bugs or stale binds.
     let size = max(constants.output_size, vec2u(1u));
     let inv_size = 1.0 / vec2f(size);
 
@@ -87,16 +80,12 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     let normal = sample_cube_dir(uv, face);
     let perceptual_roughness = constants.perceptual_roughness;
 
-    // Match `SpecularEnvironmentIntegration::MansonSloan` shading: LOD uses perceptual roughness
-    // (not GGX alpha). Don't use `perceptualRoughnessToRoughness` here or the Filament clamp
-    // (min 0.089) collapses several low mips into the same near-mirror path.
     if (perceptual_roughness < 0.001) {
         let radiance = sample_environment(normal, 0.0).rgb;
         textureStore(output_texture, coords, face, vec4f(radiance, 1.0));
         return;
     }
 
-    // Seven table rows → continuous index in [0, 6] for coefficient interpolation.
     let table_t = clamp(perceptual_roughness * 6.0, 0.0, 6.0);
     let max_lod = f32(textureNumLevels(input_texture) - 1u);
 

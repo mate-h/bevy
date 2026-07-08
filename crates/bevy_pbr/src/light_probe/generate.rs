@@ -44,19 +44,6 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
-// Implementation: generate diffuse and specular cubemaps required by PBR
-// from a given high-res cubemap by
-//
-// 1. Copying the base mip (level 0) of the source cubemap into an intermediate
-//    storage texture.
-// 2. Generating mipmaps with quadratic B-spline + Jacobian weighting (Manson & Sloan EGSR 2015 §4).
-// 3. Convolving the mip chain twice:
-//    * a [Lambertian convolution] for the 32 × 32 diffuse cubemap
-//    * a [Manson–Sloan gather] for the specular cubemap (constant 8×3 trilinear taps + table).
-//
-// [Lambertian convolution]: https://bruop.github.io/ibl/#:~:text=Lambertian%20Diffuse%20Component
-// [Manson–Sloan gather]: https://diglib.eg.org/handle/10.2312/egsr.20151131
-
 use bevy_light::{
     EnvironmentMapLight, GeneratedEnvironmentMapLight, SpecularEnvironmentIntegration,
 };
@@ -95,8 +82,7 @@ pub struct GeneratorPipelines {
     pub temporal_blend: CachedComputePipelineId,
 }
 
-/// Uniforms for Manson–Sloan pass-1 cubemap downsample (4-tap Jacobian-weighted corners per
-/// `downsample_cubemap.txt`; one dispatch per mip level).
+/// Uniforms for Manson–Sloan cubemap downsample.
 #[derive(Clone, Copy, ShaderType)]
 #[repr(C)]
 pub struct QuadraticDownsampleUniforms {
@@ -118,24 +104,18 @@ pub struct TemporalBlendUniforms {
 #[derive(Clone, Copy, ShaderType)]
 #[repr(C)]
 pub struct FilteringConstants {
-    /// Output specular mip index (for debugging / future use).
     mip_level: f32,
     sample_count: u32,
-    /// Perceptual roughness in \[0, 1\] for this mip — matches
-    /// `environment_map.wgsl`: `radiance_level = perceptual_roughness * (num_levels - 1)`.
-    /// Not GGX α (no Filament-style clamp-then-square); that mapping is for BRDF shading, not env mip LOD.
+    /// Perceptual roughness for this mip, matching runtime Manson–Sloan shading.
     perceptual_roughness: f32,
-    /// `log2(cubemap_face_size / 128)` — baked Manson–Sloan LODs assume 128² faces in SA_texel.
+    /// `log2(cubemap_face_size / 128)` for non-128 source cubemaps.
     lod_resolution_bias: f32,
-    /// Width/height of the storage view this dispatch writes (one cubemap face).
-    ///
-    /// `textureDimensions(output_texture)` is not reliable for single-mip storage views on some
-    /// backends; we pass the extent explicitly.
+    /// Output face size. Some backends don't report storage view dimensions reliably.
     output_size: UVec2,
     noise_size_bits: UVec2,
 }
 
-/// GPU buffer storing Manson–Sloan polynomial coefficients (`manson_sloan::FILTER_TABLE_SIZE` bytes).
+/// GPU buffer for Manson–Sloan polynomial filter coefficients.
 #[derive(Resource, Clone)]
 pub struct MansonSloanFilterTableBuffer(pub Buffer);
 
@@ -462,7 +442,6 @@ pub struct RenderEnvironmentMap {
     pub intensity: f32,
     pub rotation: Quat,
     pub affects_lightmapped_mesh_diffuse: bool,
-    /// `0` = off; otherwise blend factor toward this frame's filter (`out = lerp(history, filtered, clamp(alpha,0,1))`).
     pub temporal_blend: f32,
 }
 
@@ -865,8 +844,7 @@ pub fn downsampling_system(
             pass_span.end(&mut compute_pass);
         }
 
-        // One compute pass for the full mip chain: a pass per mip forces wgpu/backend barriers
-        // and shows up as separate labeled passes (and internal prepasses) in tools.
+        // One compute pass for the full mip chain.
         if !bind_groups.quadratic.is_empty() {
             let mut compute_pass =
                 ctx.command_encoder()
@@ -1075,7 +1053,7 @@ pub fn generate_environment_map_light(
             RenderAssetUsages::all(),
         );
 
-        // Set up for mipmaps (+ copy when temporal filtering writes scratch then blends)
+        // Enable copy usage when temporal blending is active.
         let mut spec_usage = TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
         if filtered_env_map.temporal_blend > 0.0 {
             spec_usage |= TextureUsages::COPY_SRC | TextureUsages::COPY_DST;

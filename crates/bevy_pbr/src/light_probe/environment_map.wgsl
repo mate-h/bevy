@@ -95,16 +95,14 @@ fn compute_cubemap_sample_dir(
     return sample_dir;
 }
 
-// Frostbite Listing 22 — only for GGX split-sum (`SpecularEnvironmentIntegration::GgxSplitSum`) cubemaps.
-// https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf#page=70
+// GGX split-sum dominant reflection direction (Frostbite Listing 22).
 fn radiance_sample_direction_ggx_split_sum(N: vec3<f32>, R: vec3<f32>, mip_roughness: f32) -> vec3<f32> {
     let smoothness = saturate(1.0 - mip_roughness);
     let lerp_factor = smoothness * (sqrt(smoothness) + mip_roughness);
     return mix(N, R, lerp_factor);
 }
 
-// Dominant direction for specular environment sampling. GGX split-sum uses Listing 22 above;
-// Manson-Sloan uses `R` to align with the paper prefilter of integral L(l) D(h) dl (isotropic NDF).
+// Specular environment sampling direction. Manson–Sloan uses the reflection vector directly.
 fn environment_specular_sample_direction(
     N: vec3<f32>,
     R: vec3<f32>,
@@ -425,9 +423,6 @@ fn environment_map_light(
         out.diffuse = vec3(0.0);
     }
 
-    // Split-sum: `radiances.radiance` is prefiltered LD. For GGX-split-sum cubemaps, `F_ab` matches
-    // Karis / Filament. For Manson-Sloan (paper eq. 3), LD is a different quadrature of the same
-    // term; an MS-specific DFG LUT would tighten the match — see `SpecularEnvironmentIntegration`.
     out.specular = FssEss * radiances.radiance;
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
