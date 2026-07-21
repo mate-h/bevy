@@ -24,7 +24,8 @@ use bevy_camera::{
     visibility::{self, RenderLayers, VisibleEntities},
     Camera, Camera2d, Camera3d, CameraMainTextureUsages, CameraOutputMode, CameraUpdateSystems,
     ClearColor, ClearColorConfig, CompositingSpace, Exposure, Hdr, ManualTextureViewHandle,
-    MsaaWriteback, NormalizedRenderTarget, Projection, RenderTarget, RenderTargetInfo, Viewport,
+    MsaaWriteback, NormalizedRenderTarget, OmnidirectionalCamera, Projection, RenderTarget,
+    RenderTargetInfo, Viewport,
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -35,7 +36,7 @@ use bevy_ecs::{
     lifecycle::HookContext,
     message::MessageReader,
     prelude::With,
-    query::{Has, QueryItem},
+    query::{Has, QueryItem, Without},
     reflect::ReflectComponent,
     resource::Resource,
     schedule::{InternedScheduleLabel, IntoScheduleConfigs, ScheduleLabel, SystemSet},
@@ -51,7 +52,7 @@ use bevy_reflect::prelude::*;
 use bevy_transform::components::GlobalTransform;
 use bevy_window::{PrimaryWindow, Window, WindowCreated, WindowResized, WindowScaleFactorChanged};
 use itertools::Either;
-use wgpu::TextureFormat;
+use wgpu::{TextureAspect, TextureFormat, TextureViewDescriptor, TextureViewDimension};
 
 /// Main-pass color [`TextureFormat`] keyed by camera render entity.
 #[derive(Resource, Default, Deref, DerefMut)]
@@ -193,12 +194,12 @@ impl CameraRenderGraph {
 }
 
 pub trait NormalizedRenderTargetExt {
-    fn get_texture_view<'a>(
+    fn get_texture_view(
         &self,
-        windows: &'a ExtractedWindows,
-        images: &'a RenderAssets<GpuImage>,
-        manual_texture_views: &'a ManualTextureViews,
-    ) -> Option<&'a TextureView>;
+        windows: &ExtractedWindows,
+        images: &RenderAssets<GpuImage>,
+        manual_texture_views: &ManualTextureViews,
+    ) -> Option<TextureView>;
 
     /// Retrieves the [`TextureFormat`] of this render target, if it exists.
     fn get_texture_view_format<'a>(
@@ -224,22 +225,39 @@ pub trait NormalizedRenderTargetExt {
 }
 
 impl NormalizedRenderTargetExt for NormalizedRenderTarget {
-    fn get_texture_view<'a>(
+    fn get_texture_view(
         &self,
-        windows: &'a ExtractedWindows,
-        images: &'a RenderAssets<GpuImage>,
-        manual_texture_views: &'a ManualTextureViews,
-    ) -> Option<&'a TextureView> {
+        windows: &ExtractedWindows,
+        images: &RenderAssets<GpuImage>,
+        manual_texture_views: &ManualTextureViews,
+    ) -> Option<TextureView> {
         match self {
             NormalizedRenderTarget::Window(window_ref) => windows
                 .get(&window_ref.entity())
-                .and_then(|window| window.swap_chain_texture_view.as_ref()),
-            NormalizedRenderTarget::Image(image_target) => images
-                .get(&image_target.handle)
-                .map(|image| &image.texture_view),
-            NormalizedRenderTarget::TextureView(id) => {
-                manual_texture_views.get(id).map(|tex| &tex.texture_view)
+                .and_then(|window| window.swap_chain_texture_view.clone()),
+            NormalizedRenderTarget::Image(image_target) => {
+                images
+                    .get(&image_target.handle)
+                    .map(|image| match image_target.array_layer {
+                        None => image.texture_view.clone(),
+                        Some(base_array_layer) => {
+                            image.texture.create_view(&TextureViewDescriptor {
+                                label: None,
+                                format: Some(image.texture_descriptor.format),
+                                dimension: Some(TextureViewDimension::D2),
+                                usage: None,
+                                aspect: TextureAspect::All,
+                                base_mip_level: 0,
+                                mip_level_count: Some(1),
+                                base_array_layer,
+                                array_layer_count: Some(1),
+                            })
+                        }
+                    })
             }
+            NormalizedRenderTarget::TextureView(id) => manual_texture_views
+                .get(id)
+                .map(|tex| tex.texture_view.clone()),
             NormalizedRenderTarget::None { .. } => None,
         }
     }
@@ -474,27 +492,30 @@ pub fn extract_cameras(
     mut commands: Commands,
     mut main_pass_formats: ResMut<CameraMainPassTextureFormats>,
     query: Extract<
-        Query<(
-            Entity,
-            RenderEntity,
-            &Camera,
-            &RenderTarget,
-            &CameraRenderGraph,
-            &GlobalTransform,
-            &VisibleEntities,
-            &Frustum,
+        Query<
             (
-                Has<Hdr>,
-                Option<&CompositingSpace>,
-                Option<&ColorGrading>,
-                Option<&Exposure>,
-                Option<&TemporalJitter>,
-                Option<&MipBias>,
-                Option<&RenderLayers>,
-                Option<&Projection>,
-                Has<NoIndirectDrawing>,
+                Entity,
+                RenderEntity,
+                &Camera,
+                &RenderTarget,
+                &CameraRenderGraph,
+                &GlobalTransform,
+                &VisibleEntities,
+                &Frustum,
+                (
+                    Has<Hdr>,
+                    Option<&CompositingSpace>,
+                    Option<&ColorGrading>,
+                    Option<&Exposure>,
+                    Option<&TemporalJitter>,
+                    Option<&MipBias>,
+                    Option<&RenderLayers>,
+                    Option<&Projection>,
+                    Has<NoIndirectDrawing>,
+                ),
             ),
-        )>,
+            Without<OmnidirectionalCamera>,
+        >,
     >,
     primary_window: Extract<Query<Entity, With<PrimaryWindow>>>,
     extracted_windows: Res<ExtractedWindows>,

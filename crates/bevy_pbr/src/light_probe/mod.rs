@@ -2,12 +2,13 @@
 
 use bevy_app::{App, Plugin};
 use bevy_asset::AssetId;
-use bevy_camera::{visibility::VisibleEntities, Camera3d};
+use bevy_camera::{visibility::VisibleEntities, Camera3d, OmnidirectionalCamera};
+use bevy_core_pipeline::core_3d::RenderOmnidirectionalCameras;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::{QueryData, ReadOnlyQueryData, With},
+    query::{Has, QueryData, ReadOnlyQueryData, With},
     resource::Resource,
     schedule::IntoScheduleConfigs,
     system::{Commands, Local, Query, Res, ResMut},
@@ -390,12 +391,14 @@ impl Plugin for LightProbePlugin {
             .add_systems(
                 ExtractSchedule,
                 gather_light_probes::<EnvironmentMapLight>
+                    .after(bevy_core_pipeline::core_3d::extract_omnidirectional_cameras)
                     .before(extract_clusters_for_cpu_clustering)
                     .before(extract_clusters_for_gpu_clustering),
             )
             .add_systems(
                 ExtractSchedule,
                 gather_light_probes::<IrradianceVolume>
+                    .after(bevy_core_pipeline::core_3d::extract_omnidirectional_cameras)
                     .before(extract_clusters_for_cpu_clustering)
                     .before(extract_clusters_for_gpu_clustering),
             )
@@ -410,58 +413,117 @@ impl Plugin for LightProbePlugin {
 /// to views, performing frustum culling and distance sorting in the process.
 fn gather_light_probes<C>(
     image_assets: Res<RenderAssets<GpuImage>>,
+    omnidirectional_cameras: Res<RenderOmnidirectionalCameras>,
     light_probe_query: Extract<Query<(Entity, &GlobalTransform, &LightProbe, &C, C::QueryData)>>,
     view_query: Extract<
-        Query<(RenderEntity, &GlobalTransform, &VisibleEntities, Option<&C>), With<Camera3d>>,
+        Query<
+            (
+                Entity,
+                RenderEntity,
+                &GlobalTransform,
+                &VisibleEntities,
+                Option<&C>,
+                Has<OmnidirectionalCamera>,
+            ),
+            With<Camera3d>,
+        >,
+    >,
+    omni_view_query: Extract<
+        Query<
+            (
+                Entity,
+                &GlobalTransform,
+                &bevy_camera::visibility::OmnidirectionalVisibleEntities,
+                Option<&C>,
+            ),
+            (With<Camera3d>, With<OmnidirectionalCamera>),
+        >,
     >,
     mut view_light_probe_info: Local<Vec<LightProbeInfo<C>>>,
     mut commands: Commands,
 ) where
     C: LightProbeComponent,
 {
-    // Build up the light probes uniform and the key table.
-    for (view_entity, view_transform, visible_entities, view_component) in view_query.iter() {
-        view_light_probe_info.clear();
-        let visible_light_probes = visible_entities.get(TypeId::of::<ClusterVisibilityClass>());
-        for &main_entity in visible_light_probes {
-            let Ok(query_row) = light_probe_query.get(main_entity) else {
-                // This might not be a light probe. If so, ignore it.
-                continue;
-            };
-            // If we don't successfully create `LightProbeInfo`, that means
-            // the light probe hasn't loaded yet. We don't add such light
-            // probes to `view_light_probe_info` so that they don't waste
-            // space in the GPU light probe buffer, which has a limited
-            // size.
-            if let Some(light_probe_info) = LightProbeInfo::new(query_row, &image_assets) {
-                view_light_probe_info.push(light_probe_info);
-            }
+    // Regular (non-omnidirectional) cameras.
+    for (main_entity, view_entity, view_transform, visible_entities, view_component, is_omni) in
+        view_query.iter()
+    {
+        if is_omni {
+            continue;
         }
+        let _ = main_entity;
+        assign_light_probes_to_view(
+            view_entity,
+            view_transform,
+            visible_entities,
+            view_component,
+            &light_probe_query,
+            &image_assets,
+            &mut view_light_probe_info,
+            &mut commands,
+        );
+    }
 
-        // Sort by distance to camera.
-        view_light_probe_info.sort_by_cached_key(|light_probe_info| {
-            light_probe_info.camera_distance_sort_key(view_transform)
-        });
-
-        // Create the light probes list.
-        let mut render_view_light_probes =
-            C::create_render_view_light_probes(view_component, &image_assets);
-
-        // Gather up the light probes in the list.
-        render_view_light_probes.maybe_gather_light_probes(&view_light_probe_info);
-
-        // Record the per-view light probes.
-        if render_view_light_probes.is_empty() {
-            commands
-                .get_entity(view_entity)
-                .expect("View entity wasn't synced.")
-                .remove::<RenderViewLightProbes<C>>();
-        } else {
-            commands
-                .get_entity(view_entity)
-                .expect("View entity wasn't synced.")
-                .insert(render_view_light_probes);
+    // Omnidirectional cameras: assign probes to each active face sub-camera.
+    for (main_entity, view_transform, omni_visible_entities, view_component) in
+        omni_view_query.iter()
+    {
+        let Some(faces) = omnidirectional_cameras.get(&main_entity) else {
+            continue;
+        };
+        for &(face_entity, face_index) in faces {
+            let visible_entities = omni_visible_entities.get(face_index as usize);
+            assign_light_probes_to_view(
+                face_entity,
+                view_transform,
+                visible_entities,
+                view_component,
+                &light_probe_query,
+                &image_assets,
+                &mut view_light_probe_info,
+                &mut commands,
+            );
         }
+    }
+}
+
+fn assign_light_probes_to_view<C>(
+    view_entity: Entity,
+    view_transform: &GlobalTransform,
+    visible_entities: &VisibleEntities,
+    view_component: Option<&C>,
+    light_probe_query: &Extract<Query<(Entity, &GlobalTransform, &LightProbe, &C, C::QueryData)>>,
+    image_assets: &RenderAssets<GpuImage>,
+    view_light_probe_info: &mut Vec<LightProbeInfo<C>>,
+    commands: &mut Commands,
+) where
+    C: LightProbeComponent,
+{
+    view_light_probe_info.clear();
+    let visible_light_probes = visible_entities.get(TypeId::of::<ClusterVisibilityClass>());
+    for &main_entity in visible_light_probes {
+        let Ok(query_row) = light_probe_query.get(main_entity) else {
+            continue;
+        };
+        if let Some(light_probe_info) = LightProbeInfo::new(query_row, image_assets) {
+            view_light_probe_info.push(light_probe_info);
+        }
+    }
+
+    view_light_probe_info.sort_by_cached_key(|light_probe_info| {
+        light_probe_info.camera_distance_sort_key(view_transform)
+    });
+
+    let mut render_view_light_probes =
+        C::create_render_view_light_probes(view_component, image_assets);
+    render_view_light_probes.maybe_gather_light_probes(view_light_probe_info);
+
+    if render_view_light_probes.is_empty() {
+        if let Ok(mut entity) = commands.get_entity(view_entity) {
+            entity.remove::<RenderViewLightProbes<C>>();
+        }
+    } else if let Ok(mut entity) = commands.get_entity(view_entity) {
+        entity.insert(render_view_light_probes);
     }
 }
 

@@ -34,6 +34,7 @@ thiserror = { version = "2", default-features = false }
 downcast-rs = { version = "2", default-features = false, features = ["std"] }
 derive_more = { version = "2", default-features = false, features = ["from"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
+bitflags = "2.3"
 
 [features]
 default = []

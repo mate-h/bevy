@@ -988,13 +988,20 @@ pub struct ImageRenderTarget {
     /// The scale factor of the render target image, corresponding to the scale
     /// factor for a window target. This should almost always be 1.0.
     pub scale_factor: f32,
+    /// When set, renders to a single array layer (or cubemap face) of the image
+    /// instead of the full texture view.
+    ///
+    /// This is used by omnidirectional cameras to target individual cubemap faces.
+    pub array_layer: Option<u32>,
 }
 
 impl Eq for ImageRenderTarget {}
 
 impl PartialEq for ImageRenderTarget {
     fn eq(&self, other: &Self) -> bool {
-        self.handle == other.handle && FloatOrd(self.scale_factor) == FloatOrd(other.scale_factor)
+        self.handle == other.handle
+            && FloatOrd(self.scale_factor) == FloatOrd(other.scale_factor)
+            && self.array_layer == other.array_layer
     }
 }
 
@@ -1002,6 +1009,7 @@ impl core::hash::Hash for ImageRenderTarget {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.handle.hash(state);
         FloatOrd(self.scale_factor).hash(state);
+        self.array_layer.hash(state);
     }
 }
 
@@ -1016,6 +1024,7 @@ impl Ord for ImageRenderTarget {
         self.handle
             .cmp(&other.handle)
             .then_with(|| FloatOrd(self.scale_factor).cmp(&FloatOrd(other.scale_factor)))
+            .then_with(|| self.array_layer.cmp(&other.array_layer))
     }
 }
 
@@ -1030,6 +1039,7 @@ impl From<Handle<Image>> for ImageRenderTarget {
         Self {
             handle,
             scale_factor: 1.0,
+            array_layer: None,
         }
     }
 }

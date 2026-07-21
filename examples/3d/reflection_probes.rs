@@ -5,18 +5,25 @@
 //! 1. A pre-generated [`EnvironmentMapLight`] acting as a reflection probe, with both the skybox and cubes
 //! 2. A runtime-generated [`GeneratedEnvironmentMapLight`] acting as a reflection probe with just the skybox
 //! 3. A pre-generated [`EnvironmentMapLight`] with just the skybox
+//! 4. A real-time [`OmnidirectionalCamera`] writing a cubemap used as a dynamic reflection probe
 //!
 //! Press Enter to pause or resume rotation.
 //!
 //! Reflection probes don't work on WebGL 2 or WebGPU.
 
 use bevy::{
-    camera::{Exposure, Hdr},
+    camera::{
+        visibility::RenderLayers, Exposure, Hdr, ImageRenderTarget, OmnidirectionalCamera,
+        OmnidirectionalProjection, RenderTarget,
+    },
     core_pipeline::tonemapping::Tonemapping,
     light::{ParallaxCorrection, Skybox},
     pbr::generate::generate_environment_map_light,
     prelude::*,
-    render::render_resource::TextureUsages,
+    render::render_resource::{
+        Extent3d, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        TextureViewDescriptor, TextureViewDimension,
+    },
 };
 
 use std::{
@@ -30,6 +37,10 @@ static START_ROTATION_HELP_TEXT: &str = "Press Enter to start rotation";
 static REFLECTION_MODE_HELP_TEXT: &str = "Press Space to switch reflection mode";
 
 const ENV_MAP_INTENSITY: f32 = 5000.0;
+
+/// Render layer for the dynamic reflection probe light. The omnidirectional
+/// capture camera must not see this layer, or it would sample its own output.
+const DYNAMIC_PROBE_LAYER: usize = 1;
 
 // The mode the application is in.
 #[derive(Resource)]
@@ -52,6 +63,8 @@ enum ReflectionMode {
     ReflectionProbe = 1,
     // A generated environment map is shown.
     GeneratedEnvironmentMap = 2,
+    // A real-time omnidirectional camera feeds a dynamic reflection probe.
+    DynamicReflectionProbe = 3,
 }
 
 // The various reflection maps.
@@ -65,10 +78,12 @@ struct Cubemaps {
 
     // The specular cubemap mip chain that reflects both the world and the cubes.
     specular_reflection_probe: Handle<Image>,
+
+    // A cubemap written every frame by an omnidirectional camera.
+    dynamic_specular_reflection_probe: Handle<Image>,
 }
 
 fn main() {
-    // Create the app.
     App::new()
         .add_plugins(DefaultPlugins)
         .init_resource::<AppStatus>()
@@ -88,7 +103,6 @@ fn main() {
                 .after(change_reflection_type),
         )
         .add_systems(Update, update_text.after(rotate_camera))
-        .add_systems(Update, setup_environment_map_usage)
         .run();
 }
 
@@ -103,7 +117,14 @@ fn setup(
 ) {
     spawn_camera(&mut commands);
     spawn_sphere(&mut commands, &mut meshes, &mut materials, &app_status);
-    spawn_reflection_probe(&mut commands, &cubemaps);
+    match app_status.reflection_mode {
+        ReflectionMode::DynamicReflectionProbe => {
+            spawn_dynamic_reflection_probe(&mut commands, &cubemaps);
+        }
+        _ => {
+            spawn_reflection_probe(&mut commands, &cubemaps);
+        }
+    }
     spawn_scene(&mut commands, &asset_server);
     spawn_text(&mut commands, &app_status);
 }
@@ -170,6 +191,56 @@ fn spawn_reflection_probe(commands: &mut Commands, cubemaps: &Cubemaps) {
     ));
 }
 
+fn spawn_dynamic_reflection_probe(commands: &mut Commands, cubemaps: &Cubemaps) {
+    // Omni camera writes linear HDR (no tonemap) into the dynamic cubemap.
+    // It sees the default scene layer only — not the dynamic probe layer —
+    // so capture does not feed on its own filtered output.
+    commands.spawn((
+        OmnidirectionalCamera,
+        Camera3d::default(),
+        Camera {
+            order: -1,
+            ..default()
+        },
+        OmnidirectionalProjection::default(),
+        Hdr,
+        Exposure { ev100: 11.0 },
+        // Probe capture must stay scene-referred; ACES would crush radiance
+        // before GeneratedEnvironmentMapLight filtering / IBL sampling.
+        Tonemapping::None,
+        RenderTarget::Image(ImageRenderTarget {
+            handle: cubemaps.dynamic_specular_reflection_probe.clone(),
+            scale_factor: 1.0,
+            array_layer: None,
+        }),
+        Skybox {
+            image: Some(cubemaps.specular_environment_map.clone()),
+            brightness: ENV_MAP_INTENSITY,
+            ..default()
+        },
+        // View-level IBL so dielectric cubes are lit while being captured.
+        create_camera_environment_map_light(cubemaps),
+        RenderLayers::layer(0),
+        Transform::default(),
+        DynamicProbeCamera,
+    ));
+
+    // Filter the realtime cubemap into diffuse/specular maps for PBR sampling.
+    // Layer 1: hidden from the omni capture camera (layer 0 only) so capture
+    // cannot sample its own filtered output.
+    commands.spawn((
+        LightProbe::default(),
+        GeneratedEnvironmentMapLight {
+            environment_map: cubemaps.dynamic_specular_reflection_probe.clone(),
+            intensity: ENV_MAP_INTENSITY,
+            ..default()
+        },
+        Transform::from_scale(Vec3::splat(2.0)),
+        ParallaxCorrection::None,
+        RenderLayers::layer(DYNAMIC_PROBE_LAYER),
+    ));
+}
+
 // Spawns the help text.
 fn spawn_text(commands: &mut Commands, app_status: &AppStatus) {
     // Create the text.
@@ -189,18 +260,23 @@ fn spawn_text(commands: &mut Commands, app_status: &AppStatus) {
 // the environment map after the fact.
 fn add_environment_map_to_camera(
     mut commands: Commands,
-    query: Query<Entity, Added<Camera3d>>,
+    query: Query<Entity, (Added<Camera3d>, Without<OmnidirectionalCamera>)>,
     cubemaps: Res<Cubemaps>,
+    app_status: Res<AppStatus>,
 ) {
     for camera_entity in query.iter() {
-        commands
-            .entity(camera_entity)
+        let mut entity = commands.entity(camera_entity);
+        entity
             .insert(create_camera_environment_map_light(&cubemaps))
             .insert(Skybox {
                 image: Some(cubemaps.specular_environment_map.clone()),
                 brightness: ENV_MAP_INTENSITY,
                 ..default()
             });
+        // Startup defaults to dynamic probe mode: main view must see layer 1.
+        if app_status.reflection_mode == ReflectionMode::DynamicReflectionProbe {
+            entity.insert(RenderLayers::from_layers(&[0, DYNAMIC_PROBE_LAYER]));
+        }
     }
 }
 
@@ -209,7 +285,8 @@ fn change_reflection_type(
     mut commands: Commands,
     light_probe_query: Query<Entity, With<LightProbe>>,
     cubes_scene_query: Query<Entity, With<CubesScene>>,
-    camera_query: Query<Entity, With<Camera3d>>,
+    camera_query: Query<Entity, (With<Camera3d>, Without<OmnidirectionalCamera>)>,
+    dynamic_probe_camera_query: Query<Entity, With<DynamicProbeCamera>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut app_status: ResMut<AppStatus>,
     cubemaps: Res<Cubemaps>,
@@ -222,11 +299,14 @@ fn change_reflection_type(
 
     // Advance to the next reflection mode.
     app_status.reflection_mode =
-        ReflectionMode::try_from((app_status.reflection_mode as u32 + 1) % 3).unwrap();
+        ReflectionMode::try_from((app_status.reflection_mode as u32 + 1) % 4).unwrap();
 
-    // Remove light probes
+    // Remove light probes and dynamic probe cameras
     for light_probe in light_probe_query.iter() {
         commands.entity(light_probe).despawn();
+    }
+    for camera in dynamic_probe_camera_query.iter() {
+        commands.entity(camera).despawn();
     }
     // Remove existing cube scenes
     for scene_entity in cubes_scene_query.iter() {
@@ -236,6 +316,10 @@ fn change_reflection_type(
         ReflectionMode::EnvironmentMap | ReflectionMode::GeneratedEnvironmentMap => {}
         ReflectionMode::ReflectionProbe => {
             spawn_reflection_probe(&mut commands, &cubemaps);
+            spawn_scene(&mut commands, &asset_server);
+        }
+        ReflectionMode::DynamicReflectionProbe => {
+            spawn_dynamic_reflection_probe(&mut commands, &cubemaps);
             spawn_scene(&mut commands, &asset_server);
         }
     }
@@ -250,20 +334,29 @@ fn change_reflection_type(
         match app_status.reflection_mode {
             // A baked or reflection-probe environment map
             ReflectionMode::EnvironmentMap | ReflectionMode::ReflectionProbe => {
-                commands
-                    .entity(camera)
-                    .insert(create_camera_environment_map_light(&cubemaps));
+                commands.entity(camera).insert((
+                    create_camera_environment_map_light(&cubemaps),
+                    RenderLayers::layer(0),
+                ));
+            }
+            ReflectionMode::DynamicReflectionProbe => {
+                // See default scene (0) and the dynamic probe light (1).
+                commands.entity(camera).insert((
+                    create_camera_environment_map_light(&cubemaps),
+                    RenderLayers::from_layers(&[0, DYNAMIC_PROBE_LAYER]),
+                ));
             }
 
             // GPU-filtered environment map generated at runtime
             ReflectionMode::GeneratedEnvironmentMap => {
-                commands
-                    .entity(camera)
-                    .insert(GeneratedEnvironmentMapLight {
+                commands.entity(camera).insert((
+                    GeneratedEnvironmentMapLight {
                         environment_map: cubemaps.specular_environment_map.clone(),
                         intensity: ENV_MAP_INTENSITY,
                         ..default()
-                    });
+                    },
+                    RenderLayers::layer(0),
+                ));
             }
         }
     }
@@ -291,6 +384,7 @@ impl TryFrom<u32> for ReflectionMode {
             0 => Ok(ReflectionMode::EnvironmentMap),
             1 => Ok(ReflectionMode::ReflectionProbe),
             2 => Ok(ReflectionMode::GeneratedEnvironmentMap),
+            3 => Ok(ReflectionMode::DynamicReflectionProbe),
             _ => Err(()),
         }
     }
@@ -302,6 +396,7 @@ impl Display for ReflectionMode {
             ReflectionMode::EnvironmentMap => "Environment map",
             ReflectionMode::ReflectionProbe => "Reflection probe",
             ReflectionMode::GeneratedEnvironmentMap => "Generated environment map",
+            ReflectionMode::DynamicReflectionProbe => "Dynamic reflection probe",
         };
         formatter.write_str(text)
     }
@@ -322,7 +417,7 @@ impl AppStatus {
             self.reflection_mode,
             rotation_help_text,
             self.sphere_roughness,
-            REFLECTION_MODE_HELP_TEXT
+            REFLECTION_MODE_HELP_TEXT,
         )
         .into()
     }
@@ -342,7 +437,7 @@ fn create_camera_environment_map_light(cubemaps: &Cubemaps) -> EnvironmentMapLig
 // Rotates the camera a bit every frame.
 fn rotate_camera(
     time: Res<Time>,
-    mut camera_query: Query<&mut Transform, With<Camera3d>>,
+    mut camera_query: Query<&mut Transform, (With<Camera3d>, Without<OmnidirectionalCamera>)>,
     app_status: Res<AppStatus>,
 ) {
     if !app_status.rotating {
@@ -361,6 +456,41 @@ fn rotate_camera(
 // Loads the cubemaps from the assets directory.
 impl FromWorld for Cubemaps {
     fn from_world(world: &mut World) -> Self {
+        let dynamic_specular_reflection_probe_size = Extent3d {
+            width: 256,
+            height: 256,
+            depth_or_array_layers: 6,
+        };
+
+        let mut dynamic_specular_reflection_probe = Image {
+            texture_descriptor: TextureDescriptor {
+                label: Some("dynamic specular reflection probe"),
+                size: dynamic_specular_reflection_probe_size,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            },
+            texture_view_descriptor: Some(TextureViewDescriptor {
+                label: Some("dynamic specular reflection probe view"),
+                format: None,
+                dimension: Some(TextureViewDimension::Cube),
+                usage: None,
+                aspect: TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: 0,
+                array_layer_count: None,
+            }),
+            ..default()
+        };
+
+        dynamic_specular_reflection_probe.resize(dynamic_specular_reflection_probe_size);
+
         Cubemaps {
             diffuse_environment_map: world
                 .load_asset("environment_maps/pisa_diffuse_rgb9e5_zstd.ktx2"),
@@ -368,25 +498,15 @@ impl FromWorld for Cubemaps {
                 .load_asset("environment_maps/pisa_specular_rgb9e5_zstd.ktx2"),
             specular_reflection_probe: world
                 .load_asset("environment_maps/cubes_reflection_probe_specular_rgb9e5_zstd.ktx2"),
+            dynamic_specular_reflection_probe: world.add_asset(dynamic_specular_reflection_probe),
         }
-    }
-}
-
-fn setup_environment_map_usage(cubemaps: Res<Cubemaps>, mut images: ResMut<Assets<Image>>) {
-    if let Some(mut image) = images.get_mut(&cubemaps.specular_environment_map)
-        && !image
-            .texture_descriptor
-            .usage
-            .contains(TextureUsages::COPY_SRC)
-    {
-        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     }
 }
 
 impl Default for AppStatus {
     fn default() -> Self {
         Self {
-            reflection_mode: ReflectionMode::ReflectionProbe,
+            reflection_mode: ReflectionMode::DynamicReflectionProbe,
             rotating: false,
             sphere_roughness: 0.2,
         }
@@ -398,6 +518,9 @@ struct SphereMaterial;
 
 #[derive(Component)]
 struct CubesScene;
+
+#[derive(Component)]
+struct DynamicProbeCamera;
 
 // A system that changes the sphere's roughness with up/down arrow keys
 fn change_sphere_roughness(

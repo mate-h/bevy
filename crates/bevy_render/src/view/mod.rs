@@ -1255,9 +1255,8 @@ pub fn prepare_view_attachments(
             Entry::Vacant(entry) => {
                 let Some(attachment) = target
                     .get_texture_view(&windows, &images, &manual_texture_views)
-                    .cloned()
                     .zip(target.get_texture_view_format(&windows, &images, &manual_texture_views))
-                    .map(|(view, format)| OutputColorAttachment::new(view.clone(), format))
+                    .map(|(view, format)| OutputColorAttachment::new(view, format))
                 else {
                     continue;
                 };
