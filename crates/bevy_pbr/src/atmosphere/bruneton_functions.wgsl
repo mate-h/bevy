@@ -138,6 +138,6 @@ fn distance_to_bottom_atmosphere_boundary(r: f32, mu: f32) -> f32 {
     return max(-r * mu - sqrt(positive_discriminant), 0.0);
 }
 
-fn ray_intersects_ground(r: f32, mu: f32) -> bool {
-    return mu < 0.0 && r * r * (mu * mu - 1.0) + atmosphere.inner_radius * atmosphere.inner_radius >= 0.0;
+fn ray_intersects_ground(atm: Atmosphere, r: f32, mu: f32) -> bool {
+    return mu < 0.0 && r * r * (mu * mu - 1.0) + atm.inner_radius * atm.inner_radius >= 0.0;
 }

@@ -1290,6 +1290,18 @@ category = "3D Rendering"
 wasm = true
 
 [[example]]
+name = "atmosphere_umbra"
+path = "examples/3d/atmosphere_umbra.rs"
+doc-scrape-examples = false
+required-features = ["free_camera"]
+
+[package.metadata.example.atmosphere_umbra]
+name = "Atmosphere Umbra"
+description = "Small planet atmosphere casting an umbra on an orbiting body"
+category = "3D Rendering"
+wasm = false
+
+[[example]]
 name = "fog"
 path = "examples/3d/fog.rs"
 doc-scrape-examples = true

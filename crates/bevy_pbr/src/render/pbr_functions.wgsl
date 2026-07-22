@@ -415,6 +415,9 @@ fn apply_pbr_lighting(
     lighting_input.F0_dielectric = calculate_F0_dielectric(reflectance);
     lighting_input.F0_metallic = output_color.rgb;
     lighting_input.F_ab = F_ab;
+#ifdef ATMOSPHERE
+    lighting_input.frag_coord = in.frag_coord.xy;
+#endif
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     lighting_input.layers[LAYER_CLEARCOAT].NdotV = clearcoat_NdotV;
     lighting_input.layers[LAYER_CLEARCOAT].N = clearcoat_N;
@@ -444,6 +447,9 @@ fn apply_pbr_lighting(
     transmissive_lighting_input.F0_dielectric = vec3(0.0);
     transmissive_lighting_input.F0_metallic = vec3(0.0);
     transmissive_lighting_input.F_ab = vec2(0.1);
+#ifdef ATMOSPHERE
+    transmissive_lighting_input.frag_coord = in.frag_coord.xy;
+#endif
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     transmissive_lighting_input.layers[LAYER_CLEARCOAT].NdotV = 0.0;
     transmissive_lighting_input.layers[LAYER_CLEARCOAT].N = vec3(0.0);

@@ -1,6 +1,7 @@
 #define_import_path bevy_pbr::atmosphere::functions
 
 #import bevy_render::maths::{PI, HALF_PI, PI_2, fast_acos, fast_acos_4, fast_atan2, ray_sphere_intersect}
+#import bevy_pbr::utils::interleaved_gradient_noise
 
 #import bevy_pbr::atmosphere::{
     types::Atmosphere,
@@ -11,7 +12,7 @@
     },
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, ray_intersects_ground,
-        distance_to_top_atmosphere_boundary, distance_to_bottom_atmosphere_boundary
+        distance_to_top_atmosphere_boundary, distance_to_bottom_atmosphere_boundary,
     },
 }
 
@@ -127,7 +128,7 @@ fn sample_transmittance_lut_segment(r: f32, mu: f32, t: f32) -> vec3<f32> {
     let r_t = get_local_r(r, mu, t);
     let mu_t = clamp((r * mu + t) / r_t, -1.0, 1.0);
 
-    if ray_intersects_ground(r, mu) {
+    if ray_intersects_ground(atmosphere, r, mu) {
         return min(
             sample_transmittance_lut(r_t, -mu_t) / sample_transmittance_lut(r, -mu),
             vec3(1.0)
@@ -137,6 +138,43 @@ fn sample_transmittance_lut_segment(r: f32, mu: f32, t: f32) -> vec3<f32> {
             sample_transmittance_lut(r, mu) / sample_transmittance_lut(r_t, mu_t), vec3(1.0)
         );
     }
+}
+
+/// Outside-view atmosphere entry: `xy` = LUT `(r, μ)`, `z` = `t_entry`, `w` = `t_exit`.
+/// `w < 0` if the ray misses the shell.
+fn view_ray_atmosphere_entry(r: f32, mu: f32) -> vec4<f32> {
+    let segment = get_raymarch_segment(r, mu);
+    if segment.end <= segment.start || segment.start < 0.0 {
+        return vec4(0.0, 0.0, 0.0, -1.0);
+    }
+    let r_entry = get_local_r(r, mu, segment.start);
+    let mu_entry = clamp((r * mu + segment.start) / max(r_entry, 1e-6), -1.0, 1.0);
+    let r_lut = min(r_entry, atmosphere.outer_radius - 1.0);
+    return vec4(r_lut, mu_entry, segment.start, segment.end);
+}
+
+/// View-ray transmittance to a hit at distance `t` (camera inside or outside the shell).
+fn sample_view_transmittance(r: f32, mu: f32, t: f32) -> vec3<f32> {
+    if r < atmosphere.outer_radius {
+        return sample_transmittance_lut_segment(r, mu, t);
+    }
+    let entry = view_ray_atmosphere_entry(r, mu);
+    if entry.w < 0.0 || t <= entry.z {
+        return vec3(1.0);
+    }
+    return sample_transmittance_lut_segment(entry.x, entry.y, min(t, entry.w) - entry.z);
+}
+
+/// View-ray transmittance to space (sky / background).
+fn sample_view_transmittance_to_space(r: f32, mu: f32) -> vec3<f32> {
+    if r < atmosphere.outer_radius {
+        return sample_transmittance_lut(r, mu);
+    }
+    let entry = view_ray_atmosphere_entry(r, mu);
+    if entry.w < 0.0 {
+        return vec3(1.0);
+    }
+    return sample_transmittance_lut(entry.x, entry.y);
 }
 
 fn sample_multiscattering_lut(r: f32, mu: f32) -> vec3<f32> {
@@ -191,7 +229,10 @@ const SCATTERING_DENSITY: f32 = 1.0;
 // calling with `component = 0.0` will return the atmosphere's absorption density,
 // while calling with `component = 1.0` will return the atmosphere's scattering density.
 fn sample_density_lut(r: f32, component: f32) -> vec3<f32> {
-    // sampler clamps to [0, 1] anyways, no need to clamp the altitude
+    // Outside the shell / underground: vacuum (do not clamp UV to the density edge).
+    if r >= atmosphere.outer_radius || r < atmosphere.inner_radius {
+        return vec3(0.0);
+    }
     let normalized_altitude = (r - atmosphere.inner_radius) / (atmosphere.outer_radius - atmosphere.inner_radius);
     let uv = vec2(1.0 - normalized_altitude, component);
     return textureSampleLevel(medium_density_lut, medium_sampler, uv, 0.0).xyz;
@@ -223,7 +264,7 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
         let neg_LdotV = dot((*light).direction_to_light, ray_dir);
 
         let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
-        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
+        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(atmosphere, local_r, mu_light));
         let scattering_coeff = sample_scattering_lut(local_r, neg_LdotV);
 
         // Transmittance from scattering event to light source
@@ -243,7 +284,7 @@ fn sample_sun_radiance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
     let r = length(view_pos);
     let up = normalize(view_pos);
     let mu_view = dot(ray_dir_ws, up);
-    let shadow_factor = f32(!ray_intersects_ground(r, mu_view));
+    let shadow_factor = f32(!ray_intersects_ground(atmosphere, r, mu_view));
     var sun_radiance = vec3(0.0);
     for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
         let light = &lights.directional_lights[light_i];
@@ -261,47 +302,119 @@ fn sample_sun_radiance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
     return sun_radiance;
 }
 
-fn calculate_visible_sun_ratio(atmosphere: Atmosphere, r: f32, mu: f32, sun_angular_size: f32) -> f32 {
-    let inner_radius = atmosphere.inner_radius;
-    // Calculate the angle between horizon and sun center
-    // Invert the horizon angle calculation to fix shading direction
-    let horizon_cos = -sqrt(1.0 - (inner_radius * inner_radius) / (r * r));
-    let horizon_angle = fast_acos_4(horizon_cos);
-    let sun_zenith_angle = fast_acos_4(mu);
-    
-    // If sun is completely above horizon
-    if sun_zenith_angle + sun_angular_size * 0.5 <= horizon_angle {
-        return 1.0;
-    }
-    
-    // If sun is completely below horizon
-    if sun_zenith_angle - sun_angular_size * 0.5 >= horizon_angle {
-        return 0.0;
-    }
-    
-    // Calculate partial visibility using circular segment area formula
-    let d = (horizon_angle - sun_zenith_angle) / (sun_angular_size * 0.5);
-    let visible_ratio = 0.5 + d * 0.5;
-    return clamp(visible_ratio, 0.0, 1.0);
-}
-
 // TRANSFORM UTILITIES
 
 /// Clamp a position to the planet surface (with a small epsilon) to avoid underground artifacts.
-fn clamp_to_surface(atmosphere: Atmosphere, position: vec3<f32>) -> vec3<f32> {
-    let min_radius = atmosphere.inner_radius + EPSILON;
+fn clamp_to_surface(atm: Atmosphere, position: vec3<f32>) -> vec3<f32> {
+    let min_radius = atm.inner_radius + EPSILON;
     let r = length(position);
-    if r < min_radius {
-        let up = normalize(position);
-        return up * min_radius;
+    if r < min_radius && r > 0.0 {
+        return normalize(position) * min_radius;
     }
     return position;
+}
+
+// Path classification for light-to-point transmittance (no texture samples).
+const ATMOSPHERE_PATH_CLEAR: u32 = 0u;
+const ATMOSPHERE_PATH_OCCLUDED: u32 = 1u;
+const ATMOSPHERE_PATH_SAMPLE: u32 = 2u;
+
+struct AtmospherePathTransmittance {
+    mode: u32,
+    sample_r: f32,
+    sample_mu: f32,
+}
+
+/// LUT `(r, μ)` for a parallel-ray chord at impact parameter `b` (avoids the horizon singularity).
+fn atmosphere_chord_lut_sample(atm: Atmosphere, b: f32) -> vec2<f32> {
+    let outer_lut = max(atm.outer_radius - 1.0, atm.inner_radius + 1.0);
+    let b_clamped = clamp(b, atm.inner_radius + 1.0, outer_lut);
+    let mu = -sqrt(max(1.0 - (b_clamped * b_clamped) / (outer_lut * outer_lut), 0.0));
+    return vec2(outer_lut, mu);
+}
+
+/// Fraction of a sun disk of angular diameter `sun_angular_size` that clears a sphere.
+fn visible_sun_ratio_for_sphere(r: f32, mu: f32, sun_angular_size: f32, sphere_radius: f32) -> f32 {
+    if r <= sphere_radius || sun_angular_size <= 0.0 {
+        return 0.0;
+    }
+    // Limb zenith; inverted so μ → −1 is fully occulted (space umbra).
+    let horizon_cos = -sqrt(max(1.0 - (sphere_radius * sphere_radius) / (r * r), 0.0));
+    let horizon_angle = fast_acos_4(horizon_cos);
+    let sun_zenith_angle = fast_acos_4(mu);
+    let half_sun = 0.5 * sun_angular_size;
+
+    if sun_zenith_angle + half_sun <= horizon_angle {
+        return 1.0;
+    }
+    if sun_zenith_angle - half_sun >= horizon_angle {
+        return 0.0;
+    }
+    // Circular-segment visibility on the unit sun disk (`d = +1` clear, `d = -1` occulted).
+    let d = clamp((horizon_angle - sun_zenith_angle) / half_sun, -1.0, 1.0);
+    return (acos(-d) + d * sqrt(max(1.0 - d * d, 0.0))) / PI;
+}
+
+/// Geometric light path in atmosphere space (clear / planet-occluded / LUT sample).
+fn atmosphere_path_toward_light(
+    atm: Atmosphere,
+    position_as: vec3<f32>,
+    direction_to_light_as: vec3<f32>,
+) -> AtmospherePathTransmittance {
+    let position = clamp_to_surface(atm, position_as);
+    let r = length(position);
+    let L = normalize(direction_to_light_as);
+    let mu = clamp(dot(L, position / r), -1.0, 1.0);
+    let outer_lut = max(atm.outer_radius - 1.0, atm.inner_radius + EPSILON);
+
+    var path: AtmospherePathTransmittance;
+    path.sample_r = min(r, outer_lut);
+    path.sample_mu = mu;
+
+    if ray_intersects_ground(atm, r, mu) {
+        path.mode = ATMOSPHERE_PATH_OCCLUDED;
+        return path;
+    }
+
+    if r >= atm.outer_radius {
+        if ray_sphere_intersect(r, mu, atm.outer_radius).x < 0.0 {
+            path.mode = ATMOSPHERE_PATH_CLEAR;
+            return path;
+        }
+        let b = r * sqrt(max(1.0 - mu * mu, 0.0));
+        let chord = atmosphere_chord_lut_sample(atm, b);
+        path.sample_r = chord.x;
+        path.sample_mu = chord.y;
+    }
+
+    path.mode = ATMOSPHERE_PATH_SAMPLE;
+    return path;
+}
+
+fn atmosphere_path_is_sample(path: AtmospherePathTransmittance) -> bool {
+    return path.mode == ATMOSPHERE_PATH_SAMPLE;
+}
+
+/// Resolve path transmittance. `lut_sample` is used when the path needs a LUT read
+/// (pass `sample_transmittance_lut(path.sample_r, path.sample_mu)` from the local binding).
+fn resolve_path_transmittance(path: AtmospherePathTransmittance, lut_sample: vec3<f32>) -> vec3<f32> {
+    switch path.mode {
+        case ATMOSPHERE_PATH_CLEAR: {
+            return vec3(1.0);
+        }
+        case ATMOSPHERE_PATH_OCCLUDED: {
+            return vec3(0.0);
+        }
+        default: {
+            return lut_sample;
+        }
+    }
 }
 
 fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
     let t_top = distance_to_top_atmosphere_boundary(atmosphere, r, mu);
     let t_bottom = distance_to_bottom_atmosphere_boundary(r, mu);
-    let hits = ray_intersects_ground(r, mu);
+    let hits = ray_intersects_ground(atmosphere, r, mu);
     return mix(t_top, t_bottom, f32(hits));
 }
 
@@ -400,7 +513,7 @@ fn get_raymarch_segment(r: f32, mu: f32) -> RaymarchSegment {
     } else if r < atmosphere.outer_radius {
         // Inside atmosphere
         segment.start = 0.0;
-        segment.end = select(atmosphere_intersections.y, ground_intersections.x, ray_intersects_ground(r, mu));
+        segment.end = select(atmosphere_intersections.y, ground_intersections.x, ray_intersects_ground(atmosphere, r, mu));
     } else {
         // Outside atmosphere
         if atmosphere_intersections.x < 0.0 {
@@ -409,7 +522,7 @@ fn get_raymarch_segment(r: f32, mu: f32) -> RaymarchSegment {
         }
         // Start at atmosphere entry, end at exit or ground
         segment.start = atmosphere_intersections.x;
-        segment.end = select(atmosphere_intersections.y, ground_intersections.x, ray_intersects_ground(r, mu));
+        segment.end = select(atmosphere_intersections.y, ground_intersections.x, ray_intersects_ground(atmosphere, r, mu));
     }
 
     return segment;
@@ -453,9 +566,9 @@ fn raymarch_atmosphere(
 
     var prev_t = t_start;
     var optical_depth = vec3(0.0);
+    let jitter = interleaved_gradient_noise(uv * view.viewport.zw, 0u);
     for (var s = 0.0; s < sample_count; s += 1.0) {
-        // Linear distribution from atmosphere entry to exit/ground
-        let t_i = t_start + t_total * (s + MIDPOINT_RATIO) / sample_count;
+        let t_i = t_start + t_total * (s + jitter) / sample_count;
         let dt_i = (t_i - prev_t);
         prev_t = t_i;
 
@@ -487,7 +600,7 @@ fn raymarch_atmosphere(
     }
 
     // include reflected luminance from planet ground 
-    if ground && ray_intersects_ground(r, mu) {
+    if ground && ray_intersects_ground(atmosphere, r, mu) {
         for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
             let light = &lights.directional_lights[light_i];
             let light_dir = (*light).direction_to_light;

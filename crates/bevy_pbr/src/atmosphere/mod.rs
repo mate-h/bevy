@@ -101,6 +101,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "types.wgsl");
         load_shader_library!(app, "functions.wgsl");
         load_shader_library!(app, "bruneton_functions.wgsl");
+        load_shader_library!(app, "lighting.wgsl");
         load_shader_library!(app, "bindings.wgsl");
 
         embedded_asset!(app, "transmittance_lut.wgsl");

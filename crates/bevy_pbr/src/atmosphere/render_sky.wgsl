@@ -3,7 +3,7 @@ enable dual_source_blending;
 #import bevy_pbr::atmosphere::{
     bindings::{view, settings},
     functions::{
-        sample_transmittance_lut, sample_transmittance_lut_segment,
+        sample_view_transmittance, sample_view_transmittance_to_space,
         sample_sky_view_lut, direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
         sample_sun_radiance, ndc_to_camera_dist, raymarch_atmosphere, 
@@ -47,7 +47,7 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
 
     if depth == 0.0 {
         let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws);
-        transmittance = sample_transmittance_lut(r, mu);
+        transmittance = sample_view_transmittance_to_space(r, mu);
         inscattering = sample_sky_view_lut(r, ray_dir_as);
         if should_raymarch {
             let t_max = max_atmosphere_distance(r, mu);
@@ -59,7 +59,7 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     } else {
         let t = ndc_to_camera_dist(vec3(uv_to_ndc(in.uv), depth));
         inscattering = sample_aerial_view_lut(in.uv, t);
-        transmittance = sample_transmittance_lut_segment(r, mu, t);
+        transmittance = sample_view_transmittance(r, mu, t);
         if should_raymarch {
             let result = raymarch_atmosphere(world_pos, ray_dir_ws, t, max_samples, in.uv, false);
             inscattering = result.inscattering;

@@ -3,9 +3,10 @@
 #import bevy_pbr::{
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
     mesh_view_bindings as view_bindings,
-    atmosphere::functions::{calculate_visible_sun_ratio, clamp_to_surface},
-    atmosphere::bruneton_functions::transmittance_lut_r_mu_to_uv,
 }
+#ifdef ATMOSPHERE
+#import bevy_pbr::atmosphere::lighting::atmosphere_directional_light_transmittance
+#endif
 #import bevy_render::maths::{PI, orthonormalize}
 
 const LAYER_BASE: u32 = 0;
@@ -108,6 +109,10 @@ struct LightingInput {
     // the tangent direction.
     Ba: vec3<f32>,
 #endif  // STANDARD_MATERIAL_ANISOTROPY
+
+#ifdef ATMOSPHERE
+    frag_coord: vec2<f32>,
+#endif  // ATMOSPHERE
 }
 
 // Values derived from the `LightingInput` for both diffuse and specular lights.
@@ -917,22 +922,12 @@ fn directional_light(
 color *= (*light).color.rgb * texture_sample;
 
 #ifdef ATMOSPHERE
-    let P = (*input).P;
-    let atmosphere = view_bindings::atmosphere;
-    let P_as = (
-        view_bindings::atmosphere.world_to_atmosphere * vec4(P, 1.0)
-    ).xyz;
-    let P_clamped = clamp_to_surface(atmosphere, P_as);
-    let r = length(P_clamped);
-    let local_up = normalize(P_clamped);
-    let mu_light = dot(L, local_up);
-
-    // Sample atmosphere
-    let transmittance = sample_transmittance_lut(r, mu_light);
-    let sun_visibility = calculate_visible_sun_ratio(atmosphere, r, mu_light, (*light).sun_disk_angular_size);
-
-    // Apply atmospheric effects
-    color *= transmittance * sun_visibility;
+    color *= atmosphere_directional_light_transmittance(
+        (*input).P,
+        L,
+        (*light).sun_disk_angular_size,
+        (*input).frag_coord,
+    );
 #endif
 
     return color;
@@ -1101,11 +1096,3 @@ fn rect_light(
 #endif
 
 
-#ifdef ATMOSPHERE
-fn sample_transmittance_lut(r: f32, mu: f32) -> vec3<f32> {
-    let uv = transmittance_lut_r_mu_to_uv(view_bindings::atmosphere, r, mu);
-    return textureSampleLevel(
-        view_bindings::atmosphere_transmittance_texture,
-        view_bindings::atmosphere_transmittance_sampler, uv, 0.0).rgb;
-}
-#endif  // ATMOSPHERE

@@ -14,15 +14,13 @@
 // [2]: http://www.alexandre-pestana.com/volumetric-lights/
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
-#import bevy_pbr::atmosphere::{
-    functions::{calculate_visible_sun_ratio, clamp_to_surface},
-    bruneton_functions::transmittance_lut_r_mu_to_uv,
-}
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_clip}
 #import bevy_pbr::mesh_view_bindings::{
     globals, lights, view, clustered_lights,
-    atmosphere, atmosphere_transmittance_texture, atmosphere_transmittance_sampler
 }
+#ifdef ATMOSPHERE
+#import bevy_pbr::atmosphere::lighting::atmosphere_directional_light_transmittance
+#endif
 #import bevy_pbr::mesh_view_types::{
     DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT,
     POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
@@ -313,17 +311,12 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                     scattering * density * step_size_world * light_intensity * exposure;
 
 #ifdef ATMOSPHERE
-                // attenuate by atmospheric scattering
-                let P = P_world + depth_offset;
-                let P_as = (atmosphere.world_to_atmosphere * vec4(P, 1.0)).xyz;
-                let P_clamped = clamp_to_surface(atmosphere, P_as);
-                let r = length(P_clamped);
-                let local_up = normalize(P_clamped);
-                let mu_light = dot(L, local_up);
-
-                let transmittance = sample_transmittance_lut(r, mu_light);
-                let sun_visibility = calculate_visible_sun_ratio(atmosphere, r, mu_light, (*light).sun_disk_angular_size);
-                light_factors_per_step *= transmittance * sun_visibility;
+                light_factors_per_step *= atmosphere_directional_light_transmittance(
+                    P_world + depth_offset,
+                    L,
+                    (*light).sun_disk_angular_size,
+                    position.xy,
+                );
 #endif
 
                 // Modulate the factor we calculated above by the phase, fog color,
@@ -522,11 +515,3 @@ fn fetch_spot_shadow_without_normal(light_id: u32, frag_position: vec4<f32>, fra
     );
 }
 
-#ifdef ATMOSPHERE
-fn sample_transmittance_lut(r: f32, mu: f32) -> vec3<f32> {
-    let uv = transmittance_lut_r_mu_to_uv(atmosphere, r, mu);
-    return textureSampleLevel(
-        atmosphere_transmittance_texture,
-        atmosphere_transmittance_sampler, uv, 0.0).rgb;
-}
-#endif  // ATMOSPHERE
