@@ -98,6 +98,19 @@ impl LightProbe {
     }
 }
 
+/// How specular image-based lighting is integrated for an [`EnvironmentMapLight`].
+///
+/// This must match how the specular cubemap was filtered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+#[reflect(Default)]
+pub enum SpecularEnvironmentIntegration {
+    /// Standard Frostbite / Karis split-sum IBL. Use this for prebaked environment maps.
+    #[default]
+    GgxSplitSum,
+    /// Manson–Sloan fast filtering, as used by [`GeneratedEnvironmentMapLight`].
+    MansonSloan,
+}
+
 /// A pair of cubemap textures that represent the surroundings of a specific
 /// area in space.
 ///
@@ -136,6 +149,9 @@ pub struct EnvironmentMapLight {
     ///
     /// By default, this is set to true.
     pub affects_lightmapped_mesh_diffuse: bool,
+
+    /// How specular IBL is integrated. Must match how the specular cubemap was filtered.
+    pub specular_environment_integration: SpecularEnvironmentIntegration,
 }
 
 impl EnvironmentMapLight {
@@ -220,6 +236,7 @@ impl Default for EnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
+            specular_environment_integration: SpecularEnvironmentIntegration::default(),
         }
     }
 }
@@ -280,6 +297,11 @@ pub struct GeneratedEnvironmentMapLight {
     /// Whether this light contributes diffuse lighting to meshes that already
     /// have baked lightmaps.
     pub affects_lightmapped_mesh_diffuse: bool,
+
+    /// Blend factor toward this frame's filtered specular cubemap. Values between 0 and 1 mix in
+    /// the previous frame to reduce flicker on dynamic probes.
+    #[reflect(ignore)]
+    pub temporal_blend: f32,
 }
 
 impl Default for GeneratedEnvironmentMapLight {
@@ -289,6 +311,7 @@ impl Default for GeneratedEnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
+            temporal_blend: 0.0,
         }
     }
 }
