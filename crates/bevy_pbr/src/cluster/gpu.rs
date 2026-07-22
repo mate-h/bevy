@@ -52,14 +52,16 @@ use std::sync::Mutex;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
-use bevy_camera::Camera;
+use bevy_camera::{Camera, OmnidirectionalCamera};
 use bevy_color::Color;
-use bevy_core_pipeline::{prepass::node::early_prepass, Core3d, Core3dSystems};
+use bevy_core_pipeline::{
+    core_3d::RenderOmnidirectionalCameras, prepass::node::early_prepass, Core3d, Core3dSystems,
+};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::With,
+    query::{Has, With},
     resource::Resource,
     schedule::IntoScheduleConfigs as _,
     system::{Commands, Query, Res, ResMut},
@@ -1560,22 +1562,53 @@ fn upload_view_gpu_clustering_buffers(
 pub fn extract_clusters_for_gpu_clustering(
     mut commands: Commands,
     mut main_world: ResMut<MainWorld>,
+    omnidirectional_cameras: Res<RenderOmnidirectionalCameras>,
     render_view_clustering_index_list_sizes: Res<RenderViewClusteringReadbackData>,
 ) {
-    let mut views = main_world.query::<(Entity, RenderEntity, &mut Clusters, &Camera)>();
+    let mut views = main_world.query::<(
+        Entity,
+        RenderEntity,
+        &mut Clusters,
+        &Camera,
+        Has<OmnidirectionalCamera>,
+    )>();
 
-    for (main_view_entity, render_view_entity, mut clusters, camera) in
+    for (main_view_entity, render_view_entity, mut clusters, camera, is_omni) in
         views.iter_mut(&mut main_world)
     {
-        let mut entity_commands = commands
-            .get_entity(render_view_entity)
-            .expect("Clusters entity wasn't synced.");
         if !camera.is_active {
-            entity_commands.remove::<ExtractedClusterConfig>();
+            if is_omni {
+                if let Some(faces) = omnidirectional_cameras.get(&main_view_entity) {
+                    for &(face_entity, _) in faces {
+                        if let Ok(mut entity_commands) = commands.get_entity(face_entity) {
+                            entity_commands.remove::<ExtractedClusterConfig>();
+                        }
+                    }
+                }
+            } else if let Ok(mut entity_commands) = commands.get_entity(render_view_entity) {
+                entity_commands.remove::<ExtractedClusterConfig>();
+            }
             continue;
         }
 
-        entity_commands.insert(ExtractedClusterConfig::from(&*clusters));
+        let extracted = ExtractedClusterConfig::from(&*clusters);
+
+        if is_omni {
+            // Omnidirectional cameras render via face sub-cameras, not the synced
+            // main render entity.
+            if let Some(faces) = omnidirectional_cameras.get(&main_view_entity) {
+                for &(face_entity, _) in faces {
+                    if let Ok(mut entity_commands) = commands.get_entity(face_entity) {
+                        entity_commands.insert(extracted.clone());
+                    }
+                }
+            }
+        } else {
+            let mut entity_commands = commands
+                .get_entity(render_view_entity)
+                .expect("Clusters entity wasn't synced.");
+            entity_commands.insert(extracted);
+        }
 
         // Read back statistics from the render world to the main world if we
         // have some.

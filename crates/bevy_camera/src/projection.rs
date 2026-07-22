@@ -8,7 +8,10 @@ use bevy_math::{
     ops, primitives::ViewFrustum, proj, vec4, AspectRatio, Mat4, Rect, Vec2, Vec3A, Vec4,
 };
 use bevy_reflect::{std_traits::ReflectDefault, Reflect, ReflectDeserialize, ReflectSerialize};
-use bevy_transform::{components::GlobalTransform, TransformSystems};
+use bevy_transform::{
+    components::{GlobalTransform, Transform},
+    TransformSystems,
+};
 use derive_more::derive::From;
 use serde::{Deserialize, Serialize};
 
@@ -276,6 +279,67 @@ impl DerefMut for Projection {
 impl Default for Projection {
     fn default() -> Self {
         Projection::Perspective(Default::default())
+    }
+}
+
+/// Projections and view rotations for the six faces of a cubemap.
+///
+/// Used by omnidirectional cameras and point-light shadow mapping.
+#[derive(Clone, Debug)]
+pub struct CubemapFaceProjections {
+    /// World-from-view rotations for each cubemap face.
+    pub rotations: [Transform; 6],
+    /// Shared 90° perspective projection matrix for every face.
+    pub projection: Mat4,
+}
+
+impl CubemapFaceProjections {
+    /// Creates face projections with the given near plane distance.
+    pub fn new(near_z: f32) -> Self {
+        use crate::primitives::{CubeMapFace, CUBE_MAP_FACES};
+
+        CubemapFaceProjections {
+            rotations: core::array::from_fn(|i| {
+                let CubeMapFace { target, up } = CUBE_MAP_FACES[i];
+                Transform::IDENTITY.looking_at(target, up)
+            }),
+            projection: proj::perspective_infinite_reverse(
+                core::f32::consts::FRAC_PI_2,
+                1.0,
+                near_z,
+            ),
+        }
+    }
+}
+
+/// A set of 3D perspective projections that render to all six faces of a cube.
+///
+/// Attach this to an [`OmnidirectionalCamera`](crate::OmnidirectionalCamera)
+/// instead of a regular [`Projection`].
+#[derive(Component, Reflect, Clone, Debug)]
+#[reflect(Component, Default, Debug, Clone)]
+pub struct OmnidirectionalProjection {
+    /// The distance from the camera in world units of the viewing frustum's near plane.
+    ///
+    /// Objects closer to the camera than this value will not be visible.
+    ///
+    /// Defaults to a value of `0.1`.
+    pub near: f32,
+
+    /// The distance from the camera in world units of the viewing frustum's far plane.
+    ///
+    /// Objects farther from the camera than this value will not be visible.
+    ///
+    /// Defaults to a value of `1000.0`.
+    pub far: f32,
+}
+
+impl Default for OmnidirectionalProjection {
+    fn default() -> Self {
+        OmnidirectionalProjection {
+            near: 0.1,
+            far: 1000.0,
+        }
     }
 }
 

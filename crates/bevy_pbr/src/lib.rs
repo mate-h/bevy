@@ -365,8 +365,10 @@ impl Plugin for PbrPlugin {
                 ExtractSchedule,
                 (
                     extract_clusters_for_cpu_clustering
+                        .after(bevy_core_pipeline::core_3d::extract_omnidirectional_cameras)
                         .run_if(not(gpu_clustering_is_enabled_during_extraction)),
                     extract_clusters_for_gpu_clustering
+                        .after(bevy_core_pipeline::core_3d::extract_omnidirectional_cameras)
                         .run_if(gpu_clustering_is_enabled_during_extraction),
                 ),
             )
