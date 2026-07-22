@@ -125,6 +125,7 @@ This is the complete `bevy` cargo feature list, without "profiles" or "collectio
 |detailed_trace|Enable detailed trace event logging. These trace events are expensive even when off, thus they require compile time opt-in|
 |dfg_lut|Include a preintegrated BRDF Look Up Table for more accurate specular shading.|
 |dlss|NVIDIA Deep Learning Super Sampling|
+|metal_fx|Apple MetalFX Temporal Denoised Scaler (ray reconstruction). Plugin compiles only on Apple targets; use `force_disable_metal_fx` for non-Apple CI with this feature enabled.|
 |dynamic_linking|Force dynamic linking, which improves iterative compile times|
 |embedded_watcher|Enables watching in memory asset providers for Bevy Asset hot-reloading|
 |experimental_pbr_pcss|Enable support for PCSS, at the risk of blowing past the global, per-shader sampler limit on older/lower-end GPUs|
@@ -133,6 +134,7 @@ This is the complete `bevy` cargo feature list, without "profiles" or "collectio
 |file_watcher|Enables watching the filesystem for Bevy Asset hot-reloading|
 |flac|FLAC audio format support (through `claxon`)|
 |force_disable_dlss|Forcibly disable DLSS so that `cargo build --all-features` works without the DLSS SDK being installed. Not meant for users.|
+|force_disable_metal_fx|Forcibly disable MetalFX so that `cargo build --all-features` works without macOS 26 MetalFX. Not meant for users.|
 |free_camera|Enables the free cam from bevy_camera_controller|
 |gamepad|Gamepad support. Automatically enabled by `bevy_gilrs`.|
 |gestures|Gestures support. Automatically enabled by `bevy_window`.|

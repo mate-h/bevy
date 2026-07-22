@@ -1,4 +1,5 @@
 use super::{prepare::DlssRenderContext, Dlss, DlssFeature};
+use crate::ray_reconstruction::RayReconstructionDenoiser;
 use bevy_camera::{Camera, Hdr, MainPassResolutionOverride, Projection};
 use bevy_ecs::{
     query::{Has, With},
@@ -22,7 +23,12 @@ pub fn extract_dlss<F: DlssFeature>(
             entity_commands.insert(dlss.as_deref().unwrap().clone());
             dlss.as_mut().unwrap().reset = false;
         } else if cleanup_query.get(entity) == Ok(true) {
-            entity_commands.remove::<(Dlss<F>, DlssRenderContext<F>, MainPassResolutionOverride)>();
+            entity_commands.remove::<(
+                Dlss<F>,
+                DlssRenderContext<F>,
+                MainPassResolutionOverride,
+                RayReconstructionDenoiser,
+            )>();
         }
     }
 }

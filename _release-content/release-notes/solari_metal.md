@@ -12,4 +12,10 @@ Run the Solari example on a compatible Mac:
 cargo run --example solari --features bevy_solari,https,free_camera
 ```
 
-Denoising is not available on Metal yet, DLSS is NVIDIA-only. MetalFX Ray Reconstruction or Open Image Denoise 3.0 are promising paths for cross-platform denoising in the future.
+For MetalFX ray reconstruction denoising (macOS 26+ Apple Silicon with Temporal Denoised Scaler support):
+
+```
+cargo run --example solari --features bevy_solari,metal_fx,https,free_camera
+```
+
+When supported, MetalFX Temporal Denoised Scaler is enabled automatically (toggle with `3`), mirroring the DLSS Ray Reconstruction path on NVIDIA.

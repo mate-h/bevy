@@ -39,11 +39,12 @@ struct WorldCache {
 @group(1) @binding(12) var<storage, read_write> world_cache: WorldCache;
 @group(1) @binding(13) var<uniform> constants: SolariLightingSettings;
 
-#ifdef DLSS_RR_GUIDE_BUFFERS
+#ifdef RAY_RECONSTRUCTION_GUIDE_BUFFERS
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;
 @group(2) @binding(1) var specular_albedo: texture_storage_2d<rgba8unorm, write>;
 @group(2) @binding(2) var normal_roughness: texture_storage_2d<rgba16float, write>;
 @group(2) @binding(3) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
+@group(2) @binding(4) var roughness: texture_storage_2d<r16float, write>;
 #endif
 
 // User-configurable settings from the `SolariLighting` component, plus per-frame

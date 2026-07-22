@@ -22,12 +22,19 @@ use rand::{RngExt, SeedableRng};
 use std::f32::consts::PI;
 
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-use bevy::{
-    anti_alias::dlss::{
-        Dlss, DlssProjectId, DlssRayReconstructionFeature, DlssRayReconstructionSupported,
-    },
-    render::camera::{MipBias, TemporalJitter},
+use bevy::anti_alias::dlss::{
+    Dlss, DlssProjectId, DlssRayReconstructionFeature, DlssRayReconstructionSupported,
 };
+#[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+use bevy::anti_alias::metal_fx::{
+    MetalFx, MetalFxQualityMode, MetalFxTemporalDenoisedScalerFeature,
+    MetalFxTemporalDenoisedScalerSupported,
+};
+#[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"),
+))]
+use bevy::render::camera::{MipBias, TemporalJitter};
 
 /// `bevy_solari` demo.
 #[derive(FromArgs, Resource, Clone, Copy)]
@@ -69,6 +76,8 @@ fn main() {
     } else {
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         app.add_systems(Update, toggle_dlss_rr);
+        #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+        app.add_systems(Update, toggle_metal_fx_rr);
 
         if args.many_lights != Some(true) {
             app.add_systems(Update, (pause_scene, toggle_lights, patrol_path));
@@ -86,6 +95,8 @@ fn setup_pica_pica(
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<
         Res<DlssRayReconstructionSupported>,
     >,
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    metal_fx_supported: Option<Res<MetalFxTemporalDenoisedScalerSupported>>,
 ) {
     commands
         .spawn((
@@ -161,11 +172,19 @@ fn setup_pica_pica(
         camera.insert(SolariLighting::default());
     }
 
-    // Using DLSS Ray Reconstruction for denoising (and cheaper rendering via upscaling) is _highly_ recommended when using Solari
+    // Neural ray-reconstruction denoising is _highly_ recommended when using Solari
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     if dlss_rr_supported.is_some() {
         camera.insert(Dlss::<DlssRayReconstructionFeature> {
             perf_quality_mode: Default::default(),
+            reset: Default::default(),
+            _phantom_data: Default::default(),
+        });
+    }
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    if metal_fx_supported.is_some() {
+        camera.insert(MetalFx::<MetalFxTemporalDenoisedScalerFeature> {
+            quality_mode: MetalFxQualityMode::Native,
             reset: Default::default(),
             _phantom_data: Default::default(),
         });
@@ -211,6 +230,8 @@ fn setup_many_lights(
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<
         Res<DlssRayReconstructionSupported>,
     >,
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    metal_fx_supported: Option<Res<MetalFxTemporalDenoisedScalerSupported>>,
 ) {
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -346,11 +367,19 @@ fn setup_many_lights(
         camera.insert(SolariLighting::default());
     }
 
-    // Using DLSS Ray Reconstruction for denoising (and cheaper rendering via upscaling) is _highly_ recommended when using Solari
+    // Neural ray-reconstruction denoising is _highly_ recommended when using Solari
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     if dlss_rr_supported.is_some() {
         camera.insert(Dlss::<DlssRayReconstructionFeature> {
             perf_quality_mode: Default::default(),
+            reset: Default::default(),
+            _phantom_data: Default::default(),
+        });
+    }
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    if metal_fx_supported.is_some() {
+        camera.insert(MetalFx::<MetalFxTemporalDenoisedScalerFeature> {
+            quality_mode: MetalFxQualityMode::Native,
             reset: Default::default(),
             _phantom_data: Default::default(),
         });
@@ -484,6 +513,39 @@ fn toggle_dlss_rr(
     }
 }
 
+#[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+fn toggle_metal_fx_rr(
+    key_input: Res<ButtonInput<KeyCode>>,
+    camera: Single<
+        (
+            Entity,
+            Has<MetalFx<MetalFxTemporalDenoisedScalerFeature>>,
+        ),
+        With<SolariLighting>,
+    >,
+    metal_fx_supported: Option<Res<MetalFxTemporalDenoisedScalerSupported>>,
+    mut commands: Commands,
+) {
+    if key_input.just_pressed(KeyCode::Digit3) && metal_fx_supported.is_some() {
+        let (entity, metal_fx) = *camera;
+        if metal_fx {
+            commands.entity(entity).remove::<(
+                MetalFx<MetalFxTemporalDenoisedScalerFeature>,
+                TemporalJitter,
+                MipBias,
+            )>();
+        } else {
+            commands
+                .entity(entity)
+                .insert(MetalFx::<MetalFxTemporalDenoisedScalerFeature> {
+                    quality_mode: MetalFxQualityMode::Native,
+                    reset: Default::default(),
+                    _phantom_data: Default::default(),
+                });
+        }
+    }
+}
+
 fn pause_scene(mut time: ResMut<Time<Virtual>>, key_input: Res<ButtonInput<KeyCode>>) {
     if key_input.just_pressed(KeyCode::Space) {
         time.toggle();
@@ -580,6 +642,13 @@ fn update_control_text(
         Has<Dlss<DlssRayReconstructionFeature>>,
         With<SolariLighting>,
     >,
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    metal_fx_supported: Option<Res<MetalFxTemporalDenoisedScalerSupported>>,
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    metal_fx_camera: Query<
+        Has<MetalFx<MetalFxTemporalDenoisedScalerFeature>>,
+        With<SolariLighting>,
+    >,
 ) {
     text.0.clear();
 
@@ -618,9 +687,30 @@ fn update_control_text(
             .push_str("\nDenoising: DLSS Ray Reconstruction not supported");
     }
 
-    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    if metal_fx_supported.is_some() {
+        if matches!(metal_fx_camera.single(), Ok(true)) {
+            text.0
+                .push_str("\n(3): Disable MetalFX Ray Reconstruction");
+        } else {
+            text.0
+                .push_str("\n(3): Enable MetalFX Ray Reconstruction");
+        }
+    } else {
+        text.0
+            .push_str("\nDenoising: MetalFX Ray Reconstruction not supported");
+    }
+
+    #[cfg(all(
+        any(not(feature = "dlss"), feature = "force_disable_dlss"),
+        any(
+            not(feature = "metal_fx"),
+            feature = "force_disable_metal_fx",
+            not(target_vendor = "apple"),
+        ),
+    ))]
     text.0
-        .push_str("\nDenoising: App not compiled with DLSS support");
+        .push_str("\nDenoising: App not compiled with DLSS or MetalFX support");
 }
 
 #[derive(Component)]
@@ -631,6 +721,11 @@ fn update_performance_text(
     diagnostics: Res<DiagnosticsStore>,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_camera: Query<
         Has<Dlss<DlssRayReconstructionFeature>>,
+        With<SolariLighting>,
+    >,
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    metal_fx_camera: Query<
+        Has<MetalFx<MetalFxTemporalDenoisedScalerFeature>>,
         With<SolariLighting>,
     >,
 ) {
@@ -657,6 +752,13 @@ fn update_performance_text(
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     if matches!(dlss_camera.single(), Ok(true)) {
         (add_diagnostic)("DLSS-RR", "render/dlss_ray_reconstruction/elapsed_gpu");
+    }
+    #[cfg(all(feature = "metal_fx", not(feature = "force_disable_metal_fx"), target_vendor = "apple"))]
+    if matches!(metal_fx_camera.single(), Ok(true)) {
+        (add_diagnostic)(
+            "MetalFX-RR",
+            "render/metal_fx_temporal_denoised_scaler/elapsed_gpu",
+        );
     }
     text.push_str(&format!("{:17}  {total:.2} ms\n", "Total"));
 
