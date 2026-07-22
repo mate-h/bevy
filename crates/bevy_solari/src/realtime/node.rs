@@ -3,8 +3,11 @@ use super::prepare::{
     WORLD_CACHE_SIZE,
 };
 use crate::scene::RaytracingSceneBindings;
-#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-use bevy_anti_alias::dlss::ViewDlssRayReconstructionTextures;
+#[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+use bevy_anti_alias::ray_reconstruction::ViewRayReconstructionGuideTextures;
 use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
@@ -33,8 +36,11 @@ use bevy_utils::default;
 pub struct SolariLightingPipelines {
     bind_group_layout: BindGroupLayoutDescriptor,
     bind_group_layout_world_cache_active_cells_dispatch: BindGroupLayoutDescriptor,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    bind_group_layout_resolve_dlss_rr_textures: BindGroupLayoutDescriptor,
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    bind_group_layout_resolve_rr_guide_textures: BindGroupLayoutDescriptor,
     decay_world_cache_pipeline: CachedComputePipelineId,
     compact_world_cache_single_block_pipeline: CachedComputePipelineId,
     compact_world_cache_blocks_pipeline: CachedComputePipelineId,
@@ -44,14 +50,23 @@ pub struct SolariLightingPipelines {
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     initial_and_temporal_pipeline: CachedComputePipelineId,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
     initial_and_temporal_with_psr_pipeline: CachedComputePipelineId,
     spatial_and_shade_pipeline: CachedComputePipelineId,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    resolve_rr_guide_textures_pipeline: CachedComputePipelineId,
 }
 
-#[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
+#[cfg(not(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+)))]
 type SolariLightingViewQuery = (
     &'static SolariLightingResources,
     &'static ViewTarget,
@@ -60,14 +75,17 @@ type SolariLightingViewQuery = (
     &'static PreviousViewUniformOffset,
 );
 
-#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+#[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
 type SolariLightingViewQuery = (
     &'static SolariLightingResources,
     &'static ViewTarget,
     &'static ViewPrepassTextures,
     &'static ViewUniformOffset,
     &'static PreviousViewUniformOffset,
-    Option<&'static ViewDlssRayReconstructionTextures>,
+    Option<&'static ViewRayReconstructionGuideTextures>,
 );
 
 pub fn solari_lighting(
@@ -80,7 +98,10 @@ pub fn solari_lighting(
     render_device: Res<RenderDevice>,
     mut ctx: RenderContext,
 ) {
-    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
+    #[cfg(not(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+)))]
     let (
         solari_lighting_resources,
         view_target,
@@ -89,24 +110,33 @@ pub fn solari_lighting(
         previous_view_uniform_offset,
     ) = view.into_inner();
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
     let (
         solari_lighting_resources,
         view_target,
         view_prepass_textures,
         view_uniform_offset,
         previous_view_uniform_offset,
-        view_dlss_rr_textures,
+        view_rr_guide_textures,
     ) = view.into_inner();
 
     let Some(pipelines) = solari_pipelines else {
         return;
     };
 
-    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
+    #[cfg(not(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+)))]
     let initial_and_temporal_pipeline = pipelines.initial_and_temporal_pipeline;
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let initial_and_temporal_pipeline = if view_dlss_rr_textures.is_some() {
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    let initial_and_temporal_pipeline = if view_rr_guide_textures.is_some() {
         pipelines.initial_and_temporal_with_psr_pipeline
     } else {
         pipelines.initial_and_temporal_pipeline
@@ -156,9 +186,12 @@ pub fn solari_lighting(
         return;
     };
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let Some(resolve_dlss_rr_textures_pipeline) =
-        pipeline_cache.get_compute_pipeline(pipelines.resolve_dlss_rr_textures_pipeline)
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    let Some(resolve_rr_guide_textures_pipeline) =
+        pipeline_cache.get_compute_pipeline(pipelines.resolve_rr_guide_textures_pipeline)
     else {
         return;
     };
@@ -193,17 +226,21 @@ pub fn solari_lighting(
         &BindGroupEntries::single(s.world_cache_active_cells_dispatch.as_entire_binding()),
     );
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let bind_group_resolve_dlss_rr_textures = view_dlss_rr_textures.map(|d| {
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    let bind_group_resolve_rr_guide_textures = view_rr_guide_textures.map(|d| {
         render_device.create_bind_group(
-            "solari_lighting_bind_group_resolve_dlss_rr_textures",
+            "solari_lighting_bind_group_resolve_rr_guide_textures",
             &pipeline_cache
-                .get_bind_group_layout(&pipelines.bind_group_layout_resolve_dlss_rr_textures),
+                .get_bind_group_layout(&pipelines.bind_group_layout_resolve_rr_guide_textures),
             &BindGroupEntries::sequential((
                 &d.diffuse_albedo.default_view,
                 &d.specular_albedo.default_view,
                 &d.normal_roughness.default_view,
                 &d.specular_motion_vectors.default_view,
+                &d.roughness.default_view,
             )),
         )
     });
@@ -243,10 +280,13 @@ pub fn solari_lighting(
         ],
     );
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
-        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
-        pass.set_pipeline(resolve_dlss_rr_textures_pipeline);
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    if let Some(bind_group_resolve_rr_guide_textures) = &bind_group_resolve_rr_guide_textures {
+        pass.set_bind_group(2, bind_group_resolve_rr_guide_textures, &[]);
+        pass.set_pipeline(resolve_rr_guide_textures_pipeline);
         pass.dispatch_workgroups(dx, dy, 1);
     }
 
@@ -295,9 +335,12 @@ pub fn solari_lighting(
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/lighting");
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
-        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    if let Some(bind_group_resolve_rr_guide_textures) = &bind_group_resolve_rr_guide_textures {
+        pass.set_bind_group(2, bind_group_resolve_rr_guide_textures, &[]);
     }
     pass.set_pipeline(initial_and_temporal_pipeline);
     pass.dispatch_workgroups(dx, dy, 1);
@@ -353,9 +396,12 @@ pub fn init_solari_lighting_pipelines(
         &BindGroupLayoutEntries::single(ShaderStages::COMPUTE, storage_buffer_sized(false, None)),
     );
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let bind_group_layout_resolve_dlss_rr_textures = BindGroupLayoutDescriptor::new(
-        "solari_lighting_bind_group_layout_resolve_dlss_rr_textures",
+    #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+    let bind_group_layout_resolve_rr_guide_textures = BindGroupLayoutDescriptor::new(
+        "solari_lighting_bind_group_layout_resolve_rr_guide_textures",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
@@ -363,6 +409,7 @@ pub fn init_solari_lighting_pipelines(
                 texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rg16Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(TextureFormat::R16Float, StorageTextureAccess::WriteOnly),
             ),
         ),
     );
@@ -400,8 +447,11 @@ pub fn init_solari_lighting_pipelines(
         bind_group_layout: bind_group_layout.clone(),
         bind_group_layout_world_cache_active_cells_dispatch:
             bind_group_layout_world_cache_active_cells_dispatch.clone(),
-        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        bind_group_layout_resolve_dlss_rr_textures: bind_group_layout_resolve_dlss_rr_textures
+        #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+        bind_group_layout_resolve_rr_guide_textures: bind_group_layout_resolve_rr_guide_textures
             .clone(),
         decay_world_cache_pipeline: create_pipeline(
             "solari_lighting_decay_world_cache_pipeline",
@@ -466,13 +516,16 @@ pub fn init_solari_lighting_pipelines(
             None,
             vec![],
         ),
-        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
         initial_and_temporal_with_psr_pipeline: create_pipeline(
             "solari_lighting_initial_and_temporal_with_psr_pipeline",
             "initial_and_temporal",
             load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
-            Some(&bind_group_layout_resolve_dlss_rr_textures),
-            vec!["DLSS_RR_GUIDE_BUFFERS".into()],
+            Some(&bind_group_layout_resolve_rr_guide_textures),
+            vec!["RAY_RECONSTRUCTION_GUIDE_BUFFERS".into()],
         ),
         spatial_and_shade_pipeline: create_pipeline(
             "solari_lighting_spatial_and_shade_pipeline",
@@ -481,13 +534,16 @@ pub fn init_solari_lighting_pipelines(
             None,
             vec!["SPATIAL_MERGE".into()],
         ),
-        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        resolve_dlss_rr_textures_pipeline: create_pipeline(
-            "solari_lighting_resolve_dlss_rr_textures_pipeline",
+        #[cfg(any(
+    all(feature = "dlss", not(feature = "force_disable_dlss")),
+    all(feature = "metal_fx", not(feature = "force_disable_metal_fx")),
+))]
+        resolve_rr_guide_textures_pipeline: create_pipeline(
+            "solari_lighting_resolve_rr_guide_textures_pipeline",
             "resolve_dlss_rr_textures",
             load_embedded_asset!(asset_server.as_ref(), "resolve_dlss_rr_textures.wgsl"),
-            Some(&bind_group_layout_resolve_dlss_rr_textures),
-            vec!["DLSS_RR_GUIDE_BUFFERS".into()],
+            Some(&bind_group_layout_resolve_rr_guide_textures),
+            vec!["RAY_RECONSTRUCTION_GUIDE_BUFFERS".into()],
         ),
     });
 }
