@@ -12,9 +12,9 @@ enable wgpu_ray_query;
 #import bevy_solari::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility}
 #import bevy_solari::scene_bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
-#ifdef DLSS_RR_GUIDE_BUFFERS
+#ifdef RAY_RECONSTRUCTION_GUIDE_BUFFERS
 #import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0}
-#import bevy_solari::realtime_bindings::{diffuse_albedo, normal_roughness, previous_view, specular_albedo, specular_motion_vectors}
+#import bevy_solari::realtime_bindings::{diffuse_albedo, normal_roughness, previous_view, roughness, specular_albedo, specular_motion_vectors}
 #import bevy_solari::resolve_dlss_rr_textures::env_brdf_approx2
 #endif
 
@@ -56,7 +56,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var weight_sum = 0.0;
     var selected_target_function = 0.0;
 
-#ifdef DLSS_RR_GUIDE_BUFFERS
+#ifdef RAY_RECONSTRUCTION_GUIDE_BUFFERS
     var mirror_rotations = reflection_matrix(world_normal);
     var psr_finished = material.roughness > MIRROR_ROUGHNESS_THRESHOLD || material.metallic <= 0.9999;
 #endif
@@ -96,7 +96,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let ray_hit = resolve_ray_hit_full(ray);
         let p_brdf = next_bounce.pdf;
 
-#ifdef DLSS_RR_GUIDE_BUFFERS
+#ifdef RAY_RECONSTRUCTION_GUIDE_BUFFERS
         if !psr_finished {
             if !isinf(p_brdf) {
                 // Took the non-delta lobe, so not a mirror reflection. Keep the guide-buffer defaults.
@@ -418,7 +418,7 @@ fn reconnection_reusable(ray_t: f32, p_brdf: f32, wi: vec3<f32>, diffuse_selecte
     return footprint_ok && x1_lobe_ok && x2_end_ok;
 }
 
-#ifdef DLSS_RR_GUIDE_BUFFERS
+#ifdef RAY_RECONSTRUCTION_GUIDE_BUFFERS
 // https://en.wikipedia.org/wiki/Householder_transformation
 fn reflection_matrix(plane_normal: vec3<f32>) -> mat3x3<f32> {
     // N times Nᵀ
@@ -449,6 +449,7 @@ fn replace_primary_surface(pixel_id: vec2<u32>, ray_hit: ResolvedRayHitFull, mir
     textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(ray_hit.material.base_color, ray_hit.material.metallic, 0.0, 0.0), 0.0));
     textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, ray_hit.material.roughness, virtual_normal, wo), 0.0));
     textureStore(normal_roughness, pixel_id, vec4(virtual_normal, ray_hit.material.perceptual_roughness));
+    textureStore(roughness, pixel_id, vec4(ray_hit.material.perceptual_roughness));
 }
 
 fn calculate_motion_vector(world_position: vec3<f32>, previous_world_position: vec3<f32>) -> vec2<f32> {
