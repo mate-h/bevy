@@ -146,12 +146,16 @@ impl Plugin for EnvironmentMapGenerationPlugin {
             return;
         }
 
-        embedded_asset!(app, "environment_filter.wgsl");
-        embedded_asset!(app, "quadratic_b_spline_downsample.wgsl");
-        embedded_asset!(app, "temporal_blend_environment_map.wgsl");
-        embedded_asset!(app, "copy.wgsl");
+        embedded_asset!(app, "environment_filter.wesl");
+        embedded_asset!(app, "quadratic_b_spline_downsample.wesl");
+        embedded_asset!(app, "temporal_blend_environment_map.wesl");
+        embedded_asset!(app, "copy.wesl");
 
-        app.add_plugins(SyncComponentPlugin::<GeneratedEnvironmentMapLight, Self>::default())
+        app.add_plugins(SyncComponentPlugin::<
+            GeneratedEnvironmentMapLight,
+            RenderApp,
+            Self,
+        >::default())
             .add_systems(Update, generate_environment_map_light);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -315,12 +319,12 @@ pub fn initialize_generated_environment_map_resources(
         shader_defs.push(ShaderDefVal::Int("HAS_BLUE_NOISE".into(), 1));
     }
 
-    let env_filter_shader = load_embedded_asset!(asset_server.as_ref(), "environment_filter.wgsl");
-    let copy_shader = load_embedded_asset!(asset_server.as_ref(), "copy.wgsl");
+    let env_filter_shader = load_embedded_asset!(asset_server.as_ref(), "environment_filter.wesl");
+    let copy_shader = load_embedded_asset!(asset_server.as_ref(), "copy.wesl");
     let quadratic_shader =
-        load_embedded_asset!(asset_server.as_ref(), "quadratic_b_spline_downsample.wgsl");
+        load_embedded_asset!(asset_server.as_ref(), "quadratic_b_spline_downsample.wesl");
     let temporal_shader =
-        load_embedded_asset!(asset_server.as_ref(), "temporal_blend_environment_map.wgsl");
+        load_embedded_asset!(asset_server.as_ref(), "temporal_blend_environment_map.wesl");
 
     let quadratic_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("quadratic_downsample_pipeline".into()),
