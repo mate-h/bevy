@@ -1,5 +1,8 @@
 mod main_opaque_pass_3d_node;
 mod main_transparent_pass_3d_node;
+mod omnidirectional;
+
+pub use omnidirectional::*;
 
 // PERF: vulkan docs recommend using 24 bit depth for better performance
 pub const CORE_3D_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
@@ -32,7 +35,9 @@ pub const DEPTH_PREPASS_TEXTURE_SUPPORTED: bool = true;
 
 use core::{f32, ops::Range};
 
-use bevy_camera::{Camera, Camera3d, Camera3dDepthLoadOp};
+use bevy_camera::{
+    ActiveCubemapSides, Camera, Camera3d, Camera3dDepthLoadOp, OmnidirectionalCamera,
+};
 use bevy_diagnostic::FrameCount;
 use bevy_render::{
     batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport},
@@ -56,8 +61,7 @@ use bevy_log::warn;
 use bevy_math::{FloatOrd, Vec3};
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
-    camera::ExtractedCamera,
-    extract_component::ExtractComponentPlugin,
+    camera::{DirtySpecializations, ExtractedCamera},
     prelude::Msaa,
     render_phase::{
         sort_phase_system, BinnedPhaseItem, CachedRenderPipelinePhaseItem, DrawFunctionId,
@@ -106,13 +110,18 @@ impl Plugin for Core3dPlugin {
                 CameraRenderGraph::new(Core3d)
             })
             .register_required_components::<Camera3d, Tonemapping>()
-            .add_plugins((SkyboxPlugin, ExtractComponentPlugin::<Camera3d>::default()))
+            .add_plugins((
+                SkyboxPlugin,
+                ExtractCameraComponentPlugin::<Camera3d>::default(),
+            ))
             .add_systems(PostUpdate, check_msaa);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app
+            .init_resource::<RenderOmnidirectionalCameras>()
+            .add_systems(ExtractSchedule, extract_omnidirectional_cameras)
             .init_resource::<DrawFunctions<Opaque3d>>()
             .init_resource::<DrawFunctions<AlphaMask3d>>()
             .init_resource::<DrawFunctions<Transparent3d>>()
@@ -127,7 +136,11 @@ impl Plugin for Core3dPlugin {
             .init_resource::<ViewBinnedRenderPhases<Opaque3dDeferred>>()
             .init_resource::<ViewBinnedRenderPhases<AlphaMask3dDeferred>>()
             .init_resource::<ViewSortedRenderPhases<Transparent3d>>()
-            .add_systems(ExtractSchedule, extract_core_3d_camera_phases)
+            .add_systems(
+                ExtractSchedule,
+                extract_core_3d_camera_phases
+                    .after(bevy_render::camera::DirtySpecializationSystems::Clear),
+            )
             .add_systems(ExtractSchedule, extract_camera_prepass_phase)
             .add_systems(
                 Render,
@@ -497,33 +510,81 @@ pub fn extract_core_3d_camera_phases(
     mut opaque_3d_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     mut alpha_mask_3d_phases: ResMut<ViewBinnedRenderPhases<AlphaMask3d>>,
     mut transparent_3d_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    cameras_3d: Extract<Query<(Entity, &Camera, Has<NoIndirectDrawing>), With<Camera3d>>>,
+    mut dirty_specializations: ResMut<DirtySpecializations>,
+    cameras_3d: Extract<
+        Query<
+            (
+                Entity,
+                &Camera,
+                Has<NoIndirectDrawing>,
+                Option<&ActiveCubemapSides>,
+                Has<OmnidirectionalCamera>,
+            ),
+            With<Camera3d>,
+        >,
+    >,
     mut live_entities: Local<HashSet<RetainedViewEntity>>,
     gpu_preprocessing_support: Res<GpuPreprocessingSupport>,
 ) {
     live_entities.clear();
 
-    for (main_entity, camera, no_indirect_drawing) in &cameras_3d {
+    for (main_entity, camera, no_indirect_drawing, active_sides, is_omnidirectional) in &cameras_3d
+    {
         if !camera.is_active {
             continue;
         }
 
         // If GPU culling is in use, use it (and indirect mode); otherwise, just
         // preprocess the meshes.
-        let gpu_preprocessing_mode = gpu_preprocessing_support.min(if !no_indirect_drawing {
-            GpuPreprocessingMode::Culling
+        //
+        // Omnidirectional face cameras always insert `NoIndirectDrawing` during
+        // extract (see `extract_omnidirectional_cameras`), so their phases must
+        // be prepared as `PreprocessingOnly`. Using `Culling` here while faces
+        // draw without indirect parameters leaves opaque bins empty / undrawn
+        // on all faces except whichever happens to get partially queued.
+        let gpu_preprocessing_mode =
+            gpu_preprocessing_support.min(if is_omnidirectional || no_indirect_drawing {
+                GpuPreprocessingMode::PreprocessingOnly
+            } else {
+                GpuPreprocessingMode::Culling
+            });
+
+        if is_omnidirectional {
+            let active_sides = active_sides
+                .copied()
+                .unwrap_or_else(ActiveCubemapSides::all);
+            for face_index in 0..6u32 {
+                if !active_sides.contains(ActiveCubemapSides::from_bits_retain(1 << face_index)) {
+                    continue;
+                }
+                let retained_view_entity =
+                    RetainedViewEntity::new(main_entity.into(), None, face_index);
+                let wiped = opaque_3d_phases
+                    .prepare_for_new_frame(retained_view_entity, gpu_preprocessing_mode)
+                    | alpha_mask_3d_phases
+                        .prepare_for_new_frame(retained_view_entity, gpu_preprocessing_mode);
+                transparent_3d_phases.prepare_for_new_frame(retained_view_entity);
+                // If phases were created/recreated empty, force a full re-queue.
+                if wiped {
+                    dirty_specializations.views.insert(retained_view_entity);
+                }
+                live_entities.insert(retained_view_entity);
+            }
         } else {
-            GpuPreprocessingMode::PreprocessingOnly
-        });
+            // This is the main 3D camera, so use the first subview index (0).
+            let retained_view_entity = RetainedViewEntity::new(main_entity.into(), None, 0);
 
-        // This is the main 3D camera, so use the first subview index (0).
-        let retained_view_entity = RetainedViewEntity::new(main_entity.into(), None, 0);
+            let wiped = opaque_3d_phases
+                .prepare_for_new_frame(retained_view_entity, gpu_preprocessing_mode)
+                | alpha_mask_3d_phases
+                    .prepare_for_new_frame(retained_view_entity, gpu_preprocessing_mode);
+            transparent_3d_phases.prepare_for_new_frame(retained_view_entity);
+            if wiped {
+                dirty_specializations.views.insert(retained_view_entity);
+            }
 
-        opaque_3d_phases.prepare_for_new_frame(retained_view_entity, gpu_preprocessing_mode);
-        alpha_mask_3d_phases.prepare_for_new_frame(retained_view_entity, gpu_preprocessing_mode);
-        transparent_3d_phases.prepare_for_new_frame(retained_view_entity);
-
-        live_entities.insert(retained_view_entity);
+            live_entities.insert(retained_view_entity);
+        }
     }
 
     opaque_3d_phases.retain(|view_entity, _| live_entities.contains(view_entity));

@@ -1025,15 +1025,32 @@ impl<BPI> ViewBinnedRenderPhases<BPI>
 where
     BPI: BinnedPhaseItem,
 {
+    /// Prepares the phase for `retained_view_entity`, creating it if needed.
+    ///
+    /// Returns `true` if the phase was newly created or recreated (bins wiped),
+    /// so callers can mark the view for full re-specialization / re-queue.
     pub fn prepare_for_new_frame(
         &mut self,
         retained_view_entity: RetainedViewEntity,
         gpu_preprocessing: GpuPreprocessingMode,
-    ) {
+    ) -> bool {
         match self.entry(retained_view_entity) {
-            Entry::Occupied(mut entry) => entry.get_mut().prepare_for_new_frame(),
+            Entry::Occupied(mut entry) => {
+                let phase = entry.get_mut();
+                // Recreate the phase if preprocessing mode changed (e.g. omni
+                // faces must be PreprocessingOnly while a prior frame prepared
+                // them as Culling).
+                if phase.gpu_preprocessing_mode != gpu_preprocessing {
+                    *phase = BinnedRenderPhase::<BPI>::new(gpu_preprocessing);
+                    true
+                } else {
+                    phase.prepare_for_new_frame();
+                    false
+                }
+            }
             Entry::Vacant(entry) => {
                 entry.insert(BinnedRenderPhase::<BPI>::new(gpu_preprocessing));
+                true
             }
         }
     }
