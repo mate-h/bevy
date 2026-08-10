@@ -1,4 +1,4 @@
-use super::{prepare::DlssRenderContext, Dlss, DlssFeature};
+use super::{prepare::MetalFxRenderContext, MetalFx, MetalFxFeature};
 use crate::ray_reconstruction::RayReconstructionDenoiser;
 use bevy_camera::{Camera, Hdr, MainPassResolutionOverride, Projection};
 use bevy_ecs::{
@@ -7,25 +7,26 @@ use bevy_ecs::{
 };
 use bevy_render::{sync_world::RenderEntity, MainWorld};
 
-pub fn extract_dlss<F: DlssFeature>(
+pub fn extract_metal_fx<F: MetalFxFeature>(
     mut commands: Commands,
     mut main_world: ResMut<MainWorld>,
-    cleanup_query: Query<Has<Dlss<F>>>,
+    cleanup_query: Query<Has<MetalFx<F>>>,
 ) {
     let mut cameras_3d = main_world
-        .query_filtered::<(RenderEntity, &Camera, &Projection, Option<&mut Dlss<F>>), With<Hdr>>();
+        .query_filtered::<(RenderEntity, &Camera, &Projection, Option<&mut MetalFx<F>>), With<Hdr>>(
+        );
 
-    for (entity, camera, camera_projection, mut dlss) in cameras_3d.iter_mut(&mut main_world) {
+    for (entity, camera, camera_projection, mut metal_fx) in cameras_3d.iter_mut(&mut main_world) {
         let mut entity_commands = commands
             .get_entity(entity)
             .expect("Camera entity wasn't synced.");
-        if dlss.is_some() && camera.is_active && camera_projection.is_perspective() {
-            entity_commands.insert(dlss.as_deref().unwrap().clone());
-            dlss.as_mut().unwrap().reset = false;
+        if metal_fx.is_some() && camera.is_active && camera_projection.is_perspective() {
+            entity_commands.insert(metal_fx.as_deref().unwrap().clone());
+            metal_fx.as_mut().unwrap().reset = false;
         } else if cleanup_query.get(entity) == Ok(true) {
             entity_commands.remove::<(
-                Dlss<F>,
-                DlssRenderContext<F>,
+                MetalFx<F>,
+                MetalFxRenderContext<F>,
                 MainPassResolutionOverride,
                 RayReconstructionDenoiser,
             )>();

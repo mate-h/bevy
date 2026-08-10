@@ -1,6 +1,6 @@
 import bevy_pbr::render::pbr_functions::{calculate_diffuse_color, calculate_F0};
 import bevy_solari::realtime::gbuffer_utils::gpixel_resolve;
-import bevy_solari::realtime::bindings::{gbuffer, depth_buffer, motion_vectors, view, diffuse_albedo, specular_albedo, normal_roughness, specular_motion_vectors};
+import bevy_solari::realtime::bindings::{gbuffer, depth_buffer, motion_vectors, view, diffuse_albedo, specular_albedo, normal_roughness, specular_motion_vectors, roughness};
 
 enable wgpu_ray_query;
 
@@ -16,6 +16,7 @@ fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>)
         textureStore(diffuse_albedo, pixel_id, vec4(0.0));
         textureStore(specular_albedo, pixel_id, vec4(0.5));
         textureStore(normal_roughness, pixel_id, vec4(0.0, 0.0, 1.0, 0.0));
+        textureStore(roughness, pixel_id, vec4(0.0));
         return;
     }
 
@@ -26,6 +27,7 @@ fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>)
     textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(surface.material.base_color, surface.material.metallic, 0.0, 0.0), 0.0));
     textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, surface.material.roughness, surface.world_normal, wo), 0.0));
     textureStore(normal_roughness, pixel_id, vec4(surface.world_normal, surface.material.perceptual_roughness));
+    textureStore(roughness, pixel_id, vec4(surface.material.perceptual_roughness));
 }
 
 fn env_brdf_approx2(specular_color: vec3<f32>, alpha: f32, N: vec3<f32>, V: vec3<f32>) -> vec3<f32> {
