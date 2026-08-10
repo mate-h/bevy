@@ -8,11 +8,11 @@ import bevy_solari::realtime::bindings::{empty_reservoir, light_tile_resolved_sa
 import bevy_solari::scene::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility};
 import bevy_solari::scene::bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
 import bevy_solari::realtime::world_cache_query::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME};
-@if(DLSS_RR_GUIDE_BUFFERS)
+@if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
 import bevy_pbr::render::pbr_functions::{calculate_diffuse_color, calculate_F0};
-@if(DLSS_RR_GUIDE_BUFFERS)
-import bevy_solari::realtime::bindings::{diffuse_albedo, normal_roughness, previous_view, specular_albedo, specular_motion_vectors};
-@if(DLSS_RR_GUIDE_BUFFERS)
+@if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
+import bevy_solari::realtime::bindings::{diffuse_albedo, normal_roughness, previous_view, roughness, specular_albedo, specular_motion_vectors};
+@if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
 import bevy_solari::realtime::resolve_dlss_rr_textures::env_brdf_approx2;
 
 enable wgpu_ray_query;
@@ -55,9 +55,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var weight_sum = 0.0;
     var selected_target_function = 0.0;
 
-    @if(DLSS_RR_GUIDE_BUFFERS)
+    @if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
     var mirror_rotations = reflection_matrix(world_normal);
-    @if(DLSS_RR_GUIDE_BUFFERS)
+    @if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
     var psr_finished = material.roughness > MIRROR_ROUGHNESS_THRESHOLD || material.metallic <= 0.9999;
 
     let wo = normalize(view.world_position - world_position);
@@ -95,7 +95,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let ray_hit = resolve_ray_hit_full(ray);
         let p_brdf = next_bounce.pdf;
 
-        @if(DLSS_RR_GUIDE_BUFFERS)
+        @if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
         if !psr_finished {
             if !isinf(p_brdf) {
                 // Took the non-delta lobe, so not a mirror reflection. Keep the guide-buffer defaults.
@@ -417,7 +417,7 @@ fn reconnection_reusable(ray_t: f32, p_brdf: f32, wi: vec3<f32>, diffuse_selecte
 }
 
 // https://en.wikipedia.org/wiki/Householder_transformation
-@if(DLSS_RR_GUIDE_BUFFERS)
+@if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
 fn reflection_matrix(plane_normal: vec3<f32>) -> mat3x3<f32> {
     // N times Nᵀ
     let n_nt = mat3x3<f32>(
@@ -429,10 +429,10 @@ fn reflection_matrix(plane_normal: vec3<f32>) -> mat3x3<f32> {
     return identity_matrix - n_nt * 2.0;
 }
 
-@if(DLSS_RR_GUIDE_BUFFERS)
+@if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
 // Primary surface replacement for perfect mirrors. Follow the reflection chain to the first
 // non-mirror hit and write its attributes, reflected into the mirror's virtual space, to the
-// DLSS RR guide buffers so the denoiser treats this pixel as directly seeing that surface.
+// ray-reconstruction guide buffers so the denoiser treats this pixel as directly seeing that surface.
 // https://developer.nvidia.com/blog/rendering-perfect-reflections-and-refractions-in-path-traced-games/#primary_surface_replacement
 fn replace_primary_surface(pixel_id: vec2<u32>, ray_hit: ResolvedRayHitFull, mirror_rotations: mat3x3<f32>, primary_surface_world_position: vec3<f32>) {
     // Approximation: apply the whole chain's rotations around the first mirror, not each around its own
@@ -448,9 +448,10 @@ fn replace_primary_surface(pixel_id: vec2<u32>, ray_hit: ResolvedRayHitFull, mir
     textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(ray_hit.material.base_color, ray_hit.material.metallic, 0.0, 0.0), 0.0));
     textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, ray_hit.material.roughness, virtual_normal, wo), 0.0));
     textureStore(normal_roughness, pixel_id, vec4(virtual_normal, ray_hit.material.perceptual_roughness));
+    textureStore(roughness, pixel_id, vec4(ray_hit.material.perceptual_roughness));
 }
 
-@if(DLSS_RR_GUIDE_BUFFERS)
+@if(RAY_RECONSTRUCTION_GUIDE_BUFFERS)
 fn calculate_motion_vector(world_position: vec3<f32>, previous_world_position: vec3<f32>) -> vec2<f32> {
     let clip_position_t = view.unjittered_clip_from_world * vec4(world_position, 1.0);
     let clip_position = clip_position_t.xy / clip_position_t.w;
