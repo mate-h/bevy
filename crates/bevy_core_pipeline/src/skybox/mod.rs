@@ -29,7 +29,7 @@ use bevy_shader::Shader;
 use bevy_transform::components::Transform;
 use bevy_utils::default;
 
-use crate::core_3d::CORE_3D_DEPTH_FORMAT;
+use crate::core_3d::{RenderOmnidirectionalCameras, CORE_3D_DEPTH_FORMAT};
 
 pub struct SkyboxPlugin;
 
@@ -47,7 +47,10 @@ impl Plugin for SkyboxPlugin {
         };
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<SkyboxPipeline>>()
-            .add_systems(ExtractSchedule, extract_skybox)
+            .add_systems(
+                ExtractSchedule,
+                extract_skybox.after(crate::core_3d::extract_omnidirectional_cameras),
+            )
             .add_systems(RenderStartup, init_skybox_pipeline)
             .add_systems(
                 Render,
@@ -68,10 +71,11 @@ impl SyncComponent<RenderApp, SkyboxPlugin> for Skybox {
 pub fn extract_skybox(
     mut commands: Commands,
     mut previous_len: Local<usize>,
-    query: Extract<Query<(RenderEntity, &Skybox, Option<&Exposure>)>>,
+    omnidirectional_cameras: Res<RenderOmnidirectionalCameras>,
+    query: Extract<Query<(Entity, RenderEntity, &Skybox, Option<&Exposure>)>>,
 ) {
     let mut values = Vec::with_capacity(*previous_len);
-    for (entity, skybox, exposure) in &query {
+    for (main_entity, render_entity, skybox, exposure) in &query {
         let exposure = exposure
             .map(Exposure::exposure)
             .unwrap_or_else(|| Exposure::default().exposure());
@@ -85,14 +89,22 @@ pub fn extract_skybox(
             #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
             _webgl2_padding_16b: 0,
         };
-        values.push((entity, (skybox.clone(), uniforms)));
+        let extracted = (skybox.clone(), uniforms);
+        match omnidirectional_cameras.get(&main_entity) {
+            None => values.push((render_entity, extracted)),
+            Some(faces) => {
+                for &(face_entity, _) in faces {
+                    values.push((face_entity, extracted.clone()));
+                }
+            }
+        }
     }
     *previous_len = values.len();
     commands.try_insert_batch(values);
 }
 
 // TODO: Replace with a push constant once WebGPU gets support for that
-#[derive(Component, ShaderType, Clone)]
+#[derive(Component, ShaderType, Clone, Copy)]
 pub struct SkyboxUniforms {
     brightness: f32,
     transform: Mat4,

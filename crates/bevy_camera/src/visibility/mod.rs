@@ -53,10 +53,13 @@ use smallvec::SmallVec;
 
 use crate::{
     camera::Camera,
-    primitives::{Aabb, Frustum, MeshAabb, Sphere},
-    Projection,
+    omnidirectional::OmnidirectionalCamera,
+    primitives::{Aabb, CubemapFrusta, Frustum, MeshAabb, Sphere},
+    CubemapFaceProjections, OmnidirectionalProjection, Projection,
 };
+use bevy_math::{primitives::ViewFrustum, Vec3A};
 use bevy_mesh::{mark_3d_meshes_as_changed_if_their_assets_changed, Mesh, Mesh2d, Mesh3d};
+use bevy_transform::components::Transform;
 
 /// Use this component to opt-out of the built-in CPU frustum culling, see
 /// [`Frustum`]. This can be attached to a [`Camera`] or to individual entities.
@@ -432,6 +435,42 @@ impl VisibleMeshEntities {
     }
 }
 
+/// Collection of entities visible from each face of an omnidirectional camera.
+///
+/// Unlike [`CubemapVisibleEntities`], which stores mesh entities for light
+/// shadow mapping, this stores full [`VisibleEntities`] per face so that
+/// omnidirectional camera extraction can feed the regular 3D render path.
+#[derive(Component, Clone, Debug, Default, Reflect)]
+#[reflect(Component, Debug, Default, Clone)]
+pub struct OmnidirectionalVisibleEntities {
+    #[reflect(ignore, clone)]
+    data: [VisibleEntities; 6],
+}
+
+impl OmnidirectionalVisibleEntities {
+    pub fn get(&self, i: usize) -> &VisibleEntities {
+        &self.data[i]
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> &mut VisibleEntities {
+        &mut self.data[i]
+    }
+
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &VisibleEntities> {
+        self.data.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut VisibleEntities> {
+        self.data.iter_mut()
+    }
+
+    pub fn clear(&mut self) {
+        for visible_entities in &mut self.data {
+            visible_entities.clear_all();
+        }
+    }
+}
+
 #[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Debug, Default, Clone)]
 pub struct CubemapVisibleEntities {
@@ -528,8 +567,13 @@ impl Plugin for VisibilityPlugin {
                         .in_set(CalculateBounds),
                     (visibility_propagate_system, reset_view_visibility)
                         .in_set(VisibilityPropagate),
-                    (check_visibility_cpu_culling, check_visibility_gpu_culling)
+                    (
+                        check_visibility_cpu_culling,
+                        check_visibility_gpu_culling,
+                        check_omnidirectional_camera_visibility,
+                    )
                         .in_set(CheckVisibility),
+                    update_omnidirectional_camera_frusta.in_set(UpdateFrusta),
                     mark_newly_hidden_entities_invisible.in_set(MarkNewlyHiddenEntitiesInvisible),
                 ),
             );
@@ -747,14 +791,18 @@ fn reset_view_visibility(mut reset_query: Query<&mut ViewVisibility, Without<NoC
 /// [`VisibilityClass`] component and that that component is nonempty.
 pub fn check_visibility_cpu_culling(
     mut thread_queues: Local<Parallel<TypeIdHashMap<Vec<Entity>>>>,
-    mut view_query: Query<(
-        Entity,
-        &mut VisibleEntities,
-        &Frustum,
-        Option<&RenderLayers>,
-        &Camera,
-        Has<NoCpuCulling>,
-    )>,
+    mut view_query: Query<
+        (
+            Entity,
+            &mut VisibleEntities,
+            &Frustum,
+            Option<&RenderLayers>,
+            &Camera,
+            Has<NoCpuCulling>,
+        ),
+        // Omnidirectional cameras use `check_omnidirectional_camera_visibility` instead.
+        Without<OmnidirectionalCamera>,
+    >,
     mut visible_aabb_query: Query<
         (
             Entity,
@@ -915,6 +963,241 @@ fn mark_newly_hidden_entities_invisible(
                 *view_visibility = ViewVisibility::HIDDEN;
             }
         });
+}
+
+/// Updates frusta for every face of each omnidirectional camera.
+pub fn update_omnidirectional_camera_frusta(
+    mut omnidirectional_camera_query: Query<(
+        &mut CubemapFrusta,
+        &GlobalTransform,
+        &OmnidirectionalProjection,
+    )>,
+) {
+    for (mut cubemap_frusta, transform, projection) in &mut omnidirectional_camera_query {
+        let face_projections = CubemapFaceProjections::new(projection.near);
+        update_cubemap_frusta(
+            transform,
+            &mut cubemap_frusta,
+            &face_projections,
+            projection.far,
+        );
+    }
+}
+
+/// Updates a set of cubemap frusta from face projections and a camera transform.
+pub fn update_cubemap_frusta(
+    transform: &GlobalTransform,
+    cubemap_frusta: &mut CubemapFrusta,
+    cubemap_face_projections: &CubemapFaceProjections,
+    range: f32,
+) {
+    let CubemapFaceProjections {
+        rotations: view_rotations,
+        projection: clip_from_view,
+    } = cubemap_face_projections;
+
+    // Ignore scale so light/probe radius isn't affected by the camera transform scale,
+    // and ignore rotation so cubemap projections stay axis-aligned.
+    let view_translation = Transform::from_translation(transform.translation());
+
+    for (view_rotation, frustum) in view_rotations.iter().zip(cubemap_frusta.iter_mut()) {
+        let world_from_view = view_translation * *view_rotation;
+        let clip_from_world = *clip_from_view * world_from_view.compute_affine().inverse();
+        // Far plane must face each cubemap direction; using the root camera's
+        // backward for all faces incorrectly culls geometry on other sides.
+        let view_backward = world_from_view.back();
+
+        *frustum = Frustum(ViewFrustum::from_clip_from_world_custom_far(
+            &clip_from_world,
+            &transform.translation(),
+            &view_backward,
+            range,
+        ));
+    }
+}
+
+/// Checks visibility for every face of an omnidirectional camera.
+///
+/// This is separate from [`check_visibility_cpu_culling`] because omnidirectional
+/// cameras have six individual sub-cameras, one for each face.
+pub fn check_omnidirectional_camera_visibility(
+    mut thread_queues: Local<Parallel<[TypeIdHashMap<Vec<Entity>>; 6]>>,
+    mut visible_aabb_query: Query<
+        (
+            Entity,
+            &InheritedVisibility,
+            &mut ViewVisibility,
+            Option<&VisibilityClass>,
+            Option<&RenderLayers>,
+            Option<&Aabb>,
+            Option<&Sphere>,
+            &GlobalTransform,
+            Has<NoFrustumCulling>,
+            Has<VisibilityRange>,
+        ),
+        Without<NoCpuCulling>,
+    >,
+    mut omnidirectional_camera_query: Query<(
+        Entity,
+        &mut OmnidirectionalVisibleEntities,
+        &CubemapFrusta,
+        &GlobalTransform,
+        &OmnidirectionalProjection,
+        Option<&RenderLayers>,
+        &Camera,
+        Has<NoFrustumCulling>,
+    )>,
+    visible_entity_ranges: Option<Res<VisibleEntityRanges>>,
+) {
+    let visible_entity_ranges = visible_entity_ranges.as_deref();
+
+    for (
+        view,
+        mut cubemap_visible_entities,
+        cubemap_frusta,
+        cubemap_transform,
+        cubemap_projection,
+        maybe_view_mask,
+        camera,
+        camera_no_frustum_culling,
+    ) in &mut omnidirectional_camera_query
+    {
+        if !camera.is_active {
+            continue;
+        }
+
+        let view_mask = maybe_view_mask.unwrap_or_default();
+        let light_sphere = Sphere {
+            center: Vec3A::from(cubemap_transform.translation()),
+            radius: cubemap_projection.far,
+        };
+
+        cubemap_visible_entities.clear();
+
+        visible_aabb_query.par_iter_mut().for_each_init(
+            || thread_queues.borrow_local_mut(),
+            |face_queues, query_item| {
+                let (
+                    entity,
+                    inherited_visibility,
+                    mut view_visibility,
+                    visibility_class,
+                    maybe_entity_mask,
+                    maybe_model_aabb,
+                    maybe_model_sphere,
+                    transform,
+                    no_frustum_culling,
+                    has_visibility_range,
+                ) = query_item;
+
+                if !inherited_visibility.get() {
+                    return;
+                }
+
+                let entity_mask = maybe_entity_mask.unwrap_or_default();
+                if !view_mask.intersects(entity_mask) {
+                    return;
+                }
+
+                if has_visibility_range
+                    && visible_entity_ranges.is_some_and(|visible_entity_ranges| {
+                        !visible_entity_ranges.entity_is_in_range_of_view(entity, view)
+                    })
+                {
+                    return;
+                }
+
+                let world_from_local = transform.affine();
+                let mut visible_on_any_face = false;
+
+                // `NoFrustumCulling` on the omni camera disables per-face frustum
+                // tests (range sphere still applies). Useful while cubemap frusta
+                // are being validated, and for small probe capture scenes.
+                if !no_frustum_culling && !camera_no_frustum_culling {
+                    if let Some(model_aabb) = maybe_model_aabb {
+                        if !light_sphere.intersects_obb(model_aabb, &world_from_local) {
+                            return;
+                        }
+                        for (face_index, frustum) in cubemap_frusta.iter().enumerate() {
+                            if frustum.intersects_obb(model_aabb, &world_from_local, true, false) {
+                                visible_on_any_face = true;
+                                if let Some(visibility_class) = visibility_class {
+                                    for visibility_class_id in visibility_class.iter() {
+                                        face_queues[face_index]
+                                            .entry(*visibility_class_id)
+                                            .or_default()
+                                            .push(entity);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(model_sphere) = maybe_model_sphere {
+                        for (face_index, frustum) in cubemap_frusta.iter().enumerate() {
+                            if frustum.intersects_sphere(model_sphere, false) {
+                                visible_on_any_face = true;
+                                if let Some(visibility_class) = visibility_class {
+                                    for visibility_class_id in visibility_class.iter() {
+                                        face_queues[face_index]
+                                            .entry(*visibility_class_id)
+                                            .or_default()
+                                            .push(entity);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        visible_on_any_face = true;
+                        if let Some(visibility_class) = visibility_class {
+                            for face_queue in face_queues.iter_mut() {
+                                for visibility_class_id in visibility_class.iter() {
+                                    face_queue
+                                        .entry(*visibility_class_id)
+                                        .or_default()
+                                        .push(entity);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if let Some(model_aabb) = maybe_model_aabb
+                        && !light_sphere.intersects_obb(model_aabb, &world_from_local)
+                    {
+                        return;
+                    }
+                    visible_on_any_face = true;
+                    if let Some(visibility_class) = visibility_class {
+                        for face_queue in face_queues.iter_mut() {
+                            for visibility_class_id in visibility_class.iter() {
+                                face_queue
+                                    .entry(*visibility_class_id)
+                                    .or_default()
+                                    .push(entity);
+                            }
+                        }
+                    }
+                }
+
+                if visible_on_any_face {
+                    view_visibility.set_visible();
+                }
+            },
+        );
+
+        for class_queues in thread_queues.iter_mut() {
+            for (face_index, face_queue) in class_queues.iter_mut().enumerate() {
+                let visible_entities = cubemap_visible_entities.get_mut(face_index);
+                for (class, entities) in face_queue.iter_mut() {
+                    visible_entities.get_mut(*class).append(entities);
+                }
+            }
+        }
+
+        for visible_entities in cubemap_visible_entities.iter_mut() {
+            for entities in visible_entities.entities.values_mut() {
+                entities.sort_unstable();
+            }
+        }
+    }
 }
 
 /// A generic component add hook that automatically adds the appropriate
