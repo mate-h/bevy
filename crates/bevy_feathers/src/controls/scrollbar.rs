@@ -11,13 +11,13 @@ use bevy_ecs::{
     template::EntityTemplate,
 };
 use bevy_math::Vec2;
-use bevy_picking::{hover::Hovered, PickingSystems};
+use bevy_picking::{cursor::EntityCursor, hover::Hovered, PickingSystems};
 use bevy_reflect::{prelude::ReflectDefault, Reflect};
 use bevy_scene::prelude::*;
 use bevy_ui::{px, BorderRadius, ComputedNode, Node, UiSystems, Val};
 use bevy_ui_widgets::{ControlOrientation, Scrollbar, ScrollbarDragState, ScrollbarThumb};
 
-use crate::{cursor::EntityCursor, theme::ThemeBackgroundColor, tokens};
+use crate::{theme::ThemeBackgroundColor, tokens};
 
 /// A scrollbar. The `target` property should point to an entity whose
 /// [`ScrollPosition`](bevy_ui::ScrollPosition) will be synchronized with the scrollbar.
@@ -76,7 +76,7 @@ impl FeathersScrollbar {
                 border_radius: BorderRadius::all(px(3))
             }
             ThemeBackgroundColor(tokens::SCROLLBAR_BG)
-            Children [(
+            Children [
                 Hovered
                 ThemeBackgroundColor(tokens::SCROLLBAR_THUMB)
                 ScrollbarThumb {
@@ -84,7 +84,7 @@ impl FeathersScrollbar {
                 }
                 FeathersScrollbarThumb
                 EntityCursor::System(bevy_window::SystemCursorIcon::Pointer)
-            )]
+            ]
         }
     }
 }

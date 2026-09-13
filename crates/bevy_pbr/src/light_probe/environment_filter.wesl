@@ -1,4 +1,4 @@
-import bevy_pbr::render::utils::{sample_cosine_hemisphere, dir_to_cube_uv, sample_cube_dir};
+import package::render::utils::{sample_cosine_hemisphere, dir_to_cube_uv, sample_cube_dir};
 
 struct FilteringConstants {
     mip_level: f32,
@@ -19,6 +19,7 @@ const NUM_MS_TAPS_DIV_4: u32 = 8u;
 @group(0) @binding(4) var blue_noise_texture: texture_2d_array<f32>;
 @group(0) @binding(5) var<storage, read> ms_poly_table: array<vec4f, MS_POLY_VEC4S>;
 
+/// Sample an environment map with a specific LOD
 fn sample_environment(dir: vec3f, level: f32) -> vec4f {
     let cube_uv = dir_to_cube_uv(dir);
     return textureSampleLevel(input_texture, input_sampler, cube_uv.uv, cube_uv.face, level);
