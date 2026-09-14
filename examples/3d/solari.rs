@@ -7,7 +7,9 @@ use bevy::{
     diagnostic::{Diagnostic, DiagnosticPath, DiagnosticsStore},
     gltf::GltfMaterialName,
     image::{ImageAddressMode, ImageLoaderSettings},
+    light::{atmosphere::ScatteringMedium, Atmosphere, AtmosphereEnvironmentMapLight},
     mesh::{Indices, VertexAttributeValues},
+    pbr::AtmosphereSettings,
     post_process::bloom::Bloom,
     prelude::*,
     render::{diagnostic::RenderDiagnosticsPlugin, render_resource::TextureUsages},
@@ -81,14 +83,24 @@ fn main() {
     app.run();
 }
 
+fn spawn_unfiltered_atmosphere(
+    commands: &mut Commands,
+    scattering_mediums: &mut Assets<ScatteringMedium>,
+) {
+    let earth = scattering_mediums.add(ScatteringMedium::earth(256, 256));
+    commands.spawn(Atmosphere::earth(earth));
+}
+
 fn setup_pica_pica(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     args: Res<Args>,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<
         Res<DlssRayReconstructionSupported>,
     >,
 ) {
+    spawn_unfiltered_atmosphere(&mut commands, &mut scattering_mediums);
     commands
         .spawn((
             WorldAssetRoot(
@@ -155,6 +167,11 @@ fn setup_pica_pica(
         // Msaa::Off and CameraMainTextureUsages with STORAGE_BINDING are required for Solari
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         Msaa::Off,
+        AtmosphereSettings::default(),
+        AtmosphereEnvironmentMapLight {
+            filtered: false,
+            ..default()
+        },
     ));
 
     if args.pathtracer == Some(true) {
@@ -205,11 +222,14 @@ fn setup_many_lights(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     args: Res<Args>,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<
         Res<DlssRayReconstructionSupported>,
     >,
 ) {
+    spawn_unfiltered_atmosphere(&mut commands, &mut scattering_mediums);
+
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
     let mut plane_mesh = Plane3d::default()
@@ -332,6 +352,11 @@ fn setup_many_lights(
         // Msaa::Off and CameraMainTextureUsages with STORAGE_BINDING are required for Solari
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         Msaa::Off,
+        AtmosphereSettings::default(),
+        AtmosphereEnvironmentMapLight {
+            filtered: false,
+            ..default()
+        },
         Bloom {
             intensity: 0.1,
             ..Bloom::NATURAL
