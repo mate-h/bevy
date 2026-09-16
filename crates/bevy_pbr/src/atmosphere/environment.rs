@@ -32,7 +32,7 @@ use bevy_render::{
     RenderApp,
 };
 use bevy_utils::default;
-use tracing::warn;
+use tracing::{info, warn};
 
 // Render world representation of an environment map light for the atmosphere
 #[derive(Component, ExtractComponent, Clone, FromTemplate)]
@@ -254,6 +254,16 @@ pub fn on_insert_atmosphere_environment_map_light(
         environment_map: environment_handle.clone(),
         size: new_size,
     });
+
+    info!(
+        "Atmosphere environment map filtering {} on {}",
+        if env_map_light.filtered {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        insert.entity
+    );
 
     if env_map_light.filtered {
         entity.insert(GeneratedEnvironmentMapLight {

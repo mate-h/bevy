@@ -966,6 +966,8 @@ pub fn filtering_system(
     let diagnostics = diagnostics.as_deref();
 
     for (bind_groups, env_map_light) in &query {
+        info!("Running environment map filtering");
+
         // Radiance convolution pass
         {
             let mut compute_pass =

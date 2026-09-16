@@ -168,10 +168,7 @@ fn setup_pica_pica(
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         Msaa::Off,
         AtmosphereSettings::default(),
-        AtmosphereEnvironmentMapLight {
-            filtered: false,
-            ..default()
-        },
+        AtmosphereEnvironmentMapLight::default(),
     ));
 
     if args.pathtracer == Some(true) {
