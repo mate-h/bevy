@@ -362,8 +362,13 @@ pub trait LightProbeComponent: Send + Sync + Component + Sized {
     /// information needed to render this light probe.
     ///
     /// This is called for every light probe in view every frame.
+    ///
+    /// `query_components` is the same associated query data used by
+    /// [`Self::flags`], so view-attached probes can observe co-located
+    /// components (for example, whether a generated environment map is present).
     fn create_render_view_light_probes(
         view_component: Option<&Self>,
+        query_components: &<Self::QueryData as QueryData>::Item<'_, '_>,
         image_assets: &RenderAssets<GpuImage>,
     ) -> RenderViewLightProbes<Self>;
 
@@ -431,7 +436,16 @@ fn gather_light_probes<C>(
     image_assets: Res<RenderAssets<GpuImage>>,
     light_probe_query: Extract<Query<(Entity, &GlobalTransform, &LightProbe, &C, C::QueryData)>>,
     view_query: Extract<
-        Query<(RenderEntity, &GlobalTransform, &VisibleEntities, Option<&C>), With<Camera3d>>,
+        Query<
+            (
+                RenderEntity,
+                &GlobalTransform,
+                &VisibleEntities,
+                Option<&C>,
+                C::QueryData,
+            ),
+            With<Camera3d>,
+        >,
     >,
     mut view_light_probe_info: Local<Vec<LightProbeInfo<C>>>,
     mut commands: Commands,
@@ -439,7 +453,9 @@ fn gather_light_probes<C>(
     C: LightProbeComponent,
 {
     // Build up the light probes uniform and the key table.
-    for (view_entity, view_transform, visible_entities, view_component) in view_query.iter() {
+    for (view_entity, view_transform, visible_entities, view_component, query_components) in
+        view_query.iter()
+    {
         view_light_probe_info.clear();
         let visible_light_probes = visible_entities.get(TypeId::of::<ClusterVisibilityClass>());
         for &main_entity in visible_light_probes {
@@ -464,7 +480,7 @@ fn gather_light_probes<C>(
 
         // Create the light probes list.
         let mut render_view_light_probes =
-            C::create_render_view_light_probes(view_component, &image_assets);
+            C::create_render_view_light_probes(view_component, &query_components, &image_assets);
 
         // Gather up the light probes in the list.
         render_view_light_probes.maybe_gather_light_probes(&view_light_probe_info);

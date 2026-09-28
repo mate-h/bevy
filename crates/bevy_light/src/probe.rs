@@ -98,23 +98,14 @@ impl LightProbe {
     }
 }
 
-/// How specular image-based lighting is integrated for an [`EnvironmentMapLight`].
-///
-/// This must match how the specular cubemap was filtered.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
-#[reflect(Default)]
-pub enum SpecularEnvironmentIntegration {
-    /// Standard Frostbite / Karis split-sum IBL. Use this for prebaked environment maps.
-    #[default]
-    GgxSplitSum,
-    /// Manson–Sloan fast filtering, as used by [`GeneratedEnvironmentMapLight`].
-    MansonSloan,
-}
-
 /// A pair of cubemap textures that represent the surroundings of a specific
 /// area in space.
 ///
 /// See `bevy_pbr::light_probe::environment_map` for detailed information.
+///
+/// When this component is paired with [`GeneratedEnvironmentMapLight`], specular
+/// IBL uses Manson–Sloan sampling to match the runtime filter. Prebaked maps use
+/// the standard Frostbite / Karis split-sum path.
 #[derive(Clone, Component, Reflect, FromTemplate)]
 #[reflect(Component, Default, Clone)]
 pub struct EnvironmentMapLight {
@@ -149,9 +140,6 @@ pub struct EnvironmentMapLight {
     ///
     /// By default, this is set to true.
     pub affects_lightmapped_mesh_diffuse: bool,
-
-    /// How specular IBL is integrated. Must match how the specular cubemap was filtered.
-    pub specular_environment_integration: SpecularEnvironmentIntegration,
 }
 
 impl EnvironmentMapLight {
@@ -236,7 +224,6 @@ impl Default for EnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
-            specular_environment_integration: SpecularEnvironmentIntegration::default(),
         }
     }
 }

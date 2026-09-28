@@ -44,9 +44,7 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
-use bevy_light::{
-    EnvironmentMapLight, GeneratedEnvironmentMapLight, SpecularEnvironmentIntegration,
-};
+use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight};
 use bevy_shader::ShaderDefVal;
 use tracing::info;
 
@@ -1080,7 +1078,6 @@ pub fn generate_environment_map_light(
             intensity: filtered_env_map.intensity,
             rotation: filtered_env_map.rotation,
             affects_lightmapped_mesh_diffuse: filtered_env_map.affects_lightmapped_mesh_diffuse,
-            specular_environment_integration: SpecularEnvironmentIntegration::MansonSloan,
         });
     }
 }

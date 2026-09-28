@@ -45,12 +45,12 @@
 
 use bevy_asset::AssetId;
 use bevy_ecs::{
-    query::{QueryData, QueryItem},
+    query::{Has, QueryData, QueryItem},
     system::lifetimeless::Read,
 };
 use bevy_extract::extract_instances::ExtractInstance;
 use bevy_image::Image;
-use bevy_light::{EnvironmentMapLight, ParallaxCorrection, SpecularEnvironmentIntegration};
+use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight, ParallaxCorrection};
 use bevy_math::{Affine3A, Quat, Vec3};
 use bevy_render::{
     render_asset::RenderAssets,
@@ -249,7 +249,10 @@ impl LightProbeComponent for EnvironmentMapLight {
     // view.
     type ViewLightProbeInfo = EnvironmentMapViewLightProbeInfo;
 
-    type QueryData = Option<Read<ParallaxCorrection>>;
+    type QueryData = (
+        Option<Read<ParallaxCorrection>>,
+        Has<GeneratedEnvironmentMapLight>,
+    );
 
     fn id(&self, image_assets: &RenderAssets<GpuImage>) -> Option<Self::AssetId> {
         if image_assets.get(&self.diffuse_map).is_none()
@@ -270,7 +273,7 @@ impl LightProbeComponent for EnvironmentMapLight {
 
     fn flags(
         &self,
-        maybe_parallax_correction: &<Self::QueryData as QueryData>::Item<'_, '_>,
+        (maybe_parallax_correction, is_generated): &<Self::QueryData as QueryData>::Item<'_, '_>,
     ) -> RenderLightProbeFlags {
         let mut flags = RenderLightProbeFlags::empty();
         if self.affects_lightmapped_mesh_diffuse {
@@ -281,7 +284,7 @@ impl LightProbeComponent for EnvironmentMapLight {
         }) {
             flags.insert(RenderLightProbeFlags::ENABLE_PARALLAX_CORRECTION);
         }
-        if self.specular_environment_integration == SpecularEnvironmentIntegration::MansonSloan {
+        if *is_generated {
             flags.insert(RenderLightProbeFlags::MANSON_SLOAN_ENVIRONMENT_IBL);
         }
         flags
@@ -289,6 +292,7 @@ impl LightProbeComponent for EnvironmentMapLight {
 
     fn create_render_view_light_probes(
         view_component: Option<&EnvironmentMapLight>,
+        (_, is_generated): &<Self::QueryData as QueryData>::Item<'_, '_>,
         image_assets: &RenderAssets<GpuImage>,
     ) -> RenderViewLightProbes<Self> {
         let mut render_view_light_probes = RenderViewLightProbes::new();
@@ -300,7 +304,6 @@ impl LightProbeComponent for EnvironmentMapLight {
             specular_map: specular_map_handle,
             intensity,
             affects_lightmapped_mesh_diffuse,
-            specular_environment_integration,
             rotation,
             ..
         }) = view_component
@@ -321,8 +324,7 @@ impl LightProbeComponent for EnvironmentMapLight {
                         - 1,
                     intensity: *intensity,
                     affects_lightmapped_mesh_diffuse: *affects_lightmapped_mesh_diffuse,
-                    manson_sloan_environment_ibl: *specular_environment_integration
-                        == SpecularEnvironmentIntegration::MansonSloan,
+                    manson_sloan_environment_ibl: *is_generated,
                     rotation: *rotation,
                 });
         };
@@ -337,7 +339,7 @@ impl LightProbeComponent for EnvironmentMapLight {
 
     fn parallax_correction_bounds(
         &self,
-        maybe_parallax_correction: &<Self::QueryData as QueryData>::Item<'_, '_>,
+        (maybe_parallax_correction, _): &<Self::QueryData as QueryData>::Item<'_, '_>,
     ) -> Vec3 {
         match *maybe_parallax_correction {
             Some(&ParallaxCorrection::Custom(bounds)) => bounds,
