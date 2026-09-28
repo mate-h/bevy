@@ -102,6 +102,10 @@ impl LightProbe {
 /// area in space.
 ///
 /// See `bevy_pbr::light_probe::environment_map` for detailed information.
+///
+/// When this component is paired with [`GeneratedEnvironmentMapLight`], specular
+/// IBL uses Manson–Sloan sampling to match the runtime filter. Prebaked maps use
+/// the standard Frostbite / Karis split-sum path.
 #[derive(Clone, Component, Reflect, FromTemplate)]
 #[reflect(Component, Default, Clone)]
 pub struct EnvironmentMapLight {
@@ -280,6 +284,11 @@ pub struct GeneratedEnvironmentMapLight {
     /// Whether this light contributes diffuse lighting to meshes that already
     /// have baked lightmaps.
     pub affects_lightmapped_mesh_diffuse: bool,
+
+    /// Blend factor toward this frame's filtered specular cubemap. Values between 0 and 1 mix in
+    /// the previous frame to reduce flicker on dynamic probes.
+    #[reflect(ignore)]
+    pub temporal_blend: f32,
 }
 
 impl Default for GeneratedEnvironmentMapLight {
@@ -289,6 +298,7 @@ impl Default for GeneratedEnvironmentMapLight {
             intensity: 0.0,
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: true,
+            temporal_blend: 0.0,
         }
     }
 }
