@@ -4531,6 +4531,7 @@ hidden = true
 name = "reflection_probes"
 path = "examples/3d/reflection_probes.rs"
 doc-scrape-examples = true
+required-features = ["bevy_solari"]
 
 [package.metadata.example.reflection_probes]
 name = "Reflection Probes"

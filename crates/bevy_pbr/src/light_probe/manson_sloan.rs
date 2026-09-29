@@ -8,8 +8,9 @@
 //!
 //! Generated MS environment maps use the **same** encoding as that curve: mip `i` of an
 //! `n`-mip chain stores the filter for perceptual roughness `i/(n-1)` (α = perceptual²).
-//! Runtime LOD is therefore `perceptual_roughness * maxMip`, not Karis `α * maxMip`
-//! (which remains the encoding for prefiltered `EnvironmentMapLight` maps such as glTF IBL).
+//! Runtime LOD is therefore `perceptual_roughness * maxMip` for both MS-generated maps and
+//! prefiltered `EnvironmentMapLight` maps from glTF-IBL-Sampler / Karis (which also bake
+//! mips on a linear perceptual schedule and square only inside the GGX NDF).
 //!
 //! Layout: `float4 coeffs[7][5][6]` — 7 levels × 5 parameters (dir xyz, LOD, weight) ×
 //! 6 indices (3 axes × 8 taps / 4). Constant polynomial (no θ²/φ² terms).

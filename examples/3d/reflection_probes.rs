@@ -4,27 +4,40 @@
 //!
 //! 1. A prefiltered [`EnvironmentMapLight`] (Pisa)
 //! 2. A runtime-generated [`GeneratedEnvironmentMapLight`] (Manson–Sloan)
+//! 3. Solari pathtracer reference (Monte Carlo env-map reflections, mip 0 only)
 //!
-//! // 3. A reflection probe with the cubes scene (disabled for A/B comparison)
+//! // Reflection probe + cubes scene temporarily disabled for A/B comparison
 //!
 //! The generated path uses a **128²** source cubemap (box-downsampled from Pisa's sharp
 //! mip 0) so Manson–Sloan filtering runs at the table's native resolution
 //! (`lod_resolution_bias = 0`) without inheriting prefiltered specular blur.
 //!
 //! Press Enter to pause or resume rotation.
+//! In pathtracer mode, samples accumulate automatically while the camera is still.
+//! Accumulation resets when the camera moves or roughness changes.
 //!
 //! Reflection probes don't work on WebGL 2 or WebGPU.
+//! The pathtracer mode requires a GPU with ray-query support (`bevy_solari`).
+//!
+//! Note: Solari refuses to build its scene bind group with zero directional/emissive
+//! lights, even when an environment map is present. A zero-illuminance directional
+//! light is spawned so the pathtracer can run in an otherwise env-map-only scene.
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{Exposure, Hdr},
+    camera::{CameraMainTextureUsages, Exposure, Hdr},
     core_pipeline::tonemapping::Tonemapping,
     image::TextureFormatPixelInfo,
     light::{ParallaxCorrection, Skybox},
+    mesh::Indices,
     pbr::generate::generate_environment_map_light,
     prelude::*,
     render::render_resource::{
         Extent3d, TextureDimension, TextureUsages, TextureViewDescriptor, TextureViewDimension,
+    },
+    solari::{
+        pathtracer::{Pathtracer, PathtracingPlugin},
+        scene::{RaytracingMesh3d, RaytracingScenePlugin},
     },
 };
 
@@ -60,9 +73,13 @@ enum ReflectionMode {
     EnvironmentMap = 0,
     // Both a world environment map and a reflection probe are present. The
     // reflection probe is shown in the sphere.
+    // Kept for when the cubes scene is re-enabled.
+    #[allow(dead_code)]
     ReflectionProbe = 1,
     // A generated environment map is shown.
     GeneratedEnvironmentMap = 2,
+    // Solari pathtracer reference for environment-map reflections.
+    Pathtracer = 3,
 }
 
 // The various reflection maps.
@@ -83,8 +100,11 @@ struct Cubemaps {
 
 fn main() {
     // Create the app.
+    // Use RaytracingScenePlugin + PathtracingPlugin only — full SolariPlugins also
+    // enables SolariLightingPlugin, which forces deferred opaque rendering and leaves
+    // non-pathtracer modes black (no SolariLighting / DeferredPrepass on the camera).
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, RaytracingScenePlugin, PathtracingPlugin))
         .insert_resource(GlobalAmbientLight::NONE)
         .init_resource::<AppStatus>()
         .init_resource::<Cubemaps>()
@@ -92,10 +112,16 @@ fn main() {
         .add_systems(PreUpdate, add_environment_map_to_camera)
         .add_systems(
             Update,
-            change_reflection_type.before(generate_environment_map_light),
+            change_reflection_type
+                .before(generate_environment_map_light)
+                .after(clear_pathtracer_reset),
         )
         .add_systems(Update, toggle_rotation)
-        .add_systems(Update, change_sphere_roughness)
+        // Clear `Pathtracer::reset` at the start of the frame so a one-shot reset
+        // (roughness / mode switch) only clears accumulation for a single Extract.
+        // Camera motion is handled separately in Solari's extract via GlobalTransform.
+        .add_systems(Update, clear_pathtracer_reset)
+        .add_systems(Update, change_sphere_roughness.after(clear_pathtracer_reset))
         .add_systems(
             Update,
             rotate_camera
@@ -118,7 +144,17 @@ fn setup(
 ) {
     spawn_camera(&mut commands);
     spawn_sphere(&mut commands, &mut meshes, &mut materials, &app_status);
-    // Reflection probe mode disabled — A/B prefiltered vs generated only.
+    // Solari pathtracer needs ≥1 directional/emissive light to build its bind group.
+    // Illuminance 0 contributes no energy — env-map reflections remain the only lighting.
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 0.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::default(),
+    ));
+    // Reflection probe mode disabled — A/B prefiltered vs generated vs pathtracer.
     // spawn_reflection_probe(&mut commands, &cubemaps);
     // spawn_scene(&mut commands, &asset_server);
     spawn_text(&mut commands, &app_status);
@@ -143,6 +179,9 @@ fn spawn_camera(commands: &mut Commands) {
         Exposure { ev100: 11.0 },
         Tonemapping::AcesFitted,
         Transform::from_xyz(-3.883, 0.325, 2.781).looking_at(Vec3::ZERO, Vec3::Y),
+        // Required for Solari pathtracer writes into the main texture.
+        CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
+        Msaa::Off,
     ));
 }
 
@@ -153,12 +192,20 @@ fn spawn_sphere(
     materials: &mut Assets<StandardMaterial>,
     app_status: &AppStatus,
 ) {
-    // Create a sphere mesh.
-    let sphere_mesh = meshes.add(Sphere::new(1.0).mesh().ico(7).unwrap());
+    // Create a sphere mesh compatible with Solari raytracing (UVs, tangents, U32 indices).
+    let mut sphere = Sphere::new(1.0).mesh().ico(7).unwrap();
+    sphere.generate_tangents().unwrap();
+    if let Some(indices) = sphere.indices_mut()
+        && let Indices::U16(_) = indices
+    {
+        *indices = Indices::U32(indices.iter().map(|i| i as u32).collect());
+    }
+    let sphere_mesh = meshes.add(sphere);
 
     // Create a sphere.
     commands.spawn((
         Mesh3d(sphere_mesh.clone()),
+        RaytracingMesh3d(sphere_mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Srgba::hex("#ffffff").unwrap().into(),
             metallic: 1.0,
@@ -238,10 +285,13 @@ fn change_reflection_type(
         return;
     }
 
-    // Toggle prefiltered ↔ generated (reflection probe mode commented out).
+    let leaving_pathtracer = app_status.reflection_mode == ReflectionMode::Pathtracer;
+
+    // Cycle: prefiltered → generated → pathtracer → …
     app_status.reflection_mode = match app_status.reflection_mode {
         ReflectionMode::EnvironmentMap => ReflectionMode::GeneratedEnvironmentMap,
-        ReflectionMode::GeneratedEnvironmentMap | ReflectionMode::ReflectionProbe => {
+        ReflectionMode::GeneratedEnvironmentMap => ReflectionMode::Pathtracer,
+        ReflectionMode::Pathtracer | ReflectionMode::ReflectionProbe => {
             ReflectionMode::EnvironmentMap
         }
     };
@@ -260,14 +310,33 @@ fn change_reflection_type(
     //         spawn_reflection_probe(&mut commands, &cubemaps);
     //         spawn_scene(&mut commands, &asset_server);
     //     }
+    //     ReflectionMode::Pathtracer => {}
     // }
+
+    // Keep Mesh3d always — pathtracer overwrites the main pass anyway. Removing it
+    // and re-adding it after pathtracer left IBL modes permanently black.
 
     // Update the environment-map components on the camera entity/entities
     for camera in camera_query.iter() {
-        // Remove any existing environment-map components
+        // Do not use `remove_with_requires::<Pathtracer>()`: that also strips `Hdr`
+        // (required by Pathtracer), which disables tonemapping and blacks out IBL.
         commands
             .entity(camera)
-            .remove::<(EnvironmentMapLight, GeneratedEnvironmentMapLight)>();
+            .remove::<(EnvironmentMapLight, GeneratedEnvironmentMapLight, Pathtracer)>();
+
+        // Re-assert camera components pathtracer mode must not leave behind.
+        if leaving_pathtracer {
+            commands.entity(camera).insert((
+                Hdr,
+                CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
+                Msaa::Off,
+                Skybox {
+                    image: Some(cubemaps.specular_environment_map.clone()),
+                    brightness: ENV_MAP_INTENSITY,
+                    ..default()
+                },
+            ));
+        }
 
         match app_status.reflection_mode {
             ReflectionMode::EnvironmentMap /* | ReflectionMode::ReflectionProbe */ => {
@@ -283,6 +352,17 @@ fn change_reflection_type(
                     .insert(GeneratedEnvironmentMapLight {
                         environment_map: cubemaps.specular_environment_map_128.clone(),
                         intensity: ENV_MAP_INTENSITY,
+                        ..default()
+                    });
+            }
+
+            // Pathtracer samples the sharp specular mip 0 via EnvironmentMapLight.
+            ReflectionMode::Pathtracer => {
+                commands
+                    .entity(camera)
+                    .insert(create_camera_environment_map_light(&cubemaps))
+                    .insert(Pathtracer {
+                        reset: true,
                         ..default()
                     });
             }
@@ -319,6 +399,7 @@ impl TryFrom<u32> for ReflectionMode {
             0 => Ok(ReflectionMode::EnvironmentMap),
             1 => Ok(ReflectionMode::ReflectionProbe),
             2 => Ok(ReflectionMode::GeneratedEnvironmentMap),
+            3 => Ok(ReflectionMode::Pathtracer),
             _ => Err(()),
         }
     }
@@ -330,6 +411,7 @@ impl Display for ReflectionMode {
             ReflectionMode::EnvironmentMap => "Environment map",
             ReflectionMode::ReflectionProbe => "Reflection probe",
             ReflectionMode::GeneratedEnvironmentMap => "Generated environment map",
+            ReflectionMode::Pathtracer => "Solari pathtracer (reference)",
         };
         formatter.write_str(text)
     }
@@ -345,12 +427,19 @@ impl AppStatus {
             START_ROTATION_HELP_TEXT
         };
 
+        let pathtracer_hint = if self.reflection_mode == ReflectionMode::Pathtracer {
+            "\nPathtracer: accumulating (resets on camera move / roughness change)"
+        } else {
+            ""
+        };
+
         format!(
-            "{}\n{}\nRoughness: {:.2}\n{}\nUp/Down arrows to change roughness",
+            "{}\n{}\nRoughness: {:.2}\n{}\nUp/Down arrows to change roughness{}",
             self.reflection_mode,
             rotation_help_text,
             self.sphere_roughness,
-            REFLECTION_MODE_HELP_TEXT
+            REFLECTION_MODE_HELP_TEXT,
+            pathtracer_hint
         )
         .into()
     }
@@ -580,12 +669,21 @@ struct SphereMaterial;
 #[derive(Component)]
 struct CubesScene;
 
+/// `Pathtracer::reset` must be true for only one frame. Solari's extract copies it into the
+/// render world; if it stays true, accumulation never converges.
+fn clear_pathtracer_reset(mut pathtracer: Query<&mut Pathtracer>) {
+    for mut pathtracer in &mut pathtracer {
+        pathtracer.reset = false;
+    }
+}
+
 // A system that changes the sphere's roughness with up/down arrow keys
 fn change_sphere_roughness(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut app_status: ResMut<AppStatus>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     sphere_query: Query<&MeshMaterial3d<StandardMaterial>, With<SphereMaterial>>,
+    pathtracer: Option<Single<&mut Pathtracer>>,
 ) {
     let roughness_delta = if keyboard.pressed(KeyCode::ArrowUp) {
         0.01 // Decrease roughness
@@ -605,6 +703,11 @@ fn change_sphere_roughness(
             if let Some(mut material) = materials.get_mut(&material_handle.0) {
                 material.perceptual_roughness = app_status.sphere_roughness;
             }
+        }
+
+        // One-shot reset — `clear_pathtracer_reset` clears this next frame.
+        if let Some(mut pathtracer) = pathtracer {
+            pathtracer.reset = true;
         }
     }
 }

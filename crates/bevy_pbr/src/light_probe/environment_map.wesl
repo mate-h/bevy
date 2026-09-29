@@ -172,15 +172,12 @@ fn compute_radiances(
         // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
         let max_specular_mip = f32(textureNumLevels(
             bindings::specular_environment_maps[query_result.texture_index]) - 1u);
-        let manson_sloan_ibl =
-            (query_result.flags & LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL) != 0u;
-        // Prefiltered maps use Karis LOD (α * maxMip). MS-generated maps use Esoterica
-        // linear-perceptual LOD (perceptual_roughness * maxMip).
-        let radiance_level = select(
-            roughness * max_specular_mip,
-            perceptual_roughness * max_specular_mip,
-            manson_sloan_ibl,
-        );
+        // Both glTF-IBL-Sampler (prefiltered) and Esoterica/MS-generated maps encode mip `i`
+        // as perceptual roughness `i/(n-1)` (α = perceptual² used only inside the GGX filter).
+        // Karis/glTF Sample Viewer therefore sample with `perceptual_roughness * maxMip`,
+        // not `α * maxMip` (which under-blurs mid roughness vs a pathtraced reference).
+        let radiance_level = perceptual_roughness * max_specular_mip;
+        // Frostbite Listing 22 dominant direction uses linear roughness α.
         let mip_roughness = roughness;
 
         // If we're lightmapped, and we shouldn't accumulate diffuse light from the
@@ -261,16 +258,11 @@ fn compute_radiances(
 
     // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
     // Technically we could use textureNumLevels(specular_environment_map) - 1 here, but we use a uniform
-    // because textureNumLevels() does not work on WebGL2
-    let manson_sloan_ibl = light_probes.view_manson_sloan_environment_ibl != 0u;
-    // Prefiltered maps use Karis LOD (α * maxMip). MS-generated maps use Esoterica
-    // linear-perceptual LOD (perceptual_roughness * maxMip).
+    // because textureNumLevels() does not work on WebGL2.
+    // LOD is linear in perceptual roughness for both prefiltered (glTF-IBL-Sampler) and
+    // MS-generated maps — see the MULTIPLE_LIGHT_PROBES path for the rationale.
     let max_specular_mip = f32(light_probes.smallest_specular_mip_level_for_view);
-    let radiance_level = select(
-        roughness * max_specular_mip,
-        perceptual_roughness * max_specular_mip,
-        manson_sloan_ibl,
-    );
+    let radiance_level = perceptual_roughness * max_specular_mip;
     let mip_roughness = roughness;
 
     let intensity = light_probes.intensity_for_view;
