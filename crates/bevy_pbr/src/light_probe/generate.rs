@@ -104,7 +104,8 @@ pub struct TemporalBlendUniforms {
 pub struct FilteringConstants {
     mip_level: f32,
     sample_count: u32,
-    /// Perceptual roughness for this mip, matching runtime Manson–Sloan shading.
+    /// Perceptual roughness (√α) for Esoterica table lookup. MS-generated mip `i`
+    /// stores the filter for perceptual roughness `i/(n-1)`.
     perceptual_roughness: f32,
     /// `log2(cubemap_face_size / 128)` for non-128 source cubemaps.
     lod_resolution_bias: f32,
@@ -639,7 +640,10 @@ pub fn prepare_generated_environment_map_bind_groups(
 
         let lod_resolution_bias = (base_size as f32 / 128.0).log2();
         for mip in 0..num_mips {
-            let perceptual_roughness = mip as f32 / (num_mips - 1).max(1) as f32;
+            // Esoterica linear-perceptual encoding: mip i stores the filter for
+            // perceptual roughness i/(n-1). Table rows use the same schedule.
+            let perceptual_roughness =
+                manson_sloan::mip_perceptual_roughness(mip as u32, mip_count);
             let face_extent = base_size >> mip;
             let radiance_constants = FilteringConstants {
                 mip_level: mip as f32,

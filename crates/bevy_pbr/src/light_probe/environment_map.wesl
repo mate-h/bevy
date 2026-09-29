@@ -95,23 +95,12 @@ fn compute_cubemap_sample_dir(
 }
 
 // GGX split-sum dominant reflection direction (Frostbite Listing 22).
+// Used for both prefiltered and MS-generated specular maps — both store radiance
+// indexed by direction, so the sample direction must match.
 fn radiance_sample_direction_ggx_split_sum(N: vec3<f32>, R: vec3<f32>, mip_roughness: f32) -> vec3<f32> {
     let smoothness = saturate(1.0 - mip_roughness);
     let lerp_factor = smoothness * (sqrt(smoothness) + mip_roughness);
     return mix(N, R, lerp_factor);
-}
-
-// Specular environment sampling direction. Manson–Sloan uses the reflection vector directly.
-fn environment_specular_sample_direction(
-    N: vec3<f32>,
-    R: vec3<f32>,
-    mip_roughness: f32,
-    manson_sloan_ibl: bool,
-) -> vec3<f32> {
-    if (manson_sloan_ibl) {
-        return R;
-    }
-    return radiance_sample_direction_ggx_split_sum(N, R, mip_roughness);
 }
 
 // Define two versions of this function, one for the case in which there are
@@ -185,8 +174,14 @@ fn compute_radiances(
             bindings::specular_environment_maps[query_result.texture_index]) - 1u);
         let manson_sloan_ibl =
             (query_result.flags & LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL) != 0u;
-        let mip_roughness = select(roughness, perceptual_roughness, manson_sloan_ibl);
-        let radiance_level = mip_roughness * max_specular_mip;
+        // Prefiltered maps use Karis LOD (α * maxMip). MS-generated maps use Esoterica
+        // linear-perceptual LOD (perceptual_roughness * maxMip).
+        let radiance_level = select(
+            roughness * max_specular_mip,
+            perceptual_roughness * max_specular_mip,
+            manson_sloan_ibl,
+        );
+        let mip_roughness = roughness;
 
         // If we're lightmapped, and we shouldn't accumulate diffuse light from the
         // environment map, note that.
@@ -214,7 +209,7 @@ fn compute_radiances(
         }
 
         var radiance_sample_dir =
-            environment_specular_sample_direction(N, R, mip_roughness, manson_sloan_ibl);
+            radiance_sample_direction_ggx_split_sum(N, R, mip_roughness);
         radiance_sample_dir = compute_cubemap_sample_dir(
             world_position,
             radiance_sample_dir,
@@ -268,8 +263,15 @@ fn compute_radiances(
     // Technically we could use textureNumLevels(specular_environment_map) - 1 here, but we use a uniform
     // because textureNumLevels() does not work on WebGL2
     let manson_sloan_ibl = light_probes.view_manson_sloan_environment_ibl != 0u;
-    let mip_roughness = select(roughness, perceptual_roughness, manson_sloan_ibl);
-    let radiance_level = mip_roughness * f32(light_probes.smallest_specular_mip_level_for_view);
+    // Prefiltered maps use Karis LOD (α * maxMip). MS-generated maps use Esoterica
+    // linear-perceptual LOD (perceptual_roughness * maxMip).
+    let max_specular_mip = f32(light_probes.smallest_specular_mip_level_for_view);
+    let radiance_level = select(
+        roughness * max_specular_mip,
+        perceptual_roughness * max_specular_mip,
+        manson_sloan_ibl,
+    );
+    let mip_roughness = roughness;
 
     let intensity = light_probes.intensity_for_view;
 
@@ -295,7 +297,7 @@ fn compute_radiances(
     }
 
     var radiance_sample_dir =
-        environment_specular_sample_direction(N, R, mip_roughness, manson_sloan_ibl);
+        radiance_sample_direction_ggx_split_sum(N, R, mip_roughness);
     // Rotating the world space ray direction by the environment map light view rotation,
     // it is equivalent to rotating the environment cubemap itself.
     radiance_sample_dir = quat_rotate(light_probes.view_rotation, radiance_sample_dir);
