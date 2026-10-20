@@ -610,9 +610,11 @@ fn setup_camera_fog(
         },
         // Planet-scale flight: 100x the default walk/run speed.
         #[cfg(feature = "free_camera")]
-        FreeCameraState {
-            speed_multiplier: 100.0,
-            ..default()
+        {
+            // `FreeCameraState` has private fields, so no struct-update syntax.
+            let mut state = FreeCameraState::default();
+            state.speed_multiplier = 100.0;
+            state
         },
         VolumetricFog {
             ambient_intensity: 0.0,
