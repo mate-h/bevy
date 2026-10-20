@@ -12,10 +12,55 @@ use bevy_ecs::{
 use bevy_math::UVec2;
 use bevy_render::{
     render_resource::{binding_types::*, *},
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderAdapter, RenderDevice, RenderQueue},
+    settings::WgpuFeatures,
     texture::CachedTexture,
 };
 use bevy_utils::default;
+
+/// Storage format of the cirrus generating field: R16Float is a storage format only with the
+/// adapter-specific format features, not in WebGPU's guaranteed set; elsewhere the field falls
+/// back to Rgba16Float (a core storage format), which the generator declares through
+/// `CIRRUS_STORAGE_RGBA16`. R16Float is kept where possible (2.8 MB with mips vs 11 MB).
+#[derive(Resource, Clone, Copy)]
+pub struct CloudNoiseFormats {
+    pub cirrus: TextureFormat,
+}
+
+impl CloudNoiseFormats {
+    pub fn cirrus_shader_defs(&self) -> Vec<bevy_shader::ShaderDefVal> {
+        if self.cirrus == TextureFormat::Rgba16Float {
+            vec!["CIRRUS_STORAGE_RGBA16".into()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl FromWorld for CloudNoiseFormats {
+    fn from_world(world: &mut World) -> Self {
+        let device = world.resource::<RenderDevice>();
+        let adapter = world.resource::<RenderAdapter>();
+        let adapter_formats = device
+            .features()
+            .contains(WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+        let storage = |format: TextureFormat| {
+            if adapter_formats
+                && adapter
+                    .get_texture_format_features(format)
+                    .allowed_usages
+                    .contains(TextureUsages::STORAGE_BINDING)
+            {
+                format
+            } else {
+                TextureFormat::Rgba16Float
+            }
+        };
+        Self {
+            cirrus: storage(TextureFormat::R16Float),
+        }
+    }
+}
 
 /// Parameters for controlling FBM noise generation
 #[derive(Clone, Copy, ShaderType, bytemuck::Pod, bytemuck::Zeroable)]
@@ -103,7 +148,10 @@ impl FromWorld for FbmNoiseBindGroupLayout {
                     (
                         // Cirrus generating field (`cirrus` entry point).
                         15,
-                        texture_storage_2d(TextureFormat::R16Float, StorageTextureAccess::WriteOnly),
+                        texture_storage_2d(
+                            world.resource::<CloudNoiseFormats>().cirrus,
+                            StorageTextureAccess::WriteOnly,
+                        ),
                     ),
                 ),
             ),
@@ -140,6 +188,7 @@ impl FromWorld for FbmNoisePipeline {
             layout: vec![layout.descriptor.clone()],
             shader: load_embedded_asset!(world, "fbm_noise_3d.wesl"),
             entry_point: Some("cirrus".into()),
+            shader_defs: world.resource::<CloudNoiseFormats>().cirrus_shader_defs(),
             ..default()
         });
 
@@ -182,6 +231,7 @@ pub struct FbmNoiseParamsBuffer {
 /// so this `RenderStartup` system does not need to run after `init_gpu_resource::<TextureCache>`.
 pub fn init_fbm_noise_texture(
     render_device: Res<RenderDevice>,
+    formats: Res<CloudNoiseFormats>,
     mut commands: bevy_ecs::system::Commands,
 ) {
     let size = NoiseTextureSize::default();
@@ -215,7 +265,7 @@ pub fn init_fbm_noise_texture(
         mip_level_count: CIRRUS_TEXTURE_SIZE.ilog2() + 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
-        format: TextureFormat::R16Float,
+        format: formats.cirrus,
         usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
         view_formats: &[],
     });

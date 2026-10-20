@@ -29,6 +29,9 @@ import package::atmosphere::{
     },
 };
 
+@if(MULTISAMPLED_DEPTH)
+@group(0) @binding(13) var depth_texture: texture_depth_multisampled_2d;
+@else
 @group(0) @binding(13) var depth_texture: texture_depth_2d;
 @group(0) @binding(26) var out_clouds: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(27) var out_clouds_depth: texture_storage_2d<r32float, write>;
@@ -613,7 +616,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var y = 0; y < ratio; y++) {
         for (var x = 0; x < ratio; x++) {
             let p = min(base_px + vec2(x, y), vec2<i32>(full_size) - 1);
-            depth = min(depth, textureLoad(depth_texture, p, 0));
+            @if(MULTISAMPLED_DEPTH) {
+                // MSAA: the farthest sample of the pixel too (edges partly cover the sky).
+                for (var s = 0u; s < textureNumSamples(depth_texture); s++) {
+                    depth = min(depth, textureLoad(depth_texture, p, i32(s)));
+                }
+            } @else {
+                depth = min(depth, textureLoad(depth_texture, p, 0));
+            }
         }
     }
 

@@ -545,7 +545,11 @@ pub fn render_sky(
     if let (Some(cloud_layer_offset), Some(bind_group), Some(pipeline)) = (
         cloud_layer_uniforms_offset.as_ref(),
         atmosphere_bind_groups.clouds_raymarch.as_ref(),
-        pipeline_cache.get_compute_pipeline(pipelines.clouds_raymarch),
+        pipeline_cache.get_compute_pipeline(if atmosphere_bind_groups.clouds_raymarch_multisampled {
+            pipelines.clouds_raymarch_msaa
+        } else {
+            pipelines.clouds_raymarch
+        }),
     ) {
         let mut clouds_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("clouds_raymarch"),

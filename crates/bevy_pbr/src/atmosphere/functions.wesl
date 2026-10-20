@@ -1147,22 +1147,6 @@ fn cloud_column_march_optical_depth(p: vec3<f32>) -> f32 {
     return -log(max(cloud_far_transmittance(p, normalize(p), true), 1e-6));
 }
 
-/// Blurred cloud column optical depth above an atmosphere-space point (cloud AO).
-@if(CLOUDS_ENABLED)
-fn cloud_column_optical_depth(p: vec3<f32>) -> f32 {
-    let n = normalize(p);
-    var tau = -log(max(cloud_far_transmittance(p, n, true), 1e-6));
-    @if(CLOUD_FIELD_BOUND) {
-        let uvw = cloud_field_uvw(p, textureLoad(cloud_field_sdf, vec3(0), 0).ba);
-        if (all(uvw.xy >= vec2(0.0)) && all(uvw.xy <= vec2(1.0))) {
-            let field = textureSampleLevel(cloud_field_sdf, atmosphere_lut_sampler, vec3(uvw.xy, 0.5), 0.0).g;
-            // Fade to the march over the outer 10 % of the field.
-            let e = min(min(uvw.x, 1.0 - uvw.x), min(uvw.y, 1.0 - uvw.y));
-            tau = mix(tau, field * settings.cloud_shadow_map_strength, saturate(e / 0.1));
-        }
-    }
-    return tau;
-}
 const GROUND_SKY_DIRS: u32 = 6u;
 const GROUND_SKY_STEPS: u32 = 6u;
 fn ground_sky_irradiance(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {

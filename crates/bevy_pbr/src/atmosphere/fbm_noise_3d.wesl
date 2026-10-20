@@ -17,6 +17,10 @@ struct FbmParams {
 }
 
 @group(0) @binding(14) var<uniform> fbm_params: FbmParams;
+// R16Float where the adapter allows it as storage, else Rgba16Float (`CloudNoiseFormats`).
+@if(CIRRUS_STORAGE_RGBA16)
+@group(0) @binding(15) var cirrus_out: texture_storage_2d<rgba16float, write>;
+@else
 @group(0) @binding(15) var cirrus_out: texture_storage_2d<r16float, write>;
 
 /// Random tile offset of life-cycle generation `n` (generation 0 is the unshifted map, so
