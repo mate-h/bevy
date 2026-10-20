@@ -1177,7 +1177,12 @@ pub struct AtmosphereTextures {
 
 pub(super) fn prepare_atmosphere_textures(
     views: Query<
-        (Entity, &GpuAtmosphereSettings, Option<&ExtractedCamera>),
+        (
+            Entity,
+            &GpuAtmosphereSettings,
+            Option<&ExtractedCamera>,
+            bevy_ecs::query::Has<GpuCloudLayers>,
+        ),
         With<ExtractedAtmosphere>,
     >,
     render_device: Res<RenderDevice>,
@@ -1185,7 +1190,23 @@ pub(super) fn prepare_atmosphere_textures(
     frame_count: Res<FrameCount>,
     mut commands: Commands,
 ) {
-    for (entity, lut_settings, camera) in &views {
+    for (entity, lut_settings, camera, has_clouds) in &views {
+        // Views without cloud layers bind 1x1 placeholders for every cloud texture (their
+        // passes do not run, and PBR skips the cloud shadow map at extent 0): the full set is
+        // ~52 MiB per view at 1080p (cloud field, shadow map + history, half-res cloud and haze
+        // ping-pong targets).
+        let cloud_extent = |full: Extent3d| {
+            if has_clouds {
+                full
+            } else {
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                }
+            }
+        };
+        let cloud_shadow_map_extent = cloud_extent(lut_settings.cloud_shadow_map_size.to_extents());
         let transmittance_lut = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -1247,11 +1268,11 @@ pub(super) fn prepare_atmosphere_textures(
                 &render_device,
                 TextureDescriptor {
                     label: Some(label),
-                    size: Extent3d {
+                    size: cloud_extent(Extent3d {
                         width: CLOUD_FIELD_RES_XY,
                         height: CLOUD_FIELD_RES_XY,
                         depth_or_array_layers: CLOUD_FIELD_RES_Z,
-                    },
+                    }),
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: TextureDimension::D3,
@@ -1270,11 +1291,11 @@ pub(super) fn prepare_atmosphere_textures(
             &render_device,
             TextureDescriptor {
                 label: Some("cloud_field_esc"),
-                size: Extent3d {
+                size: cloud_extent(Extent3d {
                     width: CLOUD_FIELD_RES_XY / 2,
                     height: CLOUD_FIELD_RES_XY / 2,
                     depth_or_array_layers: CLOUD_FIELD_RES_Z,
-                },
+                }),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D3,
@@ -1288,7 +1309,7 @@ pub(super) fn prepare_atmosphere_textures(
             &render_device,
             TextureDescriptor {
                 label: Some("cloud_shadow_map"),
-                size: lut_settings.cloud_shadow_map_size.to_extents(),
+                size: cloud_shadow_map_extent,
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
@@ -1304,7 +1325,7 @@ pub(super) fn prepare_atmosphere_textures(
             &render_device,
             TextureDescriptor {
                 label: Some("cloud_shadow_map_tmp"),
-                size: lut_settings.cloud_shadow_map_size.to_extents(),
+                size: cloud_shadow_map_extent,
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
@@ -1318,7 +1339,7 @@ pub(super) fn prepare_atmosphere_textures(
             &render_device,
             TextureDescriptor {
                 label: Some("cloud_shadow_map_history"),
-                size: lut_settings.cloud_shadow_map_size.to_extents(),
+                size: cloud_shadow_map_extent,
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
@@ -1333,6 +1354,7 @@ pub(super) fn prepare_atmosphere_textures(
         // Half-resolution cloud raymarch targets (design.md §1.2).
         let full_size = camera
             .and_then(|camera| camera.physical_viewport_size)
+            .filter(|_| has_clouds)
             .unwrap_or(UVec2::ONE);
         let clouds_size = (full_size / 2).max(UVec2::ONE);
         let trace_size = (clouds_size + UVec2::ONE) / 2;
@@ -1609,6 +1631,12 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         return;
     };
     if !settings.cloud_shadow_uses_temporal_pass() {
+        return;
+    }
+    if cloud_layer.is_none() {
+        // No cloud layer: the shadow textures are 1x1 placeholders, so whatever history exists
+        // is gone once clouds come back.
+        temporal_state.initialized = false;
         return;
     }
     let light_dir = directional_lights
