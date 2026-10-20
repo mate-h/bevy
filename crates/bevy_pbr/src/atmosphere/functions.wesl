@@ -212,7 +212,6 @@ fn ndc_to_camera_dist(ndc: vec3<f32>) -> f32 {
 fn sample_aerial_view_lut(uv: vec2<f32>, t: f32) -> vec3<f32> {
     let t_max = settings.aerial_view_lut_max_distance;
     let num_slices = f32(settings.aerial_view_lut_size.z);
-    let num_samples = f32(settings.aerial_view_lut_samples);
     // LUT depth is squared in normalized slice parameter u
     let u = sqrt(saturate(t / t_max));
     // Each texel stores the value of the scattering integral over the whole slice,
@@ -225,10 +224,11 @@ fn sample_aerial_view_lut(uv: vec2<f32>, t: f32) -> vec3<f32> {
     // Since sampling anywhere between w=0 and w=t_slice will clamp to the first slice,
     // we need to do a linear step over the first slice towards zero at the camera's
     // position to recover the correct integral value.
-    let t_slice = t_max / num_slices;
-    let u_end_first_slice =
-        ((num_samples - 1.0 + MIDPOINT_RATIO) / num_samples) / num_slices;
-    let t_first_slice = t_max * u_end_first_slice * u_end_first_slice;
+    // The first slice integrates exactly to its boundary u = 1 / num_slices (aerial_view_lut.wesl:
+    // segments end at each slice boundary), so the fade ends there too. The old endpoint (the
+    // last midpoint sample, from before that change) ended the fade early: near-camera haze was
+    // up to (n / (n - 1 + 0.3))^2 too strong for n samples per slice (audit 29).
+    let t_first_slice = t_max / (num_slices * num_slices);
     let fade = saturate(t / t_first_slice);
     // Recover the values from log space
     return exp(sample.rgb) * fade;

@@ -284,16 +284,25 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     // wispy (G) and billowy (A) noise folded twice over 0, blended in within 150 m of the camera.
     // The camera distance follows from the shape LOD, mip = log2(1 + d / 4 km).
     let cam_dist = (exp2(mip) - 1.0) * 4000.0;
+    // Scaled by detail_strength like the other detail (0 = no detail erosion, audit 26).
     let hhf = saturate(mix(1.0 - pow(abs(abs(n.g * 2.0 - 1.0) * 2.0 - 1.0), 4.0),
-        pow(abs(abs(n.a * 2.0 - 1.0) * 2.0 - 1.0), 2.0), detail_type));
+        pow(abs(abs(n.a * 2.0 - 1.0) * 2.0 - 1.0), 2.0), detail_type)) * cloud_layer.detail_strength;
     let hf_blend = saturate((cam_dist - 50.0) / 100.0);
     composite = mix(hhf, composite, mix(0.9, 1.0, hf_blend));
     var dens = saturate((profile - composite) / max(1.0 - composite, 1e-4));
     let powered_scale = pow(density_scale, 4.0);
     dens *= powered_scale;
     dens = pow(dens, mix(0.3, 0.6, max(1e-4, powered_scale)));
-    dens = pow(dens, mix(0.5, 1.0, hf_blend)) * mix(0.666, 1.0, hf_blend);
-    return dens;
+    return near_camera_reshape(dens, mip);
+}
+
+/// Nubis Cubed near-camera density reshape (within 150 m of the camera, from the shape LOD
+/// mip = log2(1 + d / 4 km)): pow(d, 0.5) * 0.666 at 50 m, identity beyond 150 m. Increasing in
+/// `d`, so applying it to an upper bound keeps it an upper bound (the march's coarse test).
+fn near_camera_reshape(dens: f32, mip: f32) -> f32 {
+    let cam_dist = (exp2(mip) - 1.0) * 4000.0;
+    let hf_blend = saturate((cam_dist - 50.0) / 100.0);
+    return pow(dens, mix(0.5, 1.0, hf_blend)) * mix(0.666, 1.0, hf_blend);
 }
 
 fn sample_cumulus_shape(r: f32, world_pos: vec3<f32>) -> f32 {
@@ -592,7 +601,14 @@ fn cloud_field_cell(cam: vec3<f32>) -> vec2<f32> {
     // follows the camera. An odd cell shifted the escape lattice by half a block, and every
     // interpolated escape probability (multiple scattering) jumped when the camera crossed a
     // voxel boundary.
-    return 2.0 * floor(cam.xz / (2.0 * cloud_field_voxel_m()));
+    // Rounded to half-float precision: the cell travels to the field's consumers in RGBA16F
+    // metadata, so the field is built at exactly the origin they reconstruct (audit 21: past
+    // cell 2048 the stored cell rounded and the consumers read the field up to 750 m (at
+    // 1,500 km) off the place it was built, beyond the SDF skip margin). Rounded cells stay even
+    // (half-float spacing is >= 2 there). The grid then follows the camera in coarser steps far
+    // from the origin (6 km at Earth-radius coordinates, within the 12 km half extent).
+    let cell = 2.0 * floor(cam.xz / (2.0 * cloud_field_voxel_m()));
+    return unpack2x16float(pack2x16float(cell));
 }
 
 fn cloud_field_origin_from_cell(cell: vec2<f32>) -> vec2<f32> {

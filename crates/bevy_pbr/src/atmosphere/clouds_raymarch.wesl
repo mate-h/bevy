@@ -22,7 +22,7 @@ import package::atmosphere::{
         ABSORPTION_DENSITY, SCATTERING_DENSITY,
     },
     clouds::{
-        cloud_layer_segment, get_cloud_medium_density_coarse,
+        cloud_layer_segment, get_cloud_medium_density_coarse, near_camera_reshape,
         get_cloud_medium_density_lod, cloud_mip_from_distance, get_cloud_scattering_coeff,
         get_cloud_absorption_coeff, cloud_density_context, cloud_layer, cirrus_slant_optical_depth, CIRRUS_SLICES,
         cloud_field_uvw, cloud_field_voxel_m, CLOUD_FIELD_EXTENT_M,
@@ -276,15 +276,20 @@ fn composite_cirrus(c: vec4<f32>, depth_io: ptr<function, f32>, origin: vec3<f32
     var t_ap = sample_transmittance_lut_segment(r, mu, t_ci);
     t_ap = t_ap * exp(sample_transmittance_lut_segment_tau_red(r, mu, t_ci));
     let lum_ci = (t_ap * l_ci + (1.0 - t_view) * sample_sky_view_lut(r, dir)) * view.exposure;
+    // Representative depth weighted by each layer's visible opacity: the layer behind is seen
+    // through the one in front (audit 27: above the sheet the cumulus kept its full weight 1 - T_c,
+    // so an opaque cirrus foreground still pulled the depth to the cumulus behind it).
     var out: vec4<f32>;
     var w_ci: f32;
-    let w_c = 1.0 - c.a;
+    var w_c: f32;
     if (below) {
         out = vec4(c.rgb + c.a * lum_ci, c.a * t_view);
+        w_c = 1.0 - c.a;
         w_ci = c.a * (1.0 - t_view);
     } else {
         out = vec4(lum_ci + t_view * c.rgb, c.a * t_view);
         w_ci = 1.0 - t_view;
+        w_c = t_view * (1.0 - c.a);
     }
     if (w_c + w_ci > 0.0) {
         *depth_io = (w_c * *depth_io + w_ci * t_ci) / (w_c + w_ci);
@@ -736,7 +741,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
                 fine_empty = 0u;
             } else {
-                let coarse = get_cloud_medium_density_coarse(r_p, p);
+                // The fine density's near-camera reshape raises small densities (pow 0.5), so the
+                // bound gets it too, or thin near-camera cloud failed the coarse test (audit 25).
+                let coarse = near_camera_reshape(
+                    get_cloud_medium_density_coarse(r_p, p) / max(cloud_layer.cloud_density, 1e-6),
+                    mip,
+                ) * cloud_layer.cloud_density;
                 if (coarse > CLOUD_COARSE_DENSITY_EPS) {
                     // Step back and enter fine mode (Nubis17).
                     // Undo the leap that landed here (not the current step, which with the
@@ -746,7 +756,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     // leaps (budget stretch, SDF) are much longer than the ray-start jitter, so
                     // hits land at nearly the same distances on every pixel and frame, and the
                     // fine slices line up into bands and rings that crawl with the camera.
-                    t = max(t_start, t - last_leap + jitter * dist_step);
+                    // Only after a real leap: with no leap yet (the first sample, already at the
+                    // jittered ray start) adding the jitter again moved the first fine sample by
+                    // up to two steps and lost near-entry optical depth (audit 23).
+                    if (last_leap > 0.0) {
+                        t = max(t_start, t - last_leap + jitter * dist_step);
+                    }
                     fine_mode = true;
                     fine_empty = 0u;
                     continue;
@@ -833,7 +848,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 @if(!CLOUD_TERM_S1) {
                     let tau_sun = light_optical_depth - log(max(t_far, 1e-6));
                     let albedo = sigma_s_unit / max(sigma_t_unit, 1e-9);
-                    let f_ms = albedo * (1.0 - esc_col.x);
+                    // P_esc of a finite cloud is positive; the escape volume stores it in
+                    // RGBA16F, whose smallest normal (6.1e-5) is the floor kept here, so a thick
+                    // conservative cloud (zero absorption) cannot make 1 - f_ms zero (audit 22).
+                    let f_ms = albedo * (1.0 - max(esc_col.x, 6.1035e-5));
                     let ms_vol = exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun) * f_ms / (1.0 - f_ms);
                     direct += ms_vol * (0.25 / PI);
                 }
