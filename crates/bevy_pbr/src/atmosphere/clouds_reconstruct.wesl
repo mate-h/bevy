@@ -17,8 +17,14 @@ struct CloudsTemporalParams {
     // Cloud field displacement since the previous frame (atmosphere space, wind advection).
     cloud_motion: vec3<f32>,
     history_valid: u32,
+    // Thin (cirrus) layer displacement since the previous frame: its own wind.
+    cirrus_motion: vec3<f32>,
     // Weight of the new sample for the pixel traced this frame.
     new_sample_weight: f32,
+    // Representative depths above this radius are cirrus (0 without cumulus).
+    cirrus_min_radius: f32,
+    // Current / previous exposure: the history holds exposed radiance.
+    history_exposure_scale: f32,
 }
 
 @group(0) @binding(26) var trace_texture: texture_2d<f32>;
@@ -89,8 +95,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let ray_dir = uv_to_ray_direction(uv);
         let d = select(NO_CLOUD_REPROJECTION_DISTANCE_M, center_depth, center_depth > 0.0);
         // Cloud points moved with the wind since last frame (RDR2 uses the wind as the motion
-        // vector of its volumes); clear rays reproject by rotation only.
-        var motion = select(vec3(0.0), params.cloud_motion, center_depth > 0.0);
+        // vector of its volumes); clear rays reproject by rotation only. Each layer has its own
+        // wind: the pixel's representative (transmittance-weighted) depth picks the layer that
+        // dominates it, so cirrus no longer trails with the cumulus motion (or with none, in a
+        // cirrus-only sky).
+        let in_cirrus = length(get_view_position() + ray_dir * d) > params.cirrus_min_radius;
+        var motion = select(
+            vec3(0.0),
+            select(params.cloud_motion, params.cirrus_motion, in_cirrus),
+            center_depth > 0.0,
+        );
         @if(ATM_DBG_NO_CLOUD_MOTION) { motion = vec3(0.0); }
         let p_atmo = get_view_position() + ray_dir * d - motion;
         let p_world = (atmosphere.atmosphere_to_world * vec4(p_atmo, 1.0)).xyz;
@@ -99,7 +113,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let prev_uv = prev_ndc * vec2(0.5, -0.5) + vec2(0.5);
 
         if (prev_clip.w > 0.0 && all(prev_uv >= vec2(0.0)) && all(prev_uv <= vec2(1.0))) {
-            let history = textureSampleLevel(history_texture, atmosphere_lut_sampler, prev_uv, 0.0);
+            var history = textureSampleLevel(history_texture, atmosphere_lut_sampler, prev_uv, 0.0);
+            // Exposed radiance: bring the history to this frame's exposure before clamping.
+            history = vec4(history.rgb * params.history_exposure_scale, history.a);
             let prev_px = vec2<i32>(min(prev_uv * vec2<f32>(size), vec2<f32>(size) - 1.0));
             let history_depth = textureLoad(history_depth_texture, prev_px, 0).r;
             let clamped = clamp(history, c_min, c_max);

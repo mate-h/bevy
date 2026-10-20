@@ -48,7 +48,10 @@ struct CloudsTemporalParams {
     prev_clip_from_world: mat4x4<f32>,
     cloud_motion: vec3<f32>,
     history_valid: u32,
+    cirrus_motion: vec3<f32>,
     new_sample_weight: f32,
+    cirrus_min_radius: f32,
+    history_exposure_scale: f32,
 }
 @if(SKY_HAZE_HALF_RES)
 @group(0) @binding(52) var<uniform> haze_temporal: CloudsTemporalParams;
@@ -82,17 +85,20 @@ struct HazeOutput {
 fn haze(in: FullscreenVertexOutput) -> HazeOutput {
     let full = vec2<i32>(textureDimensions(depth_texture));
     let base = vec2<i32>(floor(in.position.xy)) * 2;
-    var px = base;
     var depth = 1.0;
     for (var k = 0; k < 4; k++) {
         let p = min(base + vec2(k & 1, k >> 1), full - 1);
         let d = textureLoad(depth_texture, p, 0);
         if (d <= depth) {
             depth = d;
-            px = p;
         }
     }
-    let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(full);
+    // The ray goes through this texel's centre (2h + 1 full-res pixels), where the history and
+    // the bilinear upsample in `main` expect its sample, with the block's farthest depth. Tracing
+    // through the farthest pixel itself put the sample a quarter texel off the centre (bottom
+    // right when all four depths tie, e.g. sky): every frame's reprojection then read its history
+    // shifted by that quarter texel, a recursive one-directional blur even with a still camera.
+    let uv = in.position.xy * 2.0 / vec2<f32>(full);
     let samples = settings.sky_max_samples * HAZE_SAMPLE_SCALE;
     // The march's `uv` only drives its jitter noise (uv x full-res viewport = noise pixel). At
     // half resolution that read every other texel of the blue-noise tile, which loses its
@@ -128,7 +134,9 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
     // ends (scene point, or the ray's far end for the sky; rotation dominates for those) and
     // blend, unless the history's ray length disagrees (disocclusion) or it is off screen.
     let t_km = t * 0.001;
-    if (haze_temporal.history_valid != 0u) {
+    var use_history = haze_temporal.history_valid != 0u;
+    @if(ATM_DBG_NO_HAZE_HISTORY) { use_history = false; }
+    if (use_history) {
         let p_world = (atmosphere.atmosphere_to_world * vec4(world_pos + ray_dir_ws * t, 1.0)).xyz;
         let prev_clip = haze_temporal.prev_clip_from_world * vec4(p_world, 1.0);
         let prev_uv = (prev_clip.xy / prev_clip.w) * vec2(0.5, -0.5) + vec2(0.5);

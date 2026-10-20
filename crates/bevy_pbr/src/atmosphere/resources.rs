@@ -541,7 +541,16 @@ pub struct CloudsTemporalParams {
     /// a cloud point at `p` was at `p - cloud_motion` (wind advection).
     pub cloud_motion: Vec3,
     pub history_valid: u32,
+    /// Horizontal displacement of the thin (cirrus) layer since the previous frame: it has its
+    /// own wind, so its pixels reproject with this instead of `cloud_motion`.
+    pub cirrus_motion: Vec3,
     pub new_sample_weight: f32,
+    /// Radius above which a pixel's representative cloud depth is taken as cirrus (midway
+    /// between the cumulus tops and the cirrus base; 0 without cumulus).
+    pub cirrus_min_radius: f32,
+    /// Current / previous `view.exposure`: the cloud history stores exposed radiance, so it is
+    /// rescaled before clamping and blending when the camera's exposure changes.
+    pub history_exposure_scale: f32,
 }
 
 /// Per-view uniform for [`CloudsTemporalParams`].
@@ -550,41 +559,82 @@ pub struct CloudsTemporalParamsUniform(pub UniformBuffer<CloudsTemporalParams>);
 
 /// Writes [`CloudsTemporalParams`] for every atmosphere view, remembering each view's
 /// previous `clip_from_world` (keyed by retained view entity) for history reprojection.
+///
+/// The remembered transform includes the view's TAA jitter, as `prepare_view_uniforms` applies
+/// it: the cloud and haze rays are generated from the jittered `view_from_clip`, so each history
+/// texel holds a jittered sample, and reprojecting it with the unjittered previous projection
+/// put it up to half a full-resolution pixel (a quarter of a half-resolution texel) off.
 pub(super) fn prepare_clouds_temporal_params(
     views: Query<
-        (Entity, &ExtractedView, &AtmosphereTextures, Option<&GpuCloudLayers>),
+        (
+            Entity,
+            &ExtractedView,
+            &AtmosphereTextures,
+            Option<&GpuCloudLayers>,
+            Option<&bevy_render::camera::TemporalJitter>,
+            Option<&ExtractedCamera>,
+        ),
         With<ExtractedAtmosphere>,
     >,
-    mut previous: bevy_ecs::system::Local<HashMap<RetainedViewEntity, (Mat4, UVec2, Vec3)>>,
+    mut previous: bevy_ecs::system::Local<
+        HashMap<RetainedViewEntity, (Mat4, UVec2, Vec3, Vec3, f32)>,
+    >,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut commands: Commands,
 ) {
     let mut seen = HashMap::default();
-    for (entity, view, textures, cloud_layer) in &views {
+    for (entity, view, textures, cloud_layer, temporal_jitter, camera) in &views {
         let offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
-        let clip_from_world = view.clip_from_world.unwrap_or_else(|| {
-            view.clip_from_view * view.world_from_view.to_matrix().inverse()
+        let cirrus_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.cirrus_offset);
+        let cirrus_min_radius = cloud_layer.map_or(0.0, |c| {
+            if c.cloud_density > 0.0 {
+                0.5 * (c.cloud_layer_end + c.cirrus_top - c.cirrus_thickness)
+            } else {
+                0.0
+            }
         });
+        let exposure = camera.map_or(1.0, |c| c.exposure);
+        let clip_from_world = match temporal_jitter {
+            Some(jitter) => {
+                let mut clip_from_view = view.clip_from_view;
+                jitter.jitter_projection(&mut clip_from_view, UVec2::new(view.viewport.z, view.viewport.w).as_vec2());
+                clip_from_view * view.world_from_view.to_matrix().inverse()
+            }
+            None => view.clip_from_world.unwrap_or_else(|| {
+                view.clip_from_view * view.world_from_view.to_matrix().inverse()
+            }),
+        };
         let size = textures.clouds.texture.size();
         let size = UVec2::new(size.width, size.height);
-        let (prev_clip_from_world, history_valid, prev_offset) =
+        let (prev_clip_from_world, history_valid, prev_offset, prev_cirrus_offset, prev_exposure) =
             match previous.get(&view.retained_view_entity) {
-                Some((prev, prev_size, prev_offset)) if *prev_size == size => (*prev, 1, *prev_offset),
-                _ => (clip_from_world, 0, offset),
+                Some((prev, prev_size, prev_offset, prev_cirrus, prev_exposure))
+                    if *prev_size == size =>
+                {
+                    (*prev, 1, *prev_offset, *prev_cirrus, *prev_exposure)
+                }
+                _ => (clip_from_world, 0, offset, cirrus_offset, exposure),
             };
         let motion = offset - prev_offset;
+        let cirrus_motion = cirrus_offset - prev_cirrus_offset;
         let mut buffer = UniformBuffer::from(CloudsTemporalParams {
             prev_clip_from_world,
             cloud_motion: Vec3::new(motion.x, 0.0, motion.z),
             history_valid,
+            cirrus_motion: Vec3::new(cirrus_motion.x, 0.0, cirrus_motion.z),
             new_sample_weight: CLOUD_RECON_NEW_SAMPLE_WEIGHT,
+            cirrus_min_radius,
+            history_exposure_scale: exposure / prev_exposure.max(f32::MIN_POSITIVE),
         });
         buffer.write_buffer(&render_device, &render_queue);
         commands
             .entity(entity)
             .insert(CloudsTemporalParamsUniform(buffer));
-        seen.insert(view.retained_view_entity, (clip_from_world, size, offset));
+        seen.insert(
+            view.retained_view_entity,
+            (clip_from_world, size, offset, cirrus_offset, exposure),
+        );
     }
     *previous = seen;
 }
@@ -612,6 +662,9 @@ pub struct CloudShadowTemporalParams {
     pub frame_index: u32,
     /// Horizontal displacement of the cloud field since the previous frame (atmosphere space, m).
     pub cloud_motion: Vec3,
+    /// Horizontal displacement of the thin (cirrus) layer since the previous frame: transports
+    /// the thin-layer optical depth in alpha.
+    pub cirrus_motion: Vec3,
 }
 
 /// Per-view state for cloud shadow temporal filtering.
@@ -625,6 +678,12 @@ pub struct CloudShadowTemporalState {
     pub initialized: bool,
     /// Cloud field displacement ([`crate::VolumetricCloudLayer::noise_offset`]) when the map was last filtered.
     pub cloud_offset: Vec3,
+    /// Thin-layer displacement ([`crate::ThinCloudLayer::offset`]) when the map was last filtered.
+    pub cirrus_offset: Vec3,
+    /// Map size and extent the history was written with: a resized map is a new, cleared
+    /// texture, and another extent maps its texels to other places.
+    pub size: UVec2,
+    pub extent: f32,
 }
 
 impl FromWorld for RenderSkyBindGroupLayouts {
@@ -1557,13 +1616,20 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
     let anchor_moved = (anchor - prev_anchor).length_squared() > 1e-6;
     let light_rot_cos = (light_rotation_cut_deg * std::f32::consts::PI / 180.0).cos();
     let light_rotated = prev_light_dir.dot(light_dir.normalize_or_zero()) < light_rot_cos;
-    let history_valid = temporal_state.initialized && !light_rotated;
+    let history_valid = temporal_state.initialized
+        && !light_rotated
+        && temporal_state.size == size
+        && temporal_state.extent == extent;
 
     let cloud_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
-    let cloud_motion = if history_valid {
-        cloud_offset - temporal_state.cloud_offset
+    let cirrus_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.cirrus_offset);
+    let (cloud_motion, cirrus_motion) = if history_valid {
+        (
+            cloud_offset - temporal_state.cloud_offset,
+            cirrus_offset - temporal_state.cirrus_offset,
+        )
     } else {
-        Vec3::ZERO
+        (Vec3::ZERO, Vec3::ZERO)
     };
     *temporal_state = CloudShadowTemporalState {
         anchor,
@@ -1572,6 +1638,9 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         basis_y,
         initialized: true,
         cloud_offset,
+        cirrus_offset,
+        size,
+        extent,
     };
 
     let prev_anchor = if history_valid { prev_anchor } else { anchor };
@@ -1611,6 +1680,7 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
             interleave: settings.cloud_shadow_map_update_interleave.max(1),
             frame_index: frame_count.0,
             cloud_motion: Vec3::new(cloud_motion.x, 0.0, cloud_motion.z),
+            cirrus_motion: Vec3::new(cirrus_motion.x, 0.0, cirrus_motion.z),
         });
     temporal_params_buffer
         .buffer
@@ -2303,6 +2373,7 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// (`ATMOSPHERE_DBG=ATM_DBG_NOMS,ATM_DBG_TAP_ONE`). Supported debug defs:
 /// - `ATM_DBG_NOSHADOW`: no cloud shadow on the atmosphere in-scatter.
 /// - `ATM_DBG_NOMS`: no atmosphere multiple scattering (single scatter only).
+/// - `ATM_DBG_NO_HAZE_HISTORY`: no temporal accumulation of the half-resolution haze.
 /// - `ATM_DBG_GROUND_SKY_FIXED`: one fixed set of ground-skylight directions (no per-pixel/frame
 ///   jitter), to measure the jitter's temporal noise.
 /// - `ATM_DBG_AP_BAL`: ballistic (non-similarity) aerial-perspective transmittance.

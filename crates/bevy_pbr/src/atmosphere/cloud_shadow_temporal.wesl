@@ -39,6 +39,8 @@ struct CloudShadowTemporalParams {
     frame_index: u32,
     // Cloud field displacement since the previous frame (atmosphere space, wind advection).
     cloud_motion: vec3<f32>,
+    // Thin (cirrus) layer displacement since the previous frame: transports alpha.
+    cirrus_motion: vec3<f32>,
 }
 
 // Time-slicing: the texel (within each N x N tile) traced on a given frame, in Bayer order so
@@ -99,7 +101,7 @@ fn cloud_shadow_xy_to_uv(xy: vec2<f32>, extent: f32) -> vec2<f32> {
     return 0.5 * (xy / extent) * (rho / max(r, 1e-6)) + 0.5;
 }
 
-fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, half_depth: f32, nearest: bool) -> vec4<f32> {
+fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, half_depth: f32, nearest: bool, motion: vec3<f32>) -> vec4<f32> {
     let max_t = 2.0 * half_depth;
     let curr_xy = cloud_shadow_uv_to_xy(uv, extent);
     let curr_ray_origin = temporal_params.curr_anchor
@@ -114,8 +116,7 @@ fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, 
         depth_estimate = half_depth;
     }
     // The occluder moved with the wind: look it up where it was last frame.
-    let world_pos = curr_ray_origin + temporal_params.curr_light_dir * depth_estimate
-        - temporal_params.cloud_motion;
+    let world_pos = curr_ray_origin + temporal_params.curr_light_dir * depth_estimate - motion;
 
     let prev_ray_origin = temporal_params.prev_anchor - temporal_params.prev_light_dir * half_depth;
     let prev_rel = world_pos - temporal_params.prev_anchor;
@@ -131,13 +132,19 @@ fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, 
         return vec4(-1.0);
     }
 
-    var prev: vec4<f32>;
+    var prev = textureSampleLevel(prev_cloud_shadow, prev_cloud_sampler, prev_uv, 0.0);
     if (nearest) {
+        // Untraced texels are reprojected every frame until their next trace. Front depth is
+        // discontinuous at cloud edges, so it is taken from the nearest texel (bilinear would
+        // leak depths across edges, compounding every frame). The extinction, optical depths
+        // and thin-layer depth keep the bilinear lookup: rounding them to the nearest texel
+        // dropped the sub-texel part of each frame's wind motion, so shadows stood still and
+        // jumped at the next trace. Repeated bilinear lookups blur by at most ~0.4 texel before
+        // the refresh (16 frames at a 0.01-texel/frame wind), under the consumers' 2-texel
+        // B-spline.
         let size = vec2<i32>(temporal_params.size);
         let prev_coord = clamp(vec2<i32>(floor(prev_uv * vec2<f32>(size))), vec2(0), size - vec2(1));
-        prev = textureLoad(prev_cloud_shadow, prev_coord, 0);
-    } else {
-        prev = textureSampleLevel(prev_cloud_shadow, prev_cloud_sampler, prev_uv, 0.0);
+        prev.r = textureLoad(prev_cloud_shadow, prev_coord, 0).r;
     }
     // Front depth: previous near plane -> current near plane (keeps "no cloud" at max depth).
     // Only when the anchor moved: the map is Rgba16Float, so converting every frame (e.g. for the
@@ -148,6 +155,20 @@ fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, 
                 + temporal_params.prev_basis_y * dot(prev_rel, temporal_params.prev_basis_y))
             + temporal_params.prev_light_dir * (prev.r * 1000.0);
         prev.r = clamp(dot(prev_pos - curr_ray_origin, temporal_params.curr_light_dir), 0.0, max_t) * 0.001;
+    }
+    return prev;
+}
+
+/// History of both layers: the cumulus channels (rgb) moved with the cumulus wind, the thin-layer
+/// optical depth (alpha) with the cirrus wind. One cumulus motion for all four channels left the
+/// cirrus shadow trailing (or, without cumulus, standing still) between traces.
+fn reproject_layers(coord: vec2<i32>, uv: vec2<f32>, extent: f32, half_depth: f32, nearest: bool) -> vec4<f32> {
+    var prev = reproject_cloud_shadow_history(coord, uv, extent, half_depth, nearest, temporal_params.cloud_motion);
+    if (prev.r >= 0.0) {
+        let thin = reproject_cloud_shadow_history(coord, uv, extent, half_depth, nearest, temporal_params.cirrus_motion);
+        if (thin.r >= 0.0) {
+            prev.a = thin.a;
+        }
     }
     return prev;
 }
@@ -186,7 +207,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (temporal_params.history_valid != 0u && !traced_this_frame) {
         // Not traced this frame: reproject the previous filtered result (falls back to the
         // stale traced value when the history is out of bounds).
-        let reprojected = reproject_cloud_shadow_history(coord, uv, extent, half_depth, true);
+        let reprojected = reproject_layers(coord, uv, extent, half_depth, true);
         if (reprojected.r >= 0.0) {
             filtered_data = reprojected;
         }
@@ -214,7 +235,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        let reprojected = reproject_cloud_shadow_history(coord, uv, extent, half_depth, false);
+        let reprojected = reproject_layers(coord, uv, extent, half_depth, false);
         if (reprojected.r >= 0.0) {
             var prev = reprojected;
 
