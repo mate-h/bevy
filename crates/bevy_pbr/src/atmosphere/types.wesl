@@ -43,6 +43,9 @@ struct AtmosphereSettings {
     cloud_shadow_temporal_light_rotation_cut_deg: f32,
     cloud_shadow_anchor_max_radius: f32,
     cloud_thin_shadow_max_radius: f32,
+    cloud_max_steps: u32,
+    cloud_light_taps: u32,
+    cloud_max_distance: f32,
 }
 
 /// "Atmosphere space" uses local up for the zenith so the horizon-detail

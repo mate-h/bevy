@@ -86,8 +86,9 @@ fn cloud_distance(p: vec3<f32>, cam: vec3<f32>) -> f32 {
 }
 
 // Hard caps for the first version of the pass; these become `VolumetricCloudSettings` (design §3.3).
-const CLOUD_MAX_STEPS: f32 = 96.0;
-const CLOUD_MAX_STEPS_IN_LAYER: f32 = 1024.0;
+// Step budgets: `settings.cloud_max_steps` (VolumetricCloudSettings::max_steps, 96 at MEDIUM)
+// per ray, and this many times more for rays inside the layer (1024 at MEDIUM).
+const CLOUD_IN_LAYER_STEP_RATIO: f32 = 1024.0 / 96.0;
 // Distance-adaptive step (Nubis3): near + far_offset · dist / 16384.
 const CLOUD_STEP_NEAR_M: f32 = 40.0;
 const CLOUD_STEP_FAR_OFFSET_M: f32 = 220.0;
@@ -107,14 +108,12 @@ fn cloud_view_step(t: f32) -> f32 {
 const CLOUD_FINE_EMPTY_TO_COARSE: u32 = 10u;
 const CLOUD_COARSE_DENSITY_EPS: f32 = 0.0005;
 // Grazing rays enter a 1.5-4 km shell ~140-230 km away, so keep the horizon covered.
-const CLOUD_MAX_DISTANCE_M: f32 = 350000.0;
 const CLOUD_MIN_TRANSMITTANCE: f32 = 0.01;
 
 // Short light taps toward the sun for near-surface self-shadowing detail (Nubis3 2:09:52: "the
 // first two samples are taken as before"; the cloud shadow map covers the long range).
 // 12 taps growing x1.4 from 20 m (~2.8 km) with a gentler LOD ramp: the old 6 doubling taps
 // (1.26 km) under-estimated sun optical depth (single scatter +25-40% vs CLOUD_REFERENCE).
-const LIGHT_TAP_COUNT: u32 = 12u;
 const LIGHT_TAP_STEP_M: f32 = 20.0;
 const LIGHT_TAP_GROWTH: f32 = 1.4;
 const LIGHT_TAP_LOD: f32 = 0.25;
@@ -487,7 +486,7 @@ fn ref_sun_vis(p: vec3<f32>, l: vec3<f32>, ch: u32) -> f32 {
     if (seg.z > 0.5 && v > 0.0) {
         let sigma_t_c = get_cloud_scattering_coeff() + get_cloud_absorption_coeff();
         var t = max(seg.x, 0.0);
-        let t_end = min(seg.y, CLOUD_MAX_DISTANCE_M);
+        let t_end = min(seg.y, settings.cloud_max_distance);
         for (var i = 0u; i < 8192u; i++) {
             t += -log(1.0 - ref_rand()) / sigma_t_c;
             if (t >= t_end || v < 1e-6) { break; }
@@ -637,7 +636,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let seg = cloud_layer_segment(ray_origin, ray_dir);
     var t_start = seg.x;
-    var t_end = min(seg.y, CLOUD_MAX_DISTANCE_M);
+    var t_end = min(seg.y, settings.cloud_max_distance);
     // Early exits: shell miss, planet occlusion, scene depth bound.
     if (ray_intersects_ground(r, mu)) {
         t_end = min(t_end, ray_sphere_intersect(r, mu, atmosphere.inner_radius).x);
@@ -692,8 +691,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // ray from just below the base (or above the top) is as long an in-slab path as one from
         // inside, and a fixed 96 steps ran out in the first clouds, leaving the rest unmarched.
         let in_layer = r > cloud_layer.cloud_layer_start && r < cloud_layer.cloud_layer_end;
-        let budget = clamp((t_end - t_start) / CLOUD_STEP_NEAR_M, CLOUD_MAX_STEPS, CLOUD_MAX_STEPS_IN_LAYER);
-        var max_steps = select(u32(budget), u32(CLOUD_MAX_STEPS_IN_LAYER), in_layer);
+        let base_steps = f32(max(settings.cloud_max_steps, 1u));
+        let in_layer_steps = round(base_steps * CLOUD_IN_LAYER_STEP_RATIO);
+        let budget = clamp((t_end - t_start) / CLOUD_STEP_NEAR_M, base_steps, in_layer_steps);
+        var max_steps = select(u32(budget), u32(in_layer_steps), in_layer);
         // Ground-truth march for skip validation: fine samples everywhere, no budget limit.
         @if(ATM_DBG_NO_COARSE) { max_steps = 16384u; }
 
@@ -791,7 +792,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 var light_od = 0.0;
                 var tap_t = 0.0;
                 var tap_dt = LIGHT_TAP_STEP_M;
-                var n_taps = LIGHT_TAP_COUNT;
+                var n_taps = settings.cloud_light_taps;
                 var tap_growth = LIGHT_TAP_GROWTH;
                 var tap_lod = LIGHT_TAP_LOD;
                 for (var k = 0u; k < n_taps; k++) {

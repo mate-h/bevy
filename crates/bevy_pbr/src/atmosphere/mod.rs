@@ -507,6 +507,19 @@ pub struct AtmosphereSettings {
     /// When the sun moves more than this angle, temporal accumulation is reset
     /// to avoid ghosting. Unreal uses 10°.
     pub cloud_shadow_temporal_light_rotation_cut_deg: f32,
+
+    /// Minimum step budget of the cloud march per ray (set from
+    /// [`VolumetricCloudSettings::max_steps`]). Rays inside the cloud layer get
+    /// `1024 / 96` times as many.
+    pub cloud_max_steps: u32,
+
+    /// Light taps toward the sun per cloud sample (geometric spacing from 20 m, growth 1.4;
+    /// set from [`VolumetricCloudSettings::light_taps`]).
+    pub cloud_light_taps: u32,
+
+    /// Farthest distance the cloud march covers, in meters (set from
+    /// [`VolumetricCloudSettings::max_distance`]).
+    pub cloud_max_distance: f32,
 }
 
 impl Default for AtmosphereSettings {
@@ -536,6 +549,9 @@ impl Default for AtmosphereSettings {
             cloud_shadow_temporal_enabled: false,
             cloud_shadow_temporal_alpha: 0.15,
             cloud_shadow_temporal_light_rotation_cut_deg: 10.0,
+            cloud_max_steps: VolumetricCloudSettings::MEDIUM.max_steps,
+            cloud_light_taps: VolumetricCloudSettings::MEDIUM.light_taps,
+            cloud_max_distance: VolumetricCloudSettings::MEDIUM.max_distance,
         }
     }
 }
@@ -572,6 +588,9 @@ pub struct GpuAtmosphereSettings {
     /// Radius below which the thin layer's shadow (the map's alpha) applies: the cirrus mid
     /// level.
     pub cloud_thin_shadow_max_radius: f32,
+    pub cloud_max_steps: u32,
+    pub cloud_light_taps: u32,
+    pub cloud_max_distance: f32,
 }
 
 impl GpuAtmosphereSettings {
@@ -622,6 +641,9 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             // No cloud layers: no lowering, no thin shadow (set at extraction otherwise).
             cloud_shadow_anchor_max_radius: f32::MAX,
             cloud_thin_shadow_max_radius: 0.0,
+            cloud_max_steps: s.cloud_max_steps,
+            cloud_light_taps: s.cloud_light_taps,
+            cloud_max_distance: s.cloud_max_distance,
         }
     }
 }
@@ -706,11 +728,13 @@ impl Default for CloudWeather {
 #[derive(Clone, Component, Reflect)]
 #[reflect(Clone, Default)]
 pub struct VolumetricCloudSettings {
-    /// Raymarch step budget for the dedicated cloud pass.
+    /// Minimum step budget of the cloud march per ray (rays inside the cloud layer get
+    /// `1024 / 96` times as many).
     pub max_steps: u32,
-    /// Short light taps toward the sun (near-surface detail).
+    /// Light taps toward the sun per cloud sample (geometric spacing from 20 m, growth 1.4:
+    /// 8 taps reach ~0.7 km, 12 taps ~2.8 km, 16 ~11 km).
     pub light_taps: u32,
-    /// Max cloud march distance in meters.
+    /// Farthest distance the cloud march covers, in meters.
     pub max_distance: f32,
     /// Cloud shadow map update interleave (1 = full, 4 = 1/16 texels/frame).
     pub shadow_update_interleave: u32,
@@ -723,7 +747,7 @@ pub struct VolumetricCloudSettings {
 impl VolumetricCloudSettings {
     pub const LOW: Self = Self {
         max_steps: 48,
-        light_taps: 1,
+        light_taps: 8,
         max_distance: 200_000.0,
         shadow_update_interleave: 4,
         shadow_temporal: true,
@@ -731,7 +755,7 @@ impl VolumetricCloudSettings {
     };
     pub const MEDIUM: Self = Self {
         max_steps: 96,
-        light_taps: 2,
+        light_taps: 12,
         max_distance: 350_000.0,
         shadow_update_interleave: 4,
         shadow_temporal: true,
@@ -739,7 +763,7 @@ impl VolumetricCloudSettings {
     };
     pub const HIGH: Self = Self {
         max_steps: 128,
-        light_taps: 2,
+        light_taps: 16,
         max_distance: 400_000.0,
         shadow_update_interleave: 2,
         shadow_temporal: true,
@@ -747,7 +771,7 @@ impl VolumetricCloudSettings {
     };
     pub const CINEMATIC: Self = Self {
         max_steps: 160,
-        light_taps: 3,
+        light_taps: 20,
         max_distance: 500_000.0,
         shadow_update_interleave: 1,
         shadow_temporal: true,
@@ -1321,6 +1345,9 @@ pub fn apply_volumetric_cloud_settings(
             cloud_settings.shadow_update_interleave;
         atmosphere_settings.cloud_shadow_temporal_enabled = cloud_settings.shadow_temporal;
         atmosphere_settings.cloud_shadow_temporal_alpha = cloud_settings.shadow_temporal_alpha;
+        atmosphere_settings.cloud_max_steps = cloud_settings.max_steps;
+        atmosphere_settings.cloud_light_taps = cloud_settings.light_taps;
+        atmosphere_settings.cloud_max_distance = cloud_settings.max_distance;
     }
 }
 
