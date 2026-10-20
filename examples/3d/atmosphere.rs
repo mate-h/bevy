@@ -142,6 +142,7 @@ fn main() {
                 sun_drag,
                 atmosphere_controls,
                 visibility_toggle.after(atmosphere_controls),
+                camera_pose_title,
             ),
         );
 
@@ -616,7 +617,7 @@ fn setup_camera_fog(
         // Bloom gives the sun a much more natural look.
         Bloom::NATURAL,
         // Enables the atmosphere to drive reflections and ambient lighting (IBL) for this view
-        AtmosphereEnvironmentMapLight::default(),
+        // AtmosphereEnvironmentMapLight::default(),
         // Left-drag looks around; right-drag is the time-of-day slider (`sun_drag`).
         #[cfg(feature = "free_camera")]
         FreeCamera {
@@ -668,10 +669,10 @@ fn setup_camera_fog(
                 ..preset
             }
         },
-        ScreenSpaceReflections {
-            min_perceptual_roughness: 0.0..0.0,
-            ..default()
-        },
+        // ScreenSpaceReflections {
+        //     min_perceptual_roughness: 0.0..0.0,
+        //     ..default()
+        // },
     ));
     // `ATMOSPHERE_NO_TAA`: no TAA (and so no jitter), to look at the clouds' and haze's own
     // temporal filters alone.
@@ -847,6 +848,33 @@ fn spawn_water(
         ),
         Transform::from_scale(Vec3::splat(100.0)),
     ));
+}
+
+/// Puts the camera position (whole numbers) and facing direction in the window title.
+fn camera_pose_title(
+    cameras: Query<&Transform, With<Camera3d>>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let Ok(transform) = cameras.single() else {
+        return;
+    };
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    let p = transform.translation;
+    let f = transform.forward();
+    let title = format!(
+        "{}, {}, {}  facing {:.2}, {:.2}, {:.2}",
+        p.x.round() as i32,
+        p.y.round() as i32,
+        p.z.round() as i32,
+        f.x,
+        f.y,
+        f.z,
+    );
+    if window.title != title {
+        window.title = title;
+    }
 }
 
 fn dynamic_scene(
