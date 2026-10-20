@@ -4,7 +4,7 @@
 //! - Scene: `ATMOSPHERE_VIEW=hero|sun|up|under|backlit`, `ATMOSPHERE_CAM`, `ATMOSPHERE_SUN_ELEV_DEG`,
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
-//!   `ATMOSPHERE_MESH_PLANE`,
+//!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
 //!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_LUT_MODE`.
@@ -632,7 +632,14 @@ fn setup_camera_fog(
             ambient_intensity: 0.0,
             ..default()
         },
-        Msaa::Off,
+        // `ATMOSPHERE_MSAA=2|4|8` (the clouds trace multisampled depth; the sky marches at full
+        // resolution instead of the half-res haze prepass).
+        match std::env::var("ATMOSPHERE_MSAA").as_deref() {
+            Ok("2") => Msaa::Sample2,
+            Ok("4") => Msaa::Sample4,
+            Ok("8") => Msaa::Sample8,
+            _ => Msaa::Off,
+        },
         // `VolumetricCloudSettings` owns the shadow update/temporal settings (it overwrites
         // `AtmosphereSettings` every frame), so the profiling overrides go here:
         // `ATMOSPHERE_SHADOW_INTERLEAVE=1` traces the whole shadow map every frame instead of
