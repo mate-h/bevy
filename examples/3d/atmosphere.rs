@@ -3,6 +3,8 @@
 //! Environment variables (all optional; used by the cloud validation scripts):
 //! - Scene: `ATMOSPHERE_VIEW=hero|sun|up|under|backlit`, `ATMOSPHERE_CAM`, `ATMOSPHERE_SUN_ELEV_DEG`,
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
+//!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
+//!   `ATMOSPHERE_MESH_PLANE`,
 //!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_LUT_MODE`.
@@ -498,7 +500,9 @@ fn setup_camera_fog(
         VolumetricCloudLayer {
             cloud_layer_start: 6_361_500.0, // cloud base 1.5 km above the surface
             cloud_layer_end: 6_364_000.0,   // tops 4 km (2.5 km thick layer)
-            cloud_density: 1.0, // Used for enabling/disabling, actual density comes from noise (normalized [0, 1])
+            // Used for enabling/disabling, actual density comes from noise (normalized [0, 1]);
+            // `ATMOSPHERE_NO_CUMULUS` leaves only the cirrus (its history moves with its own wind).
+            cloud_density: if std::env::var("ATMOSPHERE_NO_CUMULUS").is_ok() { 0.0 } else { 1.0 },
             // Larger scale = larger cloud features (more “big cumulus”, less “small puffs”)
             noise_scale: 32_000.0, // weather tile; shape noise period = 1/8 (4 km)
             noise_offset: Vec3::ZERO,
@@ -527,7 +531,15 @@ fn setup_camera_fog(
             ..ThinCloudLayer::cirrus()
         },
         // One wind profile for both layers (each takes its wind and shear at its altitude).
-        AtmosphereWind::fair_weather(),
+        // `ATMOSPHERE_WIND=slow`: 2 m/s everywhere (sub-texel shadow motion per frame);
+        // `opposing`: cumulus and cirrus winds in opposite directions (per-layer reprojection).
+        match std::env::var("ATMOSPHERE_WIND").as_deref() {
+            Ok("slow") => AtmosphereWind::constant(Vec3::X * 2.0),
+            Ok("opposing") => AtmosphereWind {
+                levels: vec![(0.0, Vec3::X * 10.0), (4000.0, Vec3::X * 15.0), (8000.0, Vec3::X * -30.0)],
+            },
+            _ => AtmosphereWind::fair_weather(),
+        },
     ));
 
     let mut camera = commands.spawn_empty();
@@ -637,12 +649,16 @@ fn setup_camera_fog(
                 .unwrap_or(VolumetricCloudSettings::MEDIUM.shadow_temporal_alpha),
             ..VolumetricCloudSettings::MEDIUM
         },
-        TemporalAntiAliasing::default(),
         ScreenSpaceReflections {
             min_perceptual_roughness: 0.0..0.0,
             ..default()
         },
     ));
+    // `ATMOSPHERE_NO_TAA`: no TAA (and so no jitter), to look at the clouds' and haze's own
+    // temporal filters alone.
+    if std::env::var("ATMOSPHERE_NO_TAA").is_err() {
+        camera.insert(TemporalAntiAliasing::default());
+    }
 }
 
 #[derive(Component)]
