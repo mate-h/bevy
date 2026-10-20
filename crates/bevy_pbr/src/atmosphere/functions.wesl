@@ -504,13 +504,26 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     let thin = cloud_thin_shadow_weight(world_pos);
 
     @if(CLOUD_SHADOW_SIMPLE_SAMPLING) {
-    let d4 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv, 0.0);
-    let d = d4.rgb;
-    let t_thin = exp(-thin * d4.a);
-    if (use_optical_depth_only) {
-        return cloud_shadow_optical_depth(d) * t_thin;
+    // Bilinear filter of the per-texel transmittance (4 loads), not of the stored data. Between
+    // a cloud texel and an empty one (front depth = far plane, 2 x half_depth) the interpolated
+    // front depth passes the sample within a few % of a texel, so a filtered fetch turned
+    // shadows into hard-edged texel staircases. Looking toward the sun, the haze march's lit
+    // length then jumped wherever a ray's shadow-map footprint passed a staircase corner: fixed
+    // terraces in the haze in front of backlit clouds and arcs across light shafts, nested
+    // around the sun and unaffected by the march jitter.
+    let size = vec2<i32>(textureDimensions(cloud_shadow_map));
+    let st = uv * vec2<f32>(size) - 0.5;
+    let i0 = vec2<i32>(floor(st));
+    let f = st - floor(st);
+    var t = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2(k & 1, k >> 1);
+        let q = textureLoad(cloud_shadow_map, clamp(i0 + o, vec2(0), size - 1), 0);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        let tq = select(cloud_shadow_transmittance(q.rgb, d_sample), cloud_shadow_optical_depth(q.rgb), use_optical_depth_only);
+        t += w * tq * exp(-thin * q.a);
     }
-    return cloud_shadow_transmittance(d, d_sample) * t_thin;
+    return t;
     } @else {
     // 4-tap PCF (2x2 half-texel) to reduce aliasing and soften shadow edges.
     // Samples are offset by ±0.25 texels so the 2x2 footprint covers the sampling area.
