@@ -236,7 +236,9 @@ fn bench_hooks(
     let _sunset = bench.sunset; // sun tilt applied at spawn via ATMOSPHERE_SUNSET
     if bench.no_clouds {
         for entity in &cloud_layers {
-            commands.entity(entity).remove::<VolumetricCloudLayer>();
+            commands
+                .entity(entity)
+                .remove::<(VolumetricCloudLayer, ThinCloudLayer)>();
         }
     }
     let elapsed = time.elapsed_secs();
