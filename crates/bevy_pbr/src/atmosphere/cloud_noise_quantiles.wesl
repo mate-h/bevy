@@ -2,24 +2,24 @@
 // (`clouds.wesl` cloud_thermal_excess):
 // - one row per shape-noise mip, texel i at v = i / (width - 1): R the distribution F(v) of the
 //   shape noise (`clouds.wesl` sample_cumulus_shape_lod: low-frequency Perlin-Worley eroded by
-//   Worley fBm), G that of the billow noise (detail texture B) at the mip sampled alongside, so
-//   the shader maps both to standard normal variables exactly, g = Phi^-1(F(v)). Measured over
-//   the whole tiles.
+//   Worley fBm), G and B those of the low- and high-frequency billow noise (detail texture B and
+//   A) at the mip sampled alongside, so the shader maps all three to standard normal variables
+//   exactly, g = Phi^-1(F(v)). Measured over the whole tiles.
 // - one row of the thermal cloud scheme (`clouds.wesl` cloud_thermal_excess), texel i at cloud
-//   fraction p = (i / (width - 1))^2: R the threshold t that Y = g + r max(z, 0) exceeds with
-//   probability p (g, z independent standard normal: the Gaussianized shape and billow noise; r
-//   the bubble weight), G the mean of Y - t over the cloud, B 1 / E[1 - exp(-(Y - t) / G)] over
+//   fraction p = (i / (width - 1))^2: R the threshold t that Y = g + r1 max(z1, 0) +
+//   r2 max(z2, 0) exceeds with probability p (g, z1, z2 independent standard normal: the
+//   Gaussianized shape and billow noises; r1, r2 the bubble weights), G the mean of Y - t over the cloud, B 1 / E[1 - exp(-(Y - t) / G)] over
 //   the cloud (the liquid-water magnitude after the up-res compression). See `scheme`.
 
 @group(0) @binding(0) var noise: texture_3d<f32>;
-@group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>, 4096>;
+@group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>, 6144>;
 @group(0) @binding(2) var profile_lut: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var detail: texture_3d<f32>;
 
 struct QuantileParams {
     // Mip of the detail texture sampled alongside shape mip m: m + detail_mip_offset.
     detail_mip_offset: f32,
-    // Weight r of the thermal bubbles (`clouds.wesl` cloud_bubble_weight).
+    // Weight r1 of the low-frequency thermal bubbles (`clouds.wesl` cloud_bubble_weight).
     bubble_weight: f32,
     _pad1: f32,
     _pad2: f32,
@@ -31,9 +31,14 @@ const FIRST_DISTRIBUTION_ROW: u32 = 64u;
 const MIPS: u32 = 8u;
 const SCHEME_ROW: u32 = FIRST_DISTRIBUTION_ROW + MIPS;
 const BINS: u32 = 256u;
-// Bin blocks: shape noise, billow noise (both on [0, 1]).
+// Bin blocks: shape noise, low- and high-frequency billow noise (all on [0, 1]).
 const SHAPE_BLOCK: u32 = 0u;
 const BILLOW_BLOCK: u32 = MIPS * BINS;
+const BILLOW_HI_BLOCK: u32 = 2u * MIPS * BINS;
+// Second bubble octave weight relative to the first: the high-frequency billows (detail A, 5
+// cells per tile) against the low (B, 3 cells), Kolmogorov (3 / 5)^(1/3). Must match
+// `clouds.wesl` CLOUD_BUBBLE_OCTAVE.
+const BUBBLE_OCTAVE: f32 = 0.84343267;
 
 // Must match clouds.wesl: remap and the shape-noise composite.
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
@@ -67,8 +72,9 @@ fn histogram_marginals(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let md = detail_level(m);
         if (all(gid < textureDimensions(detail, md))) {
-            let d = textureLoad(detail, vec3<i32>(gid), i32(md)).b;
-            atomicAdd(&bins[BILLOW_BLOCK + m * BINS + bin_of(d)], 1u);
+            let d = textureLoad(detail, vec3<i32>(gid), i32(md));
+            atomicAdd(&bins[BILLOW_BLOCK + m * BINS + bin_of(d.b)], 1u);
+            atomicAdd(&bins[BILLOW_HI_BLOCK + m * BINS + bin_of(d.a)], 1u);
         }
     }
 }
@@ -99,7 +105,8 @@ fn distributions(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let v = f32(i) / f32(width - 1u);
     textureStore(profile_lut, vec2<i32>(i32(i), i32(FIRST_DISTRIBUTION_ROW + m)),
-        vec4(cdf(SHAPE_BLOCK + m * BINS, v), cdf(BILLOW_BLOCK + m * BINS, v), 0.0, 0.0));
+        vec4(cdf(SHAPE_BLOCK + m * BINS, v), cdf(BILLOW_BLOCK + m * BINS, v),
+            cdf(BILLOW_HI_BLOCK + m * BINS, v), 0.0));
 }
 
 fn phi(x: f32) -> f32 {
@@ -127,19 +134,31 @@ fn upper(x: f32) -> f32 {
     return 1.0 - mills_ratio(-x) * phi(x);
 }
 
-const BUBBLE_STEPS: u32 = 96u;
-const BUBBLE_RANGE: f32 = 8.0;
+const BUBBLE_STEPS: u32 = 32u;
+const BUBBLE_RANGE: f32 = 6.0;
 
-// For Y = g + r max(z, 0) (g, z standard normal, independent) and a threshold t:
-// (P(Y > t), E[(Y - t)+], E[(1 - exp(-k (Y - t)))+]). Half the mass has no bubble (z < 0, Y = g);
-// the other half is Y | z ~ N(r z, 1), integrated over z > 0 by Simpson's rule.
-fn thermal_moments(t: f32, k: f32) -> vec3<f32> {
-    var out = 0.5 * level_moments(0.0, t, k);
+fn simpson_weight(j: u32) -> f32 {
     let h = BUBBLE_RANGE / f32(BUBBLE_STEPS);
-    for (var j = 0u; j <= BUBBLE_STEPS; j++) {
-        let z = f32(j) * h;
-        let w = select(select(2.0, 4.0, (j & 1u) == 1u), 1.0, j == 0u || j == BUBBLE_STEPS) * h / 3.0;
-        out += w * phi(z) * level_moments(params.bubble_weight * z, t, k);
+    return select(select(2.0, 4.0, (j & 1u) == 1u), 1.0, j == 0u || j == BUBBLE_STEPS) * h / 3.0;
+}
+
+// For Y = g + r1 max(z1, 0) + r2 max(z2, 0) (g, z1, z2 standard normal, independent) and a
+// threshold t: (P(Y > t), E[(Y - t)+], E[(1 - exp(-k (Y - t)))+]). A quarter of the mass carries
+// no bubble (Y = g), a quarter each one bubble, a quarter both; given the bubbles, Y ~ N(r1 z1 +
+// r2 z2, 1), integrated over z > 0 by Simpson's rule (32 x 32 steps: < 1e-3 from Monte Carlo).
+fn thermal_moments(t: f32, k: f32) -> vec3<f32> {
+    let r1 = params.bubble_weight;
+    let r2 = r1 * BUBBLE_OCTAVE;
+    let h = BUBBLE_RANGE / f32(BUBBLE_STEPS);
+    var out = 0.25 * level_moments(0.0, t, k);
+    for (var i = 0u; i <= BUBBLE_STEPS; i++) {
+        let z1 = f32(i) * h;
+        let w1 = simpson_weight(i) * phi(z1);
+        out += 0.5 * w1 * (level_moments(r1 * z1, t, k) + level_moments(r2 * z1, t, k));
+        for (var j = 0u; j <= BUBBLE_STEPS; j++) {
+            let z2 = f32(j) * h;
+            out += w1 * simpson_weight(j) * phi(z2) * level_moments(r1 * z1 + r2 * z2, t, k);
+        }
     }
     return out;
 }
@@ -173,7 +192,7 @@ fn scheme(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = clamp(u * u, 1e-5, 1.0 - 1e-5);
     // Threshold: bisection on P(Y > t) = p over the support of Y.
     var lo = -8.0;
-    var hi = 8.0 + params.bubble_weight * BUBBLE_RANGE;
+    var hi = 8.0 + params.bubble_weight * (1.0 + BUBBLE_OCTAVE) * BUBBLE_RANGE;
     for (var it = 0u; it < 48u; it++) {
         let mid = 0.5 * (lo + hi);
         if (thermal_moments(mid, 0.0).x > p) {

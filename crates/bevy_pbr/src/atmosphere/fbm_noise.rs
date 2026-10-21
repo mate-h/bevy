@@ -317,7 +317,7 @@ pub fn init_fbm_noise_texture(
             let row = i / CLOUD_PROFILE_HEIGHT_RES as u32;
             let q = (i as usize % CLOUD_PROFILE_HEIGHT_RES) as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32;
             if row < CLOUD_NOISE_QUANTILE_ROWS {
-                [q, q, 0.0, 0.0]
+                [q, q, q, 0.0]
             } else {
                 [0.0, 1.0, 1.0, 1.0]
             }
@@ -569,10 +569,10 @@ pub fn compute_cloud_noise_quantiles(
     let [Some(histogram_marginals), Some(distributions), Some(scheme)] = pipelines else {
         return;
     };
-    // 2 blocks (shape, billow) x 8 mips x 256 bins, zero-initialized at creation.
+    // 3 blocks (shape, low- and high-frequency billow) x 8 mips x 256 bins, zero-initialized.
     let bins = render_device.create_buffer(&BufferDescriptor {
         label: Some("cloud_noise_histogram"),
-        size: 2 * 256 * 4 * CLOUD_NOISE_QUANTILE_ROWS as u64,
+        size: 3 * 256 * 4 * CLOUD_NOISE_QUANTILE_ROWS as u64,
         usage: BufferUsages::STORAGE,
         mapped_at_creation: false,
     });

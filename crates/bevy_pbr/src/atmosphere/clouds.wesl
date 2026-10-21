@@ -242,13 +242,14 @@ fn cloud_detail_mip_offset() -> f32 {
 }
 
 /// Standard normal variable of a noise value v in [0, 1] through its measured distribution at a
-/// shape-noise mip (`cloud_noise_quantiles.wesl`): channel 0 the shape noise, 1 the billow noise.
+/// shape-noise mip (`cloud_noise_quantiles.wesl`): channel 0 the shape noise, 1 and 2 the low- and
+/// high-frequency billow noise.
 fn cloud_noise_gaussian(v: f32, mip: f32, channel: u32) -> f32 {
     let size = vec2<f32>(textureDimensions(cloud_profile_lut));
     let row = CLOUD_PROFILE_TYPE_ROWS + clamp(mip, 0.0, CLOUD_NOISE_QUANTILE_ROWS - 1.0);
     let f = textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
         vec2((saturate(v) * (size.x - 1.0) + 0.5) / size.x, (row + 0.5) / size.y), 0.0);
-    return normal_quantile(select(f.r, f.g, channel == 1u));
+    return normal_quantile(f[channel]);
 }
 
 /// Standard normal quantile, Abramowitz & Stegun 26.2.23 (|error| < 4.5e-4).
@@ -265,6 +266,10 @@ fn normal_quantile(p: f32) -> f32 {
 /// the fluctuation amplitude of a -5/3 spectrum grows as scale^(1/3), between the billow tile
 /// (detail_noise_scale) and the shape-noise tile (noise_scale / 8). Must match `fbm_noise.rs`
 /// (the scheme table).
+/// Second bubble octave relative to the first: the high-frequency billows (detail A, 5 cells per
+/// tile) against the low (B, 3 cells), (3 / 5)^(1/3). Must match `cloud_noise_quantiles.wesl`.
+const CLOUD_BUBBLE_OCTAVE: f32 = 0.84343267;
+
 fn cloud_bubble_weight() -> f32 {
     return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.noise_scale * 0.125, 1.0), 1.0 / 3.0);
 }
@@ -286,17 +291,21 @@ fn cloud_scheme(p: f32) -> vec3<f32> {
 ///     Y = g + r max(z, 0),
 /// g the Gaussianized shape noise (the coherent plumes), z the Gaussianized billow noise
 /// (cellular: bubbles), r its Kolmogorov weight (`cloud_bubble_weight`). Half the air carries a
-/// bubble, half none: a positively skewed mixture of N(0, 1) and N(0, 1) + r |z|. Cloud where
-/// Y > t, exceeded with probability p (the cloud fraction; tabulated); liquid water proportional
+/// bubble, half none: a positively skewed mixture of N(0, 1) and N(0, 1) + r |z|. A second,
+/// smaller octave of bubbles (the high-frequency billows z2, weight r (3 / 5)^(1/3)) adds turrets
+/// on the turrets: Y = g + r max(z1, 0) + r2 max(z2, 0). Cloud where Y > t, exceeded with probability p (the cloud fraction; tabulated); liquid water proportional
 /// to Y - t. A symmetric small-scale term (thresholding g + r z, a single Gaussian) left holes
 /// through 13-29 % of plume cores at cumulus fractions; the analytic double Gaussian with
 /// constant in-plume width (Larson et al. ADG1) has solid cores but leaves the plume outlines
 /// smooth. Returns x = (Y - t) / its mean over the cloud (0 outside).
-fn cloud_thermal_excess(shape: f32, billow: f32, p: f32, mip: f32) -> f32 {
+fn cloud_thermal_excess(shape: f32, billow: vec2<f32>, p: f32, mip: f32) -> f32 {
     let g = cloud_noise_gaussian(shape, mip, 0u);
-    let z = cloud_noise_gaussian(billow, mip, 1u);
+    let z1 = cloud_noise_gaussian(billow.x, mip, 1u);
+    let z2 = cloud_noise_gaussian(billow.y, mip, 2u);
+    let r = cloud_bubble_weight();
+    let y = g + r * (max(z1, 0.0) + CLOUD_BUBBLE_OCTAVE * max(z2, 0.0));
     let scheme = cloud_scheme(p);
-    return max(g + cloud_bubble_weight() * max(z, 0.0) - scheme.x, 0.0) / max(scheme.y, 1e-4);
+    return max(y - scheme.x, 0.0) / max(scheme.y, 1e-4);
 }
 
 /// 1 / E[1 - exp(-x)] over the cloud for x of `cloud_thermal_excess` at cloud fraction p: the
@@ -394,7 +403,7 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     var profile: f32;
     var magnitude = 1.0;
     if (cloud_layer.profile_mode == 0u) {
-        let x = cloud_thermal_excess(shape_noise, n.b, base_profile, mip);
+        let x = cloud_thermal_excess(shape_noise, n.ba, base_profile, mip);
         if (x <= 0.0) {
             return 0.0;
         }
