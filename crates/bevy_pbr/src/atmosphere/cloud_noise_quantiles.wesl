@@ -36,9 +36,9 @@ const SHAPE_BLOCK: u32 = 0u;
 const BILLOW_BLOCK: u32 = MIPS * BINS;
 const BILLOW_HI_BLOCK: u32 = 2u * MIPS * BINS;
 // Second bubble octave weight relative to the first: the high-frequency billows (detail A, 5
-// cells per tile) against the low (B, 3 cells), Kolmogorov (3 / 5)^(1/3). Must match
-// `clouds.wesl` CLOUD_BUBBLE_OCTAVE.
-const BUBBLE_OCTAVE: f32 = 0.84343267;
+// cells per tile) against the low (B, 3 cells), (3 / 5)^(2/3). Must match `clouds.wesl`
+// CLOUD_BUBBLE_OCTAVE.
+const BUBBLE_OCTAVE: f32 = 0.71137866;
 
 // Must match clouds.wesl: remap and the shape-noise composite.
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {

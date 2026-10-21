@@ -262,16 +262,22 @@ fn normal_quantile(p: f32) -> f32 {
     return select(x, -x, lower);
 }
 
-/// Weight of the thermal bubbles (billow noise) against the shape noise: Kolmogorov scaling,
-/// the fluctuation amplitude of a -5/3 spectrum grows as scale^(1/3), between the billow tile
-/// (detail_noise_scale) and the shape-noise tile (noise_scale / 8). Must match `fbm_noise.rs`
-/// (the scheme table).
 /// Second bubble octave relative to the first: the high-frequency billows (detail A, 5 cells per
-/// tile) against the low (B, 3 cells), (3 / 5)^(1/3). Must match `cloud_noise_quantiles.wesl`.
-const CLOUD_BUBBLE_OCTAVE: f32 = 0.84343267;
+/// tile) against the low (B, 3 cells), (3 / 5)^H, H = 2/3 (`cloud_bubble_weight`). Must match
+/// `cloud_noise_quantiles.wesl`.
+const CLOUD_BUBBLE_OCTAVE: f32 = 0.71137866;
 
+/// Weight of the thermal bubbles (billow noise) against the shape noise: amplitude growing with
+/// scale as scale^H between the billow tile (detail_noise_scale) and the shape-noise tile
+/// (noise_scale / 8), H = 2/3. A level set of a Gaussian field with Hurst exponent H has
+/// fractal dimension 3 - H (Adler 1981), and cloud surfaces measure D_s = 7/3 (LES 2.32 +- 0.01,
+/// as observed: Siebesma & Jonker 2000; the dimension of turbulent / non-turbulent interfaces,
+/// Sreenivasan & Meneveau 1986). The passive-scalar Kolmogorov exponent H = 1/3 gives 8/3: in
+/// the noise study (`.clouds-handoff/noise_study`) it measured D_s 2.40-2.54 and cloud-size
+/// densities of exponent -2.2 to -2.6, against -1.70 in LES (Neggers et al. 2003). Must match
+/// `fbm_noise.rs` (the scheme table).
 fn cloud_bubble_weight() -> f32 {
-    return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.noise_scale * 0.125, 1.0), 1.0 / 3.0);
+    return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.noise_scale * 0.125, 1.0), 2.0 / 3.0);
 }
 
 /// The cloud-scheme row at cloud fraction p (texel i at p = (i / (N - 1))^2): (threshold t,
@@ -289,19 +295,23 @@ fn cloud_scheme(p: f32) -> vec3<f32> {
 /// a cumulus is a cluster of rising bubbles (Scorer & Ludlam 1953; Blyth et al. 2005), so
 /// small-scale structure adds turrets to a cloud and never carves into it:
 ///     Y = g + r max(z, 0),
-/// g the Gaussianized shape noise (the coherent plumes), z the Gaussianized billow noise
-/// (cellular: bubbles), r its Kolmogorov weight (`cloud_bubble_weight`). Half the air carries a
-/// bubble, half none: a positively skewed mixture of N(0, 1) and N(0, 1) + r |z|. A second,
-/// smaller octave of bubbles (the high-frequency billows z2, weight r (3 / 5)^(1/3)) adds turrets
-/// on the turrets: Y = g + r max(z1, 0) + r2 max(z2, 0). Cloud where Y > t, exceeded with probability p (the cloud fraction; tabulated); liquid water proportional
+/// g the Gaussianized shape noise (the coherent plumes), z the Gaussianized billow noise of
+/// negated sign: the billow channels are (1 - alligator)^6, bright on the walls between cells, so
+/// -z is high inside the cells (round bubbles); r the bubble weight (`cloud_bubble_weight`).
+/// Adding the walls instead built a percolating web (the noise study: 80 % of the cloud volume in
+/// one component, D_s 2.54). Half the air carries a bubble, half none: a positively skewed
+/// mixture of N(0, 1) and N(0, 1) + r |z|. A second, smaller octave of bubbles (the
+/// high-frequency billows, CLOUD_BUBBLE_OCTAVE) adds turrets on the turrets:
+/// Y = g + r max(z1, 0) + r2 max(z2, 0). Cloud where Y > t, exceeded with probability p (the
+/// cloud fraction; tabulated); liquid water proportional
 /// to Y - t. A symmetric small-scale term (thresholding g + r z, a single Gaussian) left holes
 /// through 13-29 % of plume cores at cumulus fractions; the analytic double Gaussian with
 /// constant in-plume width (Larson et al. ADG1) has solid cores but leaves the plume outlines
 /// smooth. Returns x = (Y - t) / its mean over the cloud (0 outside).
 fn cloud_thermal_excess(shape: f32, billow: vec2<f32>, p: f32, mip: f32) -> f32 {
     let g = cloud_noise_gaussian(shape, mip, 0u);
-    let z1 = cloud_noise_gaussian(billow.x, mip, 1u);
-    let z2 = cloud_noise_gaussian(billow.y, mip, 2u);
+    let z1 = -cloud_noise_gaussian(billow.x, mip, 1u);
+    let z2 = -cloud_noise_gaussian(billow.y, mip, 2u);
     let r = cloud_bubble_weight();
     let y = g + r * (max(z1, 0.0) + CLOUD_BUBBLE_OCTAVE * max(z2, 0.0));
     let scheme = cloud_scheme(p);

@@ -556,7 +556,7 @@ pub fn compute_cloud_noise_quantiles(
         return;
     }
     let bubble_weight =
-        (layer.detail_noise_scale.max(1.0) / (layer.noise_scale * 0.125).max(1.0)).powf(1.0 / 3.0);
+        (layer.detail_noise_scale.max(1.0) / (layer.noise_scale * 0.125).max(1.0)).powf(2.0 / 3.0);
     let detail_mip_offset = (4000.0 * 2.2e-3 / (layer.detail_noise_scale.max(1.0) / 128.0))
         .log2()
         .max(0.0);
