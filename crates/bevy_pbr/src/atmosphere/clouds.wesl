@@ -185,7 +185,7 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
 const CLOUD_PROFILE_RANGE_M: f32 = 4000.0;
 /// Rows of the profile texture: one per cloud type, then the shape-noise quantiles of each noise
 /// mip (`cloud_noise_quantiles.wesl`).
-const CLOUD_PROFILE_TYPE_ROWS: f32 = 32.0;
+const CLOUD_PROFILE_TYPE_ROWS: f32 = 64.0;
 const CLOUD_NOISE_QUANTILE_ROWS: f32 = 8.0;
 
 /// Vertical profile of a column: (dimensional profile, in-cloud liquid water / the layer's).
@@ -219,10 +219,10 @@ fn cloud_vertical_profile(h: f32, coverage: f32, cloud_type: f32) -> vec2<f32> {
     let n = vec2<f32>(textureDimensions(cloud_profile_lut));
     let v = (saturate(cloud_type) * (CLOUD_PROFILE_TYPE_ROWS - 1.0) + 0.5) / n.y;
     if (cloud_layer.profile_mode == 2u) {
-        // Nubis-style lookup: height as a fraction of the layer, the value as is.
+        // Nubis vertical profile: height as a fraction of the layer, bottom x top gradient.
         let lut = textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
             vec2((saturate(h) * (n.x - 1.0) + 0.5) / n.x, v), 0.0);
-        return vec2(saturate(lut.r * coverage), 1.0);
+        return vec2(saturate(lut.r * lut.g * coverage), 1.0);
     }
     let z = h * cloud_layer_thickness_m();
     if (z >= CLOUD_PROFILE_RANGE_M) {

@@ -19,9 +19,9 @@ use bevy_image::Image;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 
 /// Texels per row: height above the cloud base (texel i at i / (N - 1) x range).
-pub const CLOUD_PROFILE_HEIGHT_RES: usize = 64;
+pub const CLOUD_PROFILE_HEIGHT_RES: usize = 256;
 /// Rows of cloud types (texel j at type j / (N - 1)).
-pub const CLOUD_PROFILE_TYPE_RES: usize = 32;
+pub const CLOUD_PROFILE_TYPE_RES: usize = 64;
 /// Height range of the rows (m above the cloud base; must match `clouds.wesl`).
 pub const CLOUD_PROFILE_RANGE_M: f32 = 4000.0;
 
@@ -57,11 +57,16 @@ pub enum CloudProfiles {
     /// A lookup image of the format above (Rgba16Float, 64 x 32), e.g. baked for another air
     /// mass or painted. Until it loads, or if its format differs (logged), [`Self::Physical`].
     Image(Handle<Image>),
-    /// A Nubis-style vertical profile gradient used as is (Schneider, GDC 2022: "The Vertical
-    /// Profile Gradient"): a grayscale image, any size and color format, with height in the
-    /// cloud layer upwards (bottom row = layer bottom) and cloud type to the right. Its value is
-    /// the dimensional profile before coverage, with Nubis's `1 - profile` erosion threshold and
-    /// uniform liquid water. Load it as linear data (not sRGB).
+    /// Nubis's vertical profile (Schneider, "Nubis, Evolved", SIGGRAPH 2022 Advances, slides 22,
+    /// 26 and 28): the top-type and bottom-type gradients, height in the cloud layer by cloud
+    /// type, multiplied (one weather type drives both), with Nubis's `1 - profile` erosion
+    /// threshold and uniform liquid water. The 64 x 64 lookups were recovered from the deck and
+    /// rebuilt as smooth functions (cloud-top boundary per type, gradients between base and top),
+    /// within ~1.5 grey levels RMS of the original, then baked at this lookup's resolution.
+    Nubis,
+    /// A Nubis-style vertical profile gradient image used as is: grayscale, any size and color
+    /// format, height in the cloud layer upwards (bottom row = layer bottom), cloud type to the
+    /// right; semantics as [`Self::Nubis`]. Load it as linear data (not sRGB).
     NubisLookup(Handle<Image>),
 }
 
@@ -81,13 +86,25 @@ impl CloudProfiles {
 
 /// The baked [`CloudProfiles::Physical`] set: an uncompressed Rgba16Float KTX2.
 const PHYSICAL_KTX2: &[u8] = include_bytes!("cloud_profiles.ktx2");
+/// The baked [`CloudProfiles::Nubis`] set (R bottom-type, G top-type gradient).
+const NUBIS_KTX2: &[u8] = include_bytes!("cloud_profiles_nubis.ktx2");
 
-/// Texels of [`CloudProfiles::Physical`]: the KTX2's single level (vkFormat 97 =
-/// R16G16B16A16_SFLOAT, 64 x 32, checked by a test).
-pub(crate) fn physical_profile_texels() -> &'static [u8] {
-    let u64_at = |o: usize| u64::from_le_bytes(PHYSICAL_KTX2[o..o + 8].try_into().unwrap()) as usize;
+/// The single level of an uncompressed KTX2 (vkFormat 97 = R16G16B16A16_SFLOAT,
+/// [`CLOUD_PROFILE_HEIGHT_RES`] x [`CLOUD_PROFILE_TYPE_RES`], checked by a test).
+fn ktx2_texels(ktx2: &'static [u8]) -> &'static [u8] {
+    let u64_at = |o: usize| u64::from_le_bytes(ktx2[o..o + 8].try_into().unwrap()) as usize;
     let (offset, len) = (u64_at(80), u64_at(88));
-    &PHYSICAL_KTX2[offset..offset + len]
+    &ktx2[offset..offset + len]
+}
+
+/// Texels of [`CloudProfiles::Physical`].
+pub(crate) fn physical_profile_texels() -> &'static [u8] {
+    ktx2_texels(PHYSICAL_KTX2)
+}
+
+/// Texels of [`CloudProfiles::Nubis`].
+pub(crate) fn nubis_profile_texels() -> &'static [u8] {
+    ktx2_texels(NUBIS_KTX2)
 }
 
 /// IEEE half from f32 for values in [0, 1] (subnormals flush to 0).
@@ -112,16 +129,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn physical_set_is_rgba16f_64x32() {
-        let u32_at = |o: usize| u32::from_le_bytes(PHYSICAL_KTX2[o..o + 4].try_into().unwrap());
-        assert_eq!(&PHYSICAL_KTX2[..12], b"\xabKTX 20\xbb\r\n\x1a\n");
-        assert_eq!(u32_at(12), 97);
-        assert_eq!(u32_at(20) as usize, CLOUD_PROFILE_HEIGHT_RES);
-        assert_eq!(u32_at(24) as usize, CLOUD_PROFILE_TYPE_RES);
-        assert_eq!(
-            physical_profile_texels().len(),
-            8 * CLOUD_PROFILE_HEIGHT_RES * CLOUD_PROFILE_TYPE_RES
-        );
+    fn baked_sets_are_rgba16f_lookups() {
+        for (ktx2, texels) in [
+            (PHYSICAL_KTX2, physical_profile_texels()),
+            (NUBIS_KTX2, nubis_profile_texels()),
+        ] {
+            let u32_at = |o: usize| u32::from_le_bytes(ktx2[o..o + 4].try_into().unwrap());
+            assert_eq!(&ktx2[..12], b"\xabKTX 20\xbb\r\n\x1a\n");
+            assert_eq!(u32_at(12), 97);
+            assert_eq!(u32_at(20) as usize, CLOUD_PROFILE_HEIGHT_RES);
+            assert_eq!(u32_at(24) as usize, CLOUD_PROFILE_TYPE_RES);
+            assert_eq!(texels.len(), 8 * CLOUD_PROFILE_HEIGHT_RES * CLOUD_PROFILE_TYPE_RES);
+        }
     }
 
     #[test]

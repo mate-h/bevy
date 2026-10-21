@@ -24,8 +24,8 @@ use tracing::warn;
 
 use super::{
     cloud_profile::{
-        f32_to_f16, physical_profile_texels, CloudProfiles, CLOUD_PROFILE_HEIGHT_RES,
-        CLOUD_PROFILE_TYPE_RES,
+        f32_to_f16, nubis_profile_texels, physical_profile_texels, CloudProfiles,
+        CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_TYPE_RES,
     },
     perlin_worley_noise::{PerlinWorleyNoiseGenerated, PerlinWorleyNoiseTexture},
     VolumetricCloudLayer,
@@ -368,7 +368,7 @@ const CLOUD_PROFILE_EXTENT: Extent3d = Extent3d {
     depth_or_array_layers: 1,
 };
 /// Noise quantile rows after the profile rows: one per shape-noise mip (128^3 -> 8 levels; must
-/// match `clouds.wesl` and `cloud_noise_quantiles.wesl`).
+/// match `clouds.wesl` and `cloud_noise_quantiles.wesl`, which also take the profile row count).
 const CLOUD_NOISE_QUANTILE_ROWS: u32 = 8;
 /// The profile rows plus the noise quantile rows.
 const CLOUD_PROFILE_TEXTURE_EXTENT: Extent3d = Extent3d {
@@ -399,8 +399,9 @@ pub struct PendingCloudProfiles(pub(crate) Option<Vec<u8>>);
 #[derive(PartialEq)]
 pub(crate) enum ProfileSource {
     Physical,
+    Nubis,
     Image(AssetId<Image>),
-    Nubis(AssetId<Image>),
+    NubisImage(AssetId<Image>),
 }
 
 /// Resamples a Nubis-style vertical profile gradient (height up, type right, any format) into the
@@ -444,8 +445,15 @@ pub(crate) fn extract_cloud_profiles(
         CLOUD_PROFILE_EXTENT.width,
         CLOUD_PROFILE_EXTENT.height,
     );
+    if let CloudProfiles::Nubis = profiles {
+        if last.as_ref() != Some(&ProfileSource::Nubis) {
+            pending.0 = Some(nubis_profile_texels().to_vec());
+            *last = Some(ProfileSource::Nubis);
+        }
+        return;
+    }
     if let CloudProfiles::NubisLookup(handle) = profiles {
-        let source = ProfileSource::Nubis(handle.id());
+        let source = ProfileSource::NubisImage(handle.id());
         if last.as_ref() == Some(&source) {
             return;
         }

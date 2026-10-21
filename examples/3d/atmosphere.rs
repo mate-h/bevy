@@ -7,7 +7,8 @@
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`,
 //!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`, `ATMOSPHERE_NO_HAZE` (no aerosol or local haze),
-//!   `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis|nubis_lookup`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
+//!   `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis|nubis_lookup|nubis_original`,
+//!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
 //!   `ATMOSPHERE_LUT_MODE`.
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
@@ -537,17 +538,18 @@ fn setup_camera_fog(
             VolumetricCloudLayer::CUMULUS_EFFECTIVE_RADIUS,
         ),
         // Vertical cloud profiles: physically based by default (baked parcel ensemble);
-        // `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis` selects an analytic envelope instead, and
-        // `nubis_lookup` a Nubis-style gradient image used as is, from the git-ignored
-        // `assets/local/nubis_vertical_profile.png` (not shipped).
+        // `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis` selects an analytic envelope instead,
+        // `nubis_lookup` Nubis's vertical profile (built-in reconstruction), and `nubis_original`
+        // the 64 x 64 texels recovered from the slides, from the git-ignored `assets/local/`.
         match std::env::var("ATMOSPHERE_CLOUD_PROFILE").as_deref() {
             Ok("adiabatic") => CloudProfiles::ADIABATIC,
             Ok("nubis") => CloudProfiles::NUBIS_ENVELOPE,
-            Ok("nubis_lookup") => CloudProfiles::NubisLookup(
+            Ok("nubis_lookup") => CloudProfiles::Nubis,
+            Ok("nubis_original") => CloudProfiles::NubisLookup(
                 asset_server
                     .load_builder()
                     .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
-                    .load("local/nubis_vertical_profile.png"),
+                    .load("local/nubis_vertical_profile_64.png"),
             ),
             _ => CloudProfiles::Physical,
         },

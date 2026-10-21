@@ -1219,7 +1219,7 @@ impl GpuCloudLayers {
         // 0: physical lookups, 1: analytic envelope (in the shader), 2: Nubis-style lookup.
         let (profile_mode, profile_bottom_exponent, profile_top_exponent) = match profiles {
             Some(CloudProfiles::Envelope { bottom, top }) => (1, *bottom, *top),
-            Some(CloudProfiles::NubisLookup(_)) => (2, 1.0, 1.0),
+            Some(CloudProfiles::Nubis | CloudProfiles::NubisLookup(_)) => (2, 1.0, 1.0),
             _ => (0, 1.0, 1.0),
         };
         Self {

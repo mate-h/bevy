@@ -9,10 +9,10 @@
 @group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>, 2048>;
 @group(0) @binding(2) var profile_lut: texture_storage_2d<rgba16float, write>;
 
-const FIRST_QUANTILE_ROW: u32 = 32u;
+// After the cloud-type rows (`cloud_profile.rs` CLOUD_PROFILE_TYPE_RES).
+const FIRST_QUANTILE_ROW: u32 = 64u;
 const MIPS: u32 = 8u;
 const BINS: u32 = 256u;
-const QUANTILES: u32 = 64u;
 
 // Must match clouds.wesl: remap and the shape-noise composite.
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
@@ -48,10 +48,12 @@ fn quantiles(@builtin(local_invocation_index) m: u32) {
     for (var b = 0u; b < BINS; b++) {
         total += atomicLoad(&bins[base + b]);
     }
+    // One quantile per texel of the row: texel i at probability i / (width - 1).
+    let quantiles = textureDimensions(profile_lut).x;
     var cumulative = 0u;
     var b = 0u;
-    for (var i = 0u; i < QUANTILES; i++) {
-        let rank = f32(i) / f32(QUANTILES - 1u) * f32(total);
+    for (var i = 0u; i < quantiles; i++) {
+        let rank = f32(i) / f32(quantiles - 1u) * f32(total);
         // Advance to the bin holding the rank; interpolate within it.
         while (b < BINS - 1u && f32(cumulative + atomicLoad(&bins[base + b])) < rank) {
             cumulative += atomicLoad(&bins[base + b]);
