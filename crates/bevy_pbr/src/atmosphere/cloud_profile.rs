@@ -2,7 +2,8 @@
 //!
 //! One Rgba16Float texture, [`CLOUD_PROFILE_HEIGHT_RES`] texels per row against metres above the
 //! shared cloud base (texel i at i / (N - 1) x [`CLOUD_PROFILE_RANGE_M`]), one row per cloud
-//! type ([`CLOUD_PROFILE_TYPE_RES`]: 0 stratus, 0.5 stratocumulus, 1 cumulus):
+//! type ([`CLOUD_PROFILE_TYPE_RES`]: 0 stratocumulus .. 1 deep cumulus, see
+//! [`CloudProfiles::Physical`]):
 //! - R, G: cloud fraction (peak 1) as a bottom and a top factor (Nubis's two lookups); times
 //!   coverage it is the dimensional profile that the erosion turns into clouds;
 //! - B: in-cloud liquid water (kg/m^3); divided by the layer's
@@ -37,8 +38,12 @@ pub enum CloudProfiles {
     /// liquid water the parcels' mean, against height above the base. The type axis orders
     /// published LES cases by cloud depth, like Nubis's stratus .. cumulus axis, linear between:
     /// - 0: stratocumulus, DYCOMS-II RF01 (Stevens et al. 2005): an overcast deck ~270 m deep;
-    /// - 0.5: shallow trade cumulus, BOMEX (Siebesma et al. 2003): the fraction peaks at the base
+    /// - 1/3: shallow trade cumulus, BOMEX (Siebesma et al. 2003): the fraction peaks at the base
     ///   and falls off to ~1.4 km (within ~20 % of the LES above 1 km);
+    /// - 2/3: continental cumulus, the CASS composite of the ARM Southern Great Plains site at
+    ///   1330 LST (Zhang et al. 2017, J. Atmos. Sci. 74): the fraction falls off through ~2.1 km
+    ///   as the cloudy updrafts detrain (Neggers et al. 2009, sec. 5c), within the bulk and bin
+    ///   microphysics LES; liquid water ~1.5x the bulk LES aloft;
     /// - 1: deeper trade cumulus, RICO's equilibrium state (van Zanten et al. 2011, Fig. 4):
     ///   0.05 at the base, ~0.015 through the cloud layer, tops near 3 km (LES: 0.06, ~0.02,
     ///   ~2.7 km).
