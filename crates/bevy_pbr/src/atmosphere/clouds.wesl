@@ -16,7 +16,7 @@ struct GpuCloudLayers {
     // Liquid water (kg/m^3) at density 1.
     liquid_water: f32,
     // 0: physical lookups (`cloud_profile.rs`), 1: analytic envelope x^a (1 - x)^b,
-    // 2: Nubis-style lookup (height in the layer, 1 - p threshold).
+    // 2: Nubis's vertical profile (height in the layer, 1 - p threshold).
     profile_mode: u32,
     profile_bottom_exponent: f32,
     profile_top_exponent: f32,

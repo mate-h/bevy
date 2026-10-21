@@ -7,7 +7,7 @@
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`,
 //!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`, `ATMOSPHERE_NO_HAZE` (no aerosol or local haze),
-//!   `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis|nubis_lookup|nubis_original`,
+//!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
 //!   `ATMOSPHERE_LUT_MODE`.
@@ -538,19 +538,12 @@ fn setup_camera_fog(
             VolumetricCloudLayer::CUMULUS_EFFECTIVE_RADIUS,
         ),
         // Vertical cloud profiles: physically based by default (baked parcel ensemble);
-        // `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis` selects an analytic envelope instead,
-        // `nubis_lookup` Nubis's vertical profile (built-in reconstruction), and `nubis_original`
-        // the 64 x 64 texels recovered from the slides, from the git-ignored `assets/local/`.
+        // `ATMOSPHERE_CLOUD_PROFILE=nubis` selects Nubis's vertical profile, `adiabatic` or
+        // `nubis_envelope` an analytic envelope.
         match std::env::var("ATMOSPHERE_CLOUD_PROFILE").as_deref() {
+            Ok("nubis") => CloudProfiles::Nubis,
             Ok("adiabatic") => CloudProfiles::ADIABATIC,
-            Ok("nubis") => CloudProfiles::NUBIS_ENVELOPE,
-            Ok("nubis_lookup") => CloudProfiles::Nubis,
-            Ok("nubis_original") => CloudProfiles::NubisLookup(
-                asset_server
-                    .load_builder()
-                    .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
-                    .load("local/nubis_vertical_profile_64.png"),
-            ),
+            Ok("nubis_envelope") => CloudProfiles::NUBIS_ENVELOPE,
             _ => CloudProfiles::Physical,
         },
         CloudWeather::default(),
@@ -613,7 +606,8 @@ fn setup_camera_fog(
             ),
             Ok("wide") => Transform::from_xyz(-2.8, 0.045, 0.0)
                 .looking_at(Vec3::new(-2.8, 0.25, -3.0), Vec3::Y),
-            _ => Transform::from_xyz(-2.8, 0.045, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+            // Default ("hero"): eye height, pitched ~15 deg up so the sky fills most of the frame.
+            _ => Transform::from_xyz(-2.8, 1.8, 0.0).looking_at(Vec3::new(0.0, 2.55, 0.0), Vec3::Y),
             },
         },
         // Can be adjusted to change the scene scale and rendering quality

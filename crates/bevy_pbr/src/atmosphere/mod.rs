@@ -1155,7 +1155,7 @@ pub struct GpuCloudLayers {
     pub cloud_absorption: f32,
     pub cloud_scattering: f32,
     pub liquid_water: f32,
-    /// 0: profile lookups (physical or image), 1: analytic envelope, 2: Nubis-style lookup.
+    /// 0: profile lookups (physical or image), 1: analytic envelope, 2: Nubis's vertical profile.
     pub profile_mode: u32,
     pub profile_bottom_exponent: f32,
     pub profile_top_exponent: f32,
@@ -1216,10 +1216,10 @@ impl GpuCloudLayers {
         let sigma = ci.ln_iwc_std.max(0.0);
         let in_cloud_mean = (0.5 * sigma * sigma).exp() * normal_sf(threshold - sigma)
             / normal_sf(threshold).max(1e-12);
-        // 0: physical lookups, 1: analytic envelope (in the shader), 2: Nubis-style lookup.
+        // 0: physical lookups, 1: analytic envelope (in the shader), 2: Nubis's vertical profile.
         let (profile_mode, profile_bottom_exponent, profile_top_exponent) = match profiles {
             Some(CloudProfiles::Envelope { bottom, top }) => (1, *bottom, *top),
-            Some(CloudProfiles::Nubis | CloudProfiles::NubisLookup(_)) => (2, 1.0, 1.0),
+            Some(CloudProfiles::Nubis) => (2, 1.0, 1.0),
             _ => (0, 1.0, 1.0),
         };
         Self {

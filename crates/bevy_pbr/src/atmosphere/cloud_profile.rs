@@ -64,10 +64,6 @@ pub enum CloudProfiles {
     /// rebuilt as smooth functions (cloud-top boundary per type, gradients between base and top),
     /// within ~1.5 grey levels RMS of the original, then baked at this lookup's resolution.
     Nubis,
-    /// A Nubis-style vertical profile gradient image used as is: grayscale, any size and color
-    /// format, height in the cloud layer upwards (bottom row = layer bottom), cloud type to the
-    /// right; semantics as [`Self::Nubis`]. Load it as linear data (not sRGB).
-    NubisLookup(Handle<Image>),
 }
 
 impl CloudProfiles {

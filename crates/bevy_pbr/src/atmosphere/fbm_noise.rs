@@ -401,30 +401,6 @@ pub(crate) enum ProfileSource {
     Physical,
     Nubis,
     Image(AssetId<Image>),
-    NubisImage(AssetId<Image>),
-}
-
-/// Resamples a Nubis-style vertical profile gradient (height up, type right, any format) into the
-/// lookup rows: u = height in the layer (0 bottom .. 1 top), R = the image value, G = B = A = 1.
-fn nubis_lookup_texels(image: &Image) -> Option<Vec<u8>> {
-    let (w, h) = (image.width(), image.height());
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(8 * CLOUD_PROFILE_HEIGHT_RES * CLOUD_PROFILE_TYPE_RES);
-    for j in 0..CLOUD_PROFILE_TYPE_RES {
-        let x = ((j as f32 + 0.5) / CLOUD_PROFILE_TYPE_RES as f32 * w as f32) as u32;
-        for i in 0..CLOUD_PROFILE_HEIGHT_RES {
-            // Texel i at height i / (N - 1); the image's top row is the layer top.
-            let fy = (1.0 - i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32) * (h - 1) as f32;
-            let (y0, t) = (fy.floor() as u32, fy.fract());
-            let y1 = (y0 + 1).min(h - 1);
-            let value = |y| image.get_color_at(x.min(w - 1), y).ok().map(|c| c.to_linear().red);
-            let v = value(y0)? * (1.0 - t) + value(y1)? * t;
-            out.extend([v.clamp(0.0, 1.0), 1.0, 1.0, 1.0].map(f32_to_f16).iter().flat_map(|h| h.to_le_bytes()));
-        }
-    }
-    Some(out)
 }
 
 /// Picks the lookups of the first cloud layer's [`CloudProfiles`] and queues an upload when they
@@ -449,17 +425,6 @@ pub(crate) fn extract_cloud_profiles(
         if last.as_ref() != Some(&ProfileSource::Nubis) {
             pending.0 = Some(nubis_profile_texels().to_vec());
             *last = Some(ProfileSource::Nubis);
-        }
-        return;
-    }
-    if let CloudProfiles::NubisLookup(handle) = profiles {
-        let source = ProfileSource::NubisImage(handle.id());
-        if last.as_ref() == Some(&source) {
-            return;
-        }
-        if let Some(texels) = images.get(handle).and_then(nubis_lookup_texels) {
-            pending.0 = Some(texels);
-            *last = Some(source);
         }
         return;
     }
