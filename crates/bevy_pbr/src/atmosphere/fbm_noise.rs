@@ -309,8 +309,9 @@ pub fn init_fbm_noise_texture(
         view_formats: &[],
     });
     write_cloud_profile(&render_queue, &profile_texture, physical_profile_texels());
-    // Noise quantile row: identity (threshold 1 - profile, as Nubis) until measured.
-    let identity: Vec<u8> = (0..CLOUD_PROFILE_HEIGHT_RES)
+    // Noise quantile rows: identity (threshold 1 - profile, as Nubis) until measured.
+    let identity: Vec<u8> = (0..CLOUD_NOISE_QUANTILE_ROWS * CLOUD_PROFILE_HEIGHT_RES as u32)
+        .map(|i| i as usize % CLOUD_PROFILE_HEIGHT_RES)
         .flat_map(|i| {
             let q = i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32;
             [q, 0.0, 0.0, 1.0].map(f32_to_f16)
@@ -336,7 +337,7 @@ pub fn init_fbm_noise_texture(
         },
         Extent3d {
             width: CLOUD_PROFILE_HEIGHT_RES as u32,
-            height: 1,
+            height: CLOUD_NOISE_QUANTILE_ROWS,
             depth_or_array_layers: 1,
         },
     );
@@ -366,10 +367,13 @@ const CLOUD_PROFILE_EXTENT: Extent3d = Extent3d {
     height: CLOUD_PROFILE_TYPE_RES as u32,
     depth_or_array_layers: 1,
 };
-/// The profile rows plus the noise quantile row.
+/// Noise quantile rows after the profile rows: one per shape-noise mip (128^3 -> 8 levels; must
+/// match `clouds.wesl` and `cloud_noise_quantiles.wesl`).
+const CLOUD_NOISE_QUANTILE_ROWS: u32 = 8;
+/// The profile rows plus the noise quantile rows.
 const CLOUD_PROFILE_TEXTURE_EXTENT: Extent3d = Extent3d {
     width: CLOUD_PROFILE_HEIGHT_RES as u32,
-    height: CLOUD_PROFILE_TYPE_RES as u32 + 1,
+    height: CLOUD_PROFILE_TYPE_RES as u32 + CLOUD_NOISE_QUANTILE_ROWS,
     depth_or_array_layers: 1,
 };
 
@@ -396,6 +400,30 @@ pub struct PendingCloudProfiles(pub(crate) Option<Vec<u8>>);
 pub(crate) enum ProfileSource {
     Physical,
     Image(AssetId<Image>),
+    Nubis(AssetId<Image>),
+}
+
+/// Resamples a Nubis-style vertical profile gradient (height up, type right, any format) into the
+/// lookup rows: u = height in the layer (0 bottom .. 1 top), R = the image value, G = B = A = 1.
+fn nubis_lookup_texels(image: &Image) -> Option<Vec<u8>> {
+    let (w, h) = (image.width(), image.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(8 * CLOUD_PROFILE_HEIGHT_RES * CLOUD_PROFILE_TYPE_RES);
+    for j in 0..CLOUD_PROFILE_TYPE_RES {
+        let x = ((j as f32 + 0.5) / CLOUD_PROFILE_TYPE_RES as f32 * w as f32) as u32;
+        for i in 0..CLOUD_PROFILE_HEIGHT_RES {
+            // Texel i at height i / (N - 1); the image's top row is the layer top.
+            let fy = (1.0 - i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32) * (h - 1) as f32;
+            let (y0, t) = (fy.floor() as u32, fy.fract());
+            let y1 = (y0 + 1).min(h - 1);
+            let value = |y| image.get_color_at(x.min(w - 1), y).ok().map(|c| c.to_linear().red);
+            let v = value(y0)? * (1.0 - t) + value(y1)? * t;
+            out.extend([v.clamp(0.0, 1.0), 1.0, 1.0, 1.0].map(f32_to_f16).iter().flat_map(|h| h.to_le_bytes()));
+        }
+    }
+    Some(out)
 }
 
 /// Picks the lookups of the first cloud layer's [`CloudProfiles`] and queues an upload when they
@@ -416,6 +444,17 @@ pub(crate) fn extract_cloud_profiles(
         CLOUD_PROFILE_EXTENT.width,
         CLOUD_PROFILE_EXTENT.height,
     );
+    if let CloudProfiles::NubisLookup(handle) = profiles {
+        let source = ProfileSource::Nubis(handle.id());
+        if last.as_ref() == Some(&source) {
+            return;
+        }
+        if let Some(texels) = images.get(handle).and_then(nubis_lookup_texels) {
+            pending.0 = Some(texels);
+            *last = Some(source);
+        }
+        return;
+    }
     let image = match profiles {
         CloudProfiles::Image(handle) => images.get(handle).map(|image| (handle.id(), image)),
         _ => None,
@@ -452,8 +491,8 @@ pub fn upload_cloud_profiles(
     }
 }
 
-/// Measures the shape-noise distribution once the 3D noise exists and writes its quantiles into
-/// the last row of the profile texture (`cloud_noise_quantiles.wesl`), so the erosion threshold
+/// Measures the shape-noise distribution of each noise mip once the 3D noise exists and writes
+/// its quantiles into the last rows of the profile texture (`cloud_noise_quantiles.wesl`), so the erosion threshold
 /// at a dimensional profile p is exceeded with probability p (the profile is the cloud fraction).
 #[derive(Resource)]
 pub struct CloudNoiseQuantilePipeline {
@@ -517,10 +556,10 @@ pub fn compute_cloud_noise_quantiles(
     ) else {
         return;
     };
-    // 256 bins, zero-initialized at creation.
+    // 256 bins per mip, zero-initialized at creation.
     let bins = render_device.create_buffer(&BufferDescriptor {
         label: Some("cloud_noise_histogram"),
-        size: 256 * 4,
+        size: 256 * 4 * CLOUD_NOISE_QUANTILE_ROWS as u64,
         usage: BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -528,7 +567,7 @@ pub fn compute_cloud_noise_quantiles(
         "cloud_noise_quantiles_bind_group",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
         &BindGroupEntries::sequential((
-            &noise.mip_views[0],
+            &noise.texture.default_view,
             bins.as_entire_binding(),
             &profile.profile.default_view,
         )),

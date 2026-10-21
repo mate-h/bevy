@@ -15,7 +15,8 @@ struct GpuCloudLayers {
     cloud_scattering: f32,
     // Liquid water (kg/m^3) at density 1.
     liquid_water: f32,
-    // 0: profile lookups (`cloud_profile.rs`), 1: analytic envelope x^a (1 - x)^b.
+    // 0: physical lookups (`cloud_profile.rs`), 1: analytic envelope x^a (1 - x)^b,
+    // 2: Nubis-style lookup (height in the layer, 1 - p threshold).
     profile_mode: u32,
     profile_bottom_exponent: f32,
     profile_top_exponent: f32,
@@ -182,8 +183,10 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
 /// Height range of the profile lookups (m above the cloud base; `cloud_profile.rs`
 /// CLOUD_PROFILE_RANGE_M).
 const CLOUD_PROFILE_RANGE_M: f32 = 4000.0;
-/// Rows of the profile texture: one per cloud type, then the shape-noise quantiles.
+/// Rows of the profile texture: one per cloud type, then the shape-noise quantiles of each noise
+/// mip (`cloud_noise_quantiles.wesl`).
 const CLOUD_PROFILE_TYPE_ROWS: f32 = 32.0;
+const CLOUD_NOISE_QUANTILE_ROWS: f32 = 8.0;
 
 /// Vertical profile of a column: (dimensional profile, in-cloud liquid water / the layer's).
 /// - Lookups (`CloudProfiles` physical or image, `cloud_profile.rs`), the Nubis Evolved (2022)
@@ -212,28 +215,37 @@ fn cloud_vertical_profile(h: f32, coverage: f32, cloud_type: f32) -> vec2<f32> {
         let max_v = max(pow(peak, a) * pow(1.0 - peak, b), 1e-6);
         return vec2(saturate(pow(x, a) * pow(1.0 - x, b) / max_v * coverage), 1.0);
     }
+    // Texel i holds u = i / (N - 1): sample the ends at texel centres.
+    let n = vec2<f32>(textureDimensions(cloud_profile_lut));
+    let v = (saturate(cloud_type) * (CLOUD_PROFILE_TYPE_ROWS - 1.0) + 0.5) / n.y;
+    if (cloud_layer.profile_mode == 2u) {
+        // Nubis-style lookup: height as a fraction of the layer, the value as is.
+        let lut = textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
+            vec2((saturate(h) * (n.x - 1.0) + 0.5) / n.x, v), 0.0);
+        return vec2(saturate(lut.r * coverage), 1.0);
+    }
     let z = h * cloud_layer_thickness_m();
     if (z >= CLOUD_PROFILE_RANGE_M) {
         return vec2(0.0);
     }
-    // Texel i holds u = i / (N - 1): sample the ends at texel centres.
-    let n = vec2<f32>(textureDimensions(cloud_profile_lut));
     let u = (z / CLOUD_PROFILE_RANGE_M * (n.x - 1.0) + 0.5) / n.x;
-    let v = (saturate(cloud_type) * (CLOUD_PROFILE_TYPE_ROWS - 1.0) + 0.5) / n.y;
     let lut = textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(u, v), 0.0);
     return vec2(saturate(lut.r * lut.g * coverage), lut.b / max(cloud_layer.liquid_water, 1e-9));
 }
 
-/// Erosion threshold for a dimensional profile p: the shape noise exceeds it with probability p
-/// at the lookups (the noise quantile, so p is the cloud fraction; the last row of the profile
-/// texture, measured from the noise texture), 1 - p with the analytic envelope (Nubis).
-fn cloud_erosion_threshold(p: f32) -> f32 {
-    if (cloud_layer.profile_mode == 1u) {
+/// Erosion threshold for a dimensional profile p at a shape-noise mip: with the lookups, the noise
+/// quantile of that mip (the last rows of the profile texture, measured from the noise texture),
+/// so the noise exceeds it with probability p at every level of detail and p is the cloud
+/// fraction (a threshold from mip 0 let most of the smoothed coarse mips through, and the light
+/// taps saw a continuous deck); 1 - p with the analytic envelope (Nubis).
+fn cloud_erosion_threshold(p: f32, mip: f32) -> f32 {
+    if (cloud_layer.profile_mode != 0u) {
         return 1.0 - p;
     }
     let n = vec2<f32>(textureDimensions(cloud_profile_lut));
     let u = ((1.0 - saturate(p)) * (n.x - 1.0) + 0.5) / n.x;
-    let v = (CLOUD_PROFILE_TYPE_ROWS + 0.5) / n.y;
+    let row = CLOUD_PROFILE_TYPE_ROWS + clamp(mip, 0.0, CLOUD_NOISE_QUANTILE_ROWS - 1.0);
+    let v = (row + 0.5) / n.y;
     return textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(u, v), 0.0).r;
 }
 
@@ -311,7 +323,7 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     let pw = sample_shape_noise(sample_pos, h, mip);
     let wfbm = pw.y * 0.625 + pw.z * 0.25 + pw.w * 0.125;
     let shape_noise = saturate(remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0));
-    let threshold = cloud_erosion_threshold(base_profile);
+    let threshold = cloud_erosion_threshold(base_profile, mip);
     // Lookups: the excess over the threshold, renormalized (Nubis value erosion, (v - e) / (1 - e)),
     // so a cloudy point spans the full range and the liquid-water channel sets its magnitude;
     // the analytic envelope keeps Nubis's plain excess.

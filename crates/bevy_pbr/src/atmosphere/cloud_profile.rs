@@ -57,6 +57,12 @@ pub enum CloudProfiles {
     /// A lookup image of the format above (Rgba16Float, 64 x 32), e.g. baked for another air
     /// mass or painted. Until it loads, or if its format differs (logged), [`Self::Physical`].
     Image(Handle<Image>),
+    /// A Nubis-style vertical profile gradient used as is (Schneider, GDC 2022: "The Vertical
+    /// Profile Gradient"): a grayscale image, any size and color format, with height in the
+    /// cloud layer upwards (bottom row = layer bottom) and cloud type to the right. Its value is
+    /// the dimensional profile before coverage, with Nubis's `1 - profile` erosion threshold and
+    /// uniform liquid water. Load it as linear data (not sRGB).
+    NubisLookup(Handle<Image>),
 }
 
 impl CloudProfiles {

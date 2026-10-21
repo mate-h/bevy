@@ -7,7 +7,8 @@
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`,
 //!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`, `ATMOSPHERE_NO_HAZE` (no aerosol or local haze),
-//!   `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
+//!   `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis|nubis_lookup`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
+//!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
 //!   `ATMOSPHERE_LUT_MODE`.
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse).
@@ -514,7 +515,12 @@ fn setup_camera_fog(
             cloud_layer_end: 6_364_000.0,   // tops 4 km (2.5 km thick layer)
             // Used for enabling/disabling, actual density comes from noise (normalized [0, 1]);
             // `ATMOSPHERE_NO_CUMULUS` leaves only the cirrus (its history moves with its own wind).
-            cloud_density: if std::env::var("ATMOSPHERE_NO_CUMULUS").is_ok() { 0.0 } else { 1.0 },
+            // `ATMOSPHERE_CLOUD_DENSITY=<x>` scales the optical depth (debug).
+            cloud_density: if std::env::var("ATMOSPHERE_NO_CUMULUS").is_ok() {
+                0.0
+            } else {
+                std::env::var("ATMOSPHERE_CLOUD_DENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+            },
             // Larger scale = larger cloud features (more “big cumulus”, less “small puffs”)
             noise_scale: 32_000.0, // weather tile; shape noise period = 1/8 (4 km)
             noise_offset: Vec3::ZERO,
@@ -531,10 +537,18 @@ fn setup_camera_fog(
             VolumetricCloudLayer::CUMULUS_EFFECTIVE_RADIUS,
         ),
         // Vertical cloud profiles: physically based by default (baked parcel ensemble);
-        // `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis` selects an analytic envelope instead.
+        // `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis` selects an analytic envelope instead, and
+        // `nubis_lookup` a Nubis-style gradient image used as is, from the git-ignored
+        // `assets/local/nubis_vertical_profile.png` (not shipped).
         match std::env::var("ATMOSPHERE_CLOUD_PROFILE").as_deref() {
             Ok("adiabatic") => CloudProfiles::ADIABATIC,
             Ok("nubis") => CloudProfiles::NUBIS_ENVELOPE,
+            Ok("nubis_lookup") => CloudProfiles::NubisLookup(
+                asset_server
+                    .load_builder()
+                    .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
+                    .load("local/nubis_vertical_profile.png"),
+            ),
             _ => CloudProfiles::Physical,
         },
         CloudWeather::default(),
