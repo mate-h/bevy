@@ -281,7 +281,7 @@ fn print_controls() {
     println!("    4          - Switch to Mars atmosphere");
     println!("    5          - Switch between normal and planet scale (space) view");
     println!("    C          - Toggle cloud layer");
-    println!("    Left/Right - Decrease/Increase cloud density");
+    println!("    Left/Right - Decrease/Increase cloud coverage");
     println!("    P          - Cycle cloud profiles (physical, Nubis, adiabatic, Nubis envelope)");
     println!("    Enter      - Pause/Resume sun motion");
     println!("    T          - Toggle 60x cloud time-lapse (wind, rising thermals, cloud life cycle)");
@@ -379,9 +379,8 @@ fn atmosphere_controls(
     if keyboard_input.pressed(KeyCode::ArrowLeft) {
         for (_, cloud_layer) in atmosphere_entities.iter_mut() {
             if let Some(mut cloud_layer) = cloud_layer {
-                cloud_layer.cloud_density =
-                    (cloud_layer.cloud_density - time.delta_secs()).max(0.0);
-                println!("Cloud density: {:.2}", cloud_layer.cloud_density);
+                cloud_layer.coverage = (cloud_layer.coverage - time.delta_secs()).max(0.0);
+                println!("Cloud coverage scale: {:.2}", cloud_layer.coverage);
             }
         }
     }
@@ -389,9 +388,8 @@ fn atmosphere_controls(
     if keyboard_input.pressed(KeyCode::ArrowRight) {
         for (_, cloud_layer) in atmosphere_entities.iter_mut() {
             if let Some(mut cloud_layer) = cloud_layer {
-                cloud_layer.cloud_density =
-                    (cloud_layer.cloud_density + time.delta_secs()).min(100.0);
-                println!("Cloud density: {:.2}", cloud_layer.cloud_density);
+                cloud_layer.coverage = (cloud_layer.coverage + time.delta_secs()).min(5.0);
+                println!("Cloud coverage scale: {:.2}", cloud_layer.coverage);
             }
         }
     }
@@ -555,6 +553,11 @@ fn setup_camera_fog(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600.0),
+            // `ATMOSPHERE_CLOUD_COVERAGE=<x>` sets the starting coverage scale (Left/Right change it).
+            coverage: std::env::var("ATMOSPHERE_CLOUD_COVERAGE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
             // `ATMOSPHERE_CLOUD_DETAIL=<x>` overrides the detail-erosion strength (validation).
             detail_strength: std::env::var("ATMOSPHERE_CLOUD_DETAIL")
                 .ok()

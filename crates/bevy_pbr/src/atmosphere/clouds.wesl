@@ -43,6 +43,7 @@ struct GpuCloudLayers {
     cirrus_fall_speed_spread: f32,
     cirrus_outer_scale: f32,
     cirrus_asymmetry: f32,
+    coverage: f32,
 }
 
 @group(0) @binding(20) var<uniform> cloud_layer: GpuCloudLayers;
@@ -114,7 +115,7 @@ fn sample_weather(world_pos: vec3<f32>, weather_scale: f32) -> vec4<f32> {
     // suppressed regions are (depth scales with width).
     let meso = textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv * 0.25 + vec2(0.37, 0.61), 0.0).a;
     let erosion = 1.0 - smoothstep(0.30, 0.65, meso);
-    w.r = saturate(w.r - erosion);
+    w.r = saturate((w.r - erosion) * cloud_layer.coverage);
     return w;
 }
 

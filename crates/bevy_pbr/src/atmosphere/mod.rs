@@ -859,6 +859,11 @@ pub struct VolumetricCloudLayer {
     /// 0 = disabled, 1 = full modulation.
     pub detail_strength: f32,
 
+    /// Scale of the weather map's coverage (its R channel, after the mesoscale clearing), clamped
+    /// to 1: with the physical profiles, coverage times the vertical profile is the cloud
+    /// fraction, so this scales the cloud fraction everywhere. 1 = the map as authored.
+    pub coverage: f32,
+
     /// Override of the wind at the cloud base (m/s, horizontal), which advects the cloud field.
     /// `None`: [`AtmosphereWind`] at the base altitude.
     pub wind: Option<Vec3>,
@@ -934,6 +939,7 @@ impl Default for VolumetricCloudLayer {
             noise_offset: Vec3::ZERO,
             detail_noise_scale: 600.0,
             detail_strength: 1.0,
+            coverage: 1.0,
             wind: None,
             profile_top_min: 0.25,
             wind_shear: None,
@@ -1184,6 +1190,7 @@ pub struct GpuCloudLayers {
     pub cirrus_fall_speed_spread: f32,
     pub cirrus_outer_scale: f32,
     pub cirrus_asymmetry: f32,
+    pub coverage: f32,
 }
 
 impl GpuCloudLayers {
@@ -1254,6 +1261,7 @@ impl GpuCloudLayers {
             cirrus_fall_speed_spread: ci.fall_speed_spread.max(0.0),
             cirrus_outer_scale: ci.outer_scale.max(1.0),
             cirrus_asymmetry: ci.asymmetry.clamp(-0.99, 0.99),
+            coverage: c.coverage.max(0.0),
         }
     }
 }
