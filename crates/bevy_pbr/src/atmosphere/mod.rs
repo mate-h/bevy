@@ -120,7 +120,7 @@ use self::resources::{
     prepare_atmosphere_bind_groups, prepare_atmosphere_textures,
     prepare_cloud_shadow_temporal_params, prepare_clouds_temporal_params, AtmosphereBindGroupLayouts, AtmosphereBindGroups,
     AtmosphereLutPipelines, AtmosphereTextures, AtmosphereTransformsOffset,
-    CloudNoiseSampler, CloudShadowTemporalParamsBuffer, CloudShadowTemporalState,
+    CloudNoiseSampler,
     RenderSkyPipelineId,
 };
 
@@ -209,6 +209,7 @@ impl Plugin for AtmospherePlugin {
             .insert_resource(AtmosphereBindGroupLayouts::new())
             .init_resource::<RenderSkyBindGroupLayouts>()
             .init_resource::<CloudNoiseSampler>()
+            .init_resource::<environment::AtmosphereProbeSource>()
             .init_resource::<fbm_noise::CloudNoiseFormats>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
@@ -226,8 +227,6 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<DetailNoiseBindGroupLayout>()
             .init_resource::<DetailNoisePipeline>()
             .init_resource::<DetailNoiseGenerated>()
-            .init_resource::<CloudShadowTemporalState>()
-            .init_resource::<CloudShadowTemporalParamsBuffer>()
             // Registered here, after the capability checks: it needs `NoiseGenerated`, which only
             // exists when the plugin loads (registered in `build`, a GPU without compute support
             // panicked on the missing resource instead of falling back).

@@ -29,7 +29,7 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_resource::{binding_types::*, TextureViewDescriptor, TextureViewDimension, *},
     renderer::{RenderDevice, RenderQueue},
-    texture::{CachedTexture, FallbackImage, GpuImage, TextureCache},
+    texture::{CachedTexture, FallbackImage, GpuImage},
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewUniform, ViewUniforms},
 };
 use bevy_shader::Shader;
@@ -616,9 +616,7 @@ pub(super) fn prepare_clouds_temporal_params(
         ),
         With<ExtractedAtmosphere>,
     >,
-    mut previous: bevy_ecs::system::Local<
-        HashMap<RetainedViewEntity, (Mat4, UVec2, Vec3, Vec3, f32)>,
-    >,
+    mut previous: bevy_ecs::system::Local<HashMap<RetainedViewEntity, PreviousCloudFrame>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut commands: Commands,
@@ -645,14 +643,13 @@ pub(super) fn prepare_clouds_temporal_params(
                 view.clip_from_view * view.world_from_view.to_matrix().inverse()
             }),
         };
-        let size = textures.clouds.texture.size();
-        let size = UVec2::new(size.width, size.height);
+        // The history is what this view wrote last frame: the ping-pong textures it reads now
+        // must be the ones it wrote then (a new view, a reallocation or a resize breaks that).
+        let history_ids = (textures.clouds_history.texture.id(), textures.haze_history_inscattering.texture.id());
         let (prev_clip_from_world, history_valid, prev_offset, prev_cirrus_offset, prev_exposure) =
             match previous.get(&view.retained_view_entity) {
-                Some((prev, prev_size, prev_offset, prev_cirrus, prev_exposure))
-                    if *prev_size == size =>
-                {
-                    (*prev, 1, *prev_offset, *prev_cirrus, *prev_exposure)
+                Some(prev) if prev.written == history_ids => {
+                    (prev.clip_from_world, 1, prev.offset, prev.cirrus_offset, prev.exposure)
                 }
                 _ => (clip_from_world, 0, offset, cirrus_offset, exposure),
             };
@@ -673,10 +670,26 @@ pub(super) fn prepare_clouds_temporal_params(
             .insert(CloudsTemporalParamsUniform(buffer));
         seen.insert(
             view.retained_view_entity,
-            (clip_from_world, size, offset, cirrus_offset, exposure),
+            PreviousCloudFrame {
+                clip_from_world,
+                offset,
+                cirrus_offset,
+                exposure,
+                written: (textures.clouds.texture.id(), textures.haze_inscattering.texture.id()),
+            },
         );
     }
     *previous = seen;
+}
+
+/// What a view's cloud and haze passes wrote in the previous frame ([`prepare_clouds_temporal_params`]).
+pub struct PreviousCloudFrame {
+    clip_from_world: Mat4,
+    offset: Vec3,
+    cirrus_offset: Vec3,
+    exposure: f32,
+    /// The cloud and haze targets written (next frame's histories).
+    written: (TextureId, TextureId),
 }
 
 /// Parameters for the cloud shadow temporal filter pass.
@@ -709,7 +722,7 @@ pub struct CloudShadowTemporalParams {
 
 /// Per-view state for cloud shadow temporal filtering.
 /// Persists between frames to enable history reprojection.
-#[derive(Resource, Default)]
+#[derive(Default, Clone)]
 pub struct CloudShadowTemporalState {
     pub anchor: Vec3,
     pub light_dir: Vec3,
@@ -724,6 +737,8 @@ pub struct CloudShadowTemporalState {
     /// texture, and another extent maps its texels to other places.
     pub size: UVec2,
     pub extent: f32,
+    /// The history texture the map was copied into.
+    pub history_texture: Option<TextureId>,
 }
 
 impl FromWorld for RenderSkyBindGroupLayouts {
@@ -1202,6 +1217,7 @@ pub(super) fn prepare_atmosphere_textures(
     views: Query<
         (
             Entity,
+            &ExtractedView,
             &GpuAtmosphereSettings,
             Option<&ExtractedCamera>,
             bevy_ecs::query::Has<GpuCloudLayers>,
@@ -1209,11 +1225,20 @@ pub(super) fn prepare_atmosphere_textures(
         With<ExtractedAtmosphere>,
     >,
     render_device: Res<RenderDevice>,
-    mut texture_cache: ResMut<TextureCache>,
+    mut store: bevy_ecs::system::Local<HashMap<RetainedViewEntity, ViewTextureStore>>,
     frame_count: Res<FrameCount>,
     mut commands: Commands,
 ) {
-    for (entity, lut_settings, camera, has_clouds) in &views {
+    // Each view owns its textures (keyed by retained view entity): the LUTs, the cloud field,
+    // the shadow map and the ping-pong histories persist across frames and must stay with
+    // their view. `TextureCache` hands out the first free texture of a descriptor, so
+    // equal-sized views could exchange them when the render-world query order changed (audit
+    // 5). A texture is only reallocated when its descriptor changes, and a reallocation is a
+    // new texture id, which the history validity checks compare.
+    let mut seen: HashMap<RetainedViewEntity, ViewTextureStore> = HashMap::default();
+    for (entity, view, lut_settings, camera, has_clouds) in &views {
+        let mut textures = store.remove(&view.retained_view_entity).unwrap_or_default();
+        textures.device = Some(render_device.clone());
         // Views without cloud layers bind 1x1 placeholders for every cloud texture (their
         // passes do not run, and PBR skips the cloud shadow map at extent 0): the full set is
         // ~52 MiB per view at 1080p (cloud field, shadow map + history, half-res cloud and haze
@@ -1230,8 +1255,7 @@ pub(super) fn prepare_atmosphere_textures(
             }
         };
         let cloud_shadow_map_extent = cloud_extent(lut_settings.cloud_shadow_map_size.to_extents());
-        let transmittance_lut = texture_cache.get(
-            &render_device,
+        let transmittance_lut = textures.get(
             TextureDescriptor {
                 label: Some("transmittance_lut"),
                 size: lut_settings.transmittance_lut_size.to_extents(),
@@ -1244,8 +1268,7 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let multiscattering_lut = texture_cache.get(
-            &render_device,
+        let multiscattering_lut = textures.get(
             TextureDescriptor {
                 label: Some("multiscattering_lut"),
                 size: lut_settings.multiscattering_lut_size.to_extents(),
@@ -1258,8 +1281,7 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let sky_view_lut = texture_cache.get(
-            &render_device,
+        let sky_view_lut = textures.get(
             TextureDescriptor {
                 label: Some("sky_view_lut"),
                 size: lut_settings.sky_view_lut_size.to_extents(),
@@ -1272,8 +1294,7 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let aerial_view_lut = texture_cache.get(
-            &render_device,
+        let aerial_view_lut = textures.get(
             TextureDescriptor {
                 label: Some("aerial_view_lut"),
                 size: lut_settings.aerial_view_lut_size.to_extents(),
@@ -1287,8 +1308,7 @@ pub(super) fn prepare_atmosphere_textures(
         );
 
         let mut field_tex = |label: &'static str, format: TextureFormat| {
-            texture_cache.get(
-                &render_device,
+            textures.get(
                 TextureDescriptor {
                     label: Some(label),
                     size: cloud_extent(Extent3d {
@@ -1310,8 +1330,7 @@ pub(super) fn prepare_atmosphere_textures(
         let cloud_field_sdf = field_tex("cloud_field_sdf", TextureFormat::Rgba16Float);
         let cloud_field_ext = field_tex("cloud_field_ext", TextureFormat::Rgba16Float);
         // Escape probability at half the horizontal resolution (`cloud_field.wesl` escape).
-        let cloud_field_esc = texture_cache.get(
-            &render_device,
+        let cloud_field_esc = textures.get(
             TextureDescriptor {
                 label: Some("cloud_field_esc"),
                 size: cloud_extent(Extent3d {
@@ -1328,8 +1347,7 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let cloud_shadow_map = texture_cache.get(
-            &render_device,
+        let cloud_shadow_map = textures.get(
             TextureDescriptor {
                 label: Some("cloud_shadow_map"),
                 size: cloud_shadow_map_extent,
@@ -1344,8 +1362,7 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let cloud_shadow_map_tmp = texture_cache.get(
-            &render_device,
+        let cloud_shadow_map_tmp = textures.get(
             TextureDescriptor {
                 label: Some("cloud_shadow_map_tmp"),
                 size: cloud_shadow_map_extent,
@@ -1358,8 +1375,7 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
-        let cloud_shadow_map_history = texture_cache.get(
-            &render_device,
+        let cloud_shadow_map_history = textures.get(
             TextureDescriptor {
                 label: Some("cloud_shadow_map_history"),
                 size: cloud_shadow_map_extent,
@@ -1395,7 +1411,7 @@ pub(super) fn prepare_atmosphere_textures(
                 }
             };
         let mut get = |label, format, size, copy| {
-            texture_cache.get(&render_device, clouds_texture(label, format, size, copy))
+            textures.get(clouds_texture(label, format, size, copy))
         };
         // Ping-pong reconstruction targets: distinct labels keep the cached textures stable
         // across frames, and the frame parity picks which one is written this frame.
@@ -1460,6 +1476,47 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_esc,
             }
         });
+        seen.insert(view.retained_view_entity, textures);
+    }
+    *store = seen;
+}
+
+/// Textures owned by one atmosphere view ([`prepare_atmosphere_textures`]), by label.
+#[derive(Default)]
+pub struct ViewTextureStore {
+    device: Option<RenderDevice>,
+    textures: HashMap<&'static str, (TextureKey, CachedTexture)>,
+}
+
+/// The parts of a [`TextureDescriptor`] that require a new texture when they change.
+type TextureKey = (Extent3d, u32, u32, TextureDimension, TextureFormat, TextureUsages);
+
+impl ViewTextureStore {
+    /// This view's texture with the descriptor's label, reallocated when the descriptor changes.
+    fn get(&mut self, descriptor: TextureDescriptor<'static>) -> CachedTexture {
+        let label = descriptor.label.unwrap_or("atmosphere_texture");
+        let key = (
+            descriptor.size,
+            descriptor.mip_level_count,
+            descriptor.sample_count,
+            descriptor.dimension,
+            descriptor.format,
+            descriptor.usage,
+        );
+        if let Some((k, texture)) = self.textures.get(label) {
+            if *k == key {
+                return texture.clone();
+            }
+        }
+        let device = self.device.as_ref().expect("ViewTextureStore without a device");
+        let texture = device.create_texture(&descriptor);
+        let default_view = texture.create_view(&TextureViewDescriptor::default());
+        let cached = CachedTexture {
+            texture,
+            default_view,
+        };
+        self.textures.insert(label, (key, cached.clone()));
+        cached
     }
 }
 
@@ -1640,34 +1697,82 @@ enum AtmosphereBindGroupError {
 
 pub(super) fn prepare_cloud_shadow_temporal_params(
     views: Query<
-        (&ExtractedView, &ExtractedAtmosphere, &GpuAtmosphereSettings, Option<&GpuCloudLayers>),
+        (
+            Entity,
+            &ExtractedView,
+            &ExtractedAtmosphere,
+            &GpuAtmosphereSettings,
+            &AtmosphereTextures,
+            Option<&GpuCloudLayers>,
+            Option<&bevy_camera::visibility::RenderLayers>,
+        ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
-    directional_lights: Query<&ExtractedDirectionalLight>,
-    mut temporal_state: ResMut<CloudShadowTemporalState>,
-    mut temporal_params_buffer: ResMut<CloudShadowTemporalParamsBuffer>,
+    directional_lights: Query<(Entity, &ExtractedDirectionalLight, &bevy_camera::visibility::RenderLayers)>,
+    mut states: bevy_ecs::system::Local<HashMap<RetainedViewEntity, CloudShadowTemporalState>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     frame_count: Res<FrameCount>,
+    mut commands: Commands,
 ) {
-    let Some((view, atmosphere, settings, cloud_layer)) = views.iter().next() else {
-        return;
-    };
-    if !settings.cloud_shadow_uses_temporal_pass() {
-        return;
+    // The shadow map, its history and therefore its temporal state belong to each view (audit
+    // 10): one global state reprojected secondary views with the first view's anchor, extent
+    // and motion.
+    let mut lights: Vec<_> = directional_lights.iter().collect();
+    // The order of the GPU's directional lights (render/light.rs `prepare_lights`): sorted by
+    // (volumetric, shadow maps enabled, entity), then filtered by the view's render layers. The
+    // cloud shadow map follows light 0 of its view (`lights.directional_lights[0]`).
+    lights.sort_by_key(|(entity, light, _)| (light.volumetric, light.shadow_maps_enabled, *entity));
+    let mut seen = HashMap::default();
+    for (entity, view, atmosphere, settings, textures, cloud_layer, view_layers) in &views {
+        if !settings.cloud_shadow_uses_temporal_pass() || cloud_layer.is_none() {
+            // No temporal pass, or no cloud layer (1x1 placeholder shadow textures): no history
+            // is kept, so it is invalid when they come back.
+            continue;
+        }
+        let view_layers = view_layers.cloned().unwrap_or_default();
+        let light_dir = lights
+            .iter()
+            .find(|(_, _, layers)| layers.intersects(&view_layers))
+            .map(|(_, light, _)| Vec3::from(light.transform.back()))
+            .unwrap_or(Vec3::NEG_Y);
+        let previous = states.remove(&view.retained_view_entity);
+        let (state, params) = cloud_shadow_temporal_params(
+            previous.as_ref(),
+            view,
+            atmosphere,
+            settings,
+            cloud_layer,
+            light_dir,
+            textures.cloud_shadow_map_history.texture.id(),
+            frame_count.0,
+        );
+        let mut buffer = UniformBuffer::from(params);
+        buffer.write_buffer(&render_device, &render_queue);
+        commands
+            .entity(entity)
+            .insert(CloudShadowTemporalParamsUniform(buffer));
+        seen.insert(view.retained_view_entity, state);
     }
-    if cloud_layer.is_none() {
-        // No cloud layer: the shadow textures are 1x1 placeholders, so whatever history exists
-        // is gone once clouds come back.
-        temporal_state.initialized = false;
-        return;
-    }
-    let light_dir = directional_lights
-        .iter()
-        .next()
-        .map(|light| Vec3::from(light.transform.back()))
-        .unwrap_or(Vec3::NEG_Y);
+    *states = seen;
+}
 
+/// Per-view uniform for [`CloudShadowTemporalParams`].
+#[derive(Component)]
+pub struct CloudShadowTemporalParamsUniform(pub UniformBuffer<CloudShadowTemporalParams>);
+
+/// One view's shadow temporal parameters and its new state.
+fn cloud_shadow_temporal_params(
+    previous: Option<&CloudShadowTemporalState>,
+    view: &ExtractedView,
+    atmosphere: &ExtractedAtmosphere,
+    settings: &GpuAtmosphereSettings,
+    cloud_layer: Option<&GpuCloudLayers>,
+    light_dir: Vec3,
+    history_texture: TextureId,
+    frame_index: u32,
+) -> (CloudShadowTemporalState, CloudShadowTemporalParams) {
+    let temporal_state = previous.cloned().unwrap_or_default();
     let extent = settings.cloud_shadow_map_extent;
     // When only time-slicing (no temporal filtering), traced texels replace history outright.
     let temporal_alpha = if settings.cloud_shadow_temporal_enabled != 0 {
@@ -1718,10 +1823,12 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
     let anchor_moved = (anchor - prev_anchor).length_squared() > 1e-6;
     let light_rot_cos = (light_rotation_cut_deg * std::f32::consts::PI / 180.0).cos();
     let light_rotated = prev_light_dir.dot(light_dir.normalize_or_zero()) < light_rot_cos;
+    // The history must be the texture this view copied its map into last frame.
     let history_valid = temporal_state.initialized
         && !light_rotated
         && temporal_state.size == size
-        && temporal_state.extent == extent;
+        && temporal_state.extent == extent
+        && temporal_state.history_texture == Some(history_texture);
 
     let cloud_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
     let cirrus_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.cirrus_offset);
@@ -1733,7 +1840,7 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
     } else {
         (Vec3::ZERO, Vec3::ZERO)
     };
-    *temporal_state = CloudShadowTemporalState {
+    let new_state = CloudShadowTemporalState {
         anchor,
         light_dir: light_dir.normalize_or_zero(),
         basis_x,
@@ -1743,6 +1850,7 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         cirrus_offset,
         size,
         extent,
+        history_texture: Some(history_texture),
     };
 
     let prev_anchor = if history_valid { prev_anchor } else { anchor };
@@ -1763,9 +1871,9 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
     let prev_basis_x = prev_a.cross(prev_trace_dir).normalize_or_zero();
     let prev_basis_y = prev_trace_dir.cross(prev_basis_x);
 
-    temporal_params_buffer
-        .buffer
-        .set(CloudShadowTemporalParams {
+    (
+        new_state,
+        CloudShadowTemporalParams {
             curr_anchor: anchor,
             curr_light_dir: trace_dir,
             curr_basis_x: basis_x,
@@ -1780,13 +1888,11 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
             anchor_moved: anchor_moved as u32,
             size,
             interleave: settings.cloud_shadow_map_update_interleave.max(1),
-            frame_index: frame_count.0,
+            frame_index,
             cloud_motion: Vec3::new(cloud_motion.x, 0.0, cloud_motion.z),
             cirrus_motion: Vec3::new(cirrus_motion.x, 0.0, cirrus_motion.z),
-        });
-    temporal_params_buffer
-        .buffer
-        .write_buffer(&render_device, &render_queue);
+        },
+    )
 }
 
 pub(super) fn prepare_atmosphere_bind_groups(
@@ -1801,6 +1907,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             Option<&GpuCloudLayers>,
             Option<&GpuAtmosphereSettings>,
             Option<&CloudsTemporalParamsUniform>,
+            Option<&CloudShadowTemporalParamsUniform>,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
@@ -1825,12 +1932,11 @@ pub(super) fn prepare_atmosphere_bind_groups(
     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
     medium_sampler: Res<ScatteringMediumSampler>,
     pipeline_cache: Res<PipelineCache>,
-    (cloud_layer_uniforms, fbm_noise_texture, perlin_worley_noise_texture, detail_noise_texture, temporal_params): (
+    (cloud_layer_uniforms, fbm_noise_texture, perlin_worley_noise_texture, detail_noise_texture): (
         Res<ComponentUniforms<GpuCloudLayers>>,
         Res<FbmNoiseTexture>,
         Res<PerlinWorleyNoiseTexture>,
         Res<DetailNoiseTexture>,
-        Res<CloudShadowTemporalParamsBuffer>,
     ),
     mut commands: Commands,
 ) -> Result<(), BevyError> {
@@ -1884,6 +1990,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         cloud_layer,
         settings,
         temporal_uniform,
+        shadow_temporal_uniform,
     ) in &views
     {
         let Some(depth_view) = view_depth_texture
@@ -2074,9 +2181,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
         // Temporal filter: curr=tmp (or cloud_shadow_map when no filter), prev=history, out=cloud_shadow_map.
         let cloud_shadow_temporal = (cloud_shadow_map.is_some() && temporal_enabled)
             .then(|| {
-                temporal_params
-                    .buffer
-                    .binding()
+                shadow_temporal_uniform
+                    .and_then(|u| u.0.binding())
                     .map(|temporal_params_binding| {
                         render_device.create_bind_group(
                             "cloud_shadow_temporal_bind_group",
@@ -2424,18 +2530,6 @@ pub struct AtmosphereBuffer {
     pub(crate) buffer: StorageBuffer<AtmosphereData>,
 }
 
-#[derive(Resource)]
-pub struct CloudShadowTemporalParamsBuffer {
-    pub(crate) buffer: UniformBuffer<CloudShadowTemporalParams>,
-}
-
-impl Default for CloudShadowTemporalParamsBuffer {
-    fn default() -> Self {
-        Self {
-            buffer: UniformBuffer::default(),
-        }
-    }
-}
 
 pub(crate) fn prepare_atmosphere_buffers(
     device: Res<RenderDevice>,

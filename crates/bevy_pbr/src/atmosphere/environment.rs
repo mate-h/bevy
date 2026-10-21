@@ -177,6 +177,7 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
 
 pub(super) fn prepare_atmosphere_probe_bind_groups(
     probes: Query<(Entity, &AtmosphereProbeTextures), With<AtmosphereEnvironmentMap>>,
+    probe_source: Res<AtmosphereProbeSource>,
     render_device: Res<RenderDevice>,
     layouts: Res<AtmosphereProbeLayouts>,
     atmosphere_sampler: Res<LinearSampler>,
@@ -219,7 +220,6 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
     ),
     mut commands: Commands,
 ) {
-    let atmosphere = views.iter().next();
 
     // STBN texture for environment_clouds (raymarch_atmosphere uses it when CLOUDS_ENABLED)
     let stbn_view: std::borrow::Cow<'_, TextureView> = match render_images.get(&bluenoise.texture) {
@@ -231,7 +231,9 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
     };
 
     for (entity, textures) in &probes {
-        let Some(atmosphere) = atmosphere else {
+        let Some(atmosphere) = probe_view(entity, views.contains(entity), &probe_source)
+            .and_then(|view| views.get(view).ok())
+        else {
             continue;
         };
         let Some(gpu_medium) = gpu_media.get(atmosphere.medium) else {
@@ -310,18 +312,47 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
     }
 }
 
+/// The view that renders an atmosphere environment probe, with its own uniforms, medium, LUTs
+/// and cloud shadow map, so all of them describe one atmosphere (audit 39: probes borrowed the
+/// first view's LUTs while every view dispatched them with its own uniforms):
+/// - a probe on a camera ([`AtmosphereEnvironmentMapLight`] on a `Camera3d`) is that view;
+/// - a [`LightProbe`](bevy_light::LightProbe) region is rendered by one deterministic source view,
+///   the lowest camera order, then entity ([`AtmosphereProbeSource`]).
+pub(super) fn probe_view(probe: Entity, probe_is_view: bool, source: &AtmosphereProbeSource) -> Option<Entity> {
+    if probe_is_view {
+        Some(probe)
+    } else {
+        source.0
+    }
+}
+
+/// The view that renders the atmosphere probes not attached to a camera ([`probe_view`]).
+#[derive(Resource, Default)]
+pub struct AtmosphereProbeSource(pub Option<Entity>);
+
 pub(super) fn prepare_probe_textures(
-    view_textures: Query<&AtmosphereTextures, With<ExtractedAtmosphere>>,
-    probes: Query<(Entity, &AtmosphereEnvironmentMap), Without<AtmosphereProbeTextures>>,
+    view_textures: Query<
+        (Entity, &AtmosphereTextures, Option<&bevy_render::camera::ExtractedCamera>),
+        With<ExtractedAtmosphere>,
+    >,
+    probes: Query<(Entity, &AtmosphereEnvironmentMap)>,
     gpu_images: Res<RenderAssets<GpuImage>>,
+    mut source: ResMut<AtmosphereProbeSource>,
     mut commands: Commands,
 ) {
-    // Get the first view entity's textures to borrow
-    let Some(view_textures) = view_textures.iter().next() else {
-        return;
-    };
+    source.0 = view_textures
+        .iter()
+        .min_by_key(|(entity, _, camera)| (camera.map_or(0, |c| c.order), *entity))
+        .map(|(entity, _, _)| entity);
 
+    // The rendering view's textures, every frame: they are its own and can be reallocated.
     for (probe, render_env_map) in &probes {
+        let Some(view) = probe_view(probe, view_textures.contains(probe), &source) else {
+            continue;
+        };
+        let Ok((_, view_textures, _)) = view_textures.get(view) else {
+            continue;
+        };
         let Some(environment) = gpu_images.get(&render_env_map.environment_map) else {
             continue;
         };
@@ -479,11 +510,18 @@ pub fn atmosphere_environment(
         &ViewLightsUniformOffset,
         Option<&DynamicUniformIndex<GpuCloudLayers>>,
     )>,
-    probe_query: Query<(&AtmosphereProbeBindGroups, &AtmosphereEnvironmentMap)>,
+    probe_query: Query<(
+        Entity,
+        &AtmosphereProbeBindGroups,
+        &AtmosphereEnvironmentMap,
+        Has<ExtractedAtmosphere>,
+    )>,
+    probe_source: Res<AtmosphereProbeSource>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Res<AtmosphereProbePipeline>,
     mut ctx: RenderContext,
 ) {
+    let this_view = view.entity();
     let Some(environment_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.environment)
     else {
         return;
@@ -502,7 +540,12 @@ pub fn atmosphere_environment(
     let diagnostics = diagnostics.as_deref();
     let time_span = diagnostics.time_span(ctx.command_encoder(), "atmosphere_environment");
 
-    for (bind_groups, env_map_light) in probe_query.iter() {
+    for (probe, bind_groups, env_map_light, probe_is_view) in probe_query.iter() {
+        // Each probe is rendered by its own view only (`probe_view`): its bind groups hold that
+        // view's medium and LUTs, matching the uniform offsets below.
+        if probe_view(probe, probe_is_view, &probe_source) != Some(this_view) {
+            continue;
+        }
         let use_clouds = cloud_layer_offset.is_some() && bind_groups.environment_clouds.is_some();
 
         let pipeline = if use_clouds {

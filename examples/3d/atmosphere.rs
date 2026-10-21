@@ -236,6 +236,7 @@ fn bench_hooks(
     mut exit: MessageWriter<AppExit>,
     cloud_layers: Query<Entity, With<VolumetricCloudLayer>>,
     offscreen: Option<Res<OffscreenTarget>>,
+    second: Option<Res<SecondCameraTarget>>,
 ) {
     let offscreen = OffscreenTarget(offscreen.and_then(|o| o.0.clone()));
     let _sunset = bench.sunset; // sun tilt applied at spawn via ATMOSPHERE_SUNSET
@@ -255,6 +256,11 @@ fn bench_hooks(
         commands
             .spawn(offscreen.0.clone().map_or_else(Screenshot::primary_window, Screenshot::image))
             .observe(save_to_disk(path));
+        if let (Some(second), Ok(path)) = (second.as_ref(), std::env::var("ATMOSPHERE_SECOND_SCREENSHOT")) {
+            commands
+                .spawn(Screenshot::image(second.0.clone()))
+                .observe(save_to_disk(path));
+        }
     }
     // `ATMOSPHERE_SCREENSHOT_FRAMES=<n>` + `ATMOSPHERE_SCREENSHOT=<dir/prefix>`: also capture each
     // of the first n frames (startup convergence debugging) to `<prefix>_fNN.png`.
@@ -667,8 +673,6 @@ fn setup_camera_fog(
         Tonemapping::AcesFitted,
         // Bloom gives the sun a much more natural look.
         Bloom::NATURAL,
-        // Enables the atmosphere to drive reflections and ambient lighting (IBL) for this view
-        // AtmosphereEnvironmentMapLight::default(),
         // Left-drag looks around; right-drag is the time-of-day slider (`sun_drag`).
         #[cfg(feature = "free_camera")]
         FreeCamera {
@@ -730,7 +734,55 @@ fn setup_camera_fog(
     if std::env::var("ATMOSPHERE_NO_TAA").is_err() {
         camera.insert(TemporalAntiAliasing::default());
     }
+    // `ATMOSPHERE_IBL=1`: the atmosphere drives reflections and ambient lighting (IBL) for this
+    // view (off by default while debugging the clouds).
+    let ibl = std::env::var("ATMOSPHERE_IBL").is_ok();
+    if ibl {
+        camera.insert(AtmosphereEnvironmentMapLight::default());
+    }
+    // `ATMOSPHERE_SECOND_CAMERA=x,y,z,tx,ty,tz`: a second camera with the same settings, into an
+    // offscreen 1280x720 image (the window's size: equal-sized views), to test per-view cloud
+    // state. `ATMOSPHERE_SECOND_SCREENSHOT=<path>` saves its image with the main screenshot.
+    let main_camera = camera.id();
+    if let Some(v) = std::env::var("ATMOSPHERE_SECOND_CAMERA")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>())
+        .filter(|v| v.len() == 6)
+    {
+        let image = images.add(Image::new_target_texture(
+            1280,
+            720,
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            Some(bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb),
+        ));
+        commands.insert_resource(SecondCameraTarget(image.clone()));
+        commands
+            .entity(main_camera)
+            .clone_and_spawn_with_opt_out(|builder| {
+                // Its own environment map (inserted below), not the main camera's image.
+                builder.deny::<(
+                    AtmosphereEnvironmentMapLight,
+                    bevy::light::GeneratedEnvironmentMapLight,
+                    bevy::light::EnvironmentMapLight,
+                )>();
+                #[cfg(feature = "free_camera")]
+                builder.deny::<(FreeCamera, FreeCameraState)>();
+            })
+            .insert_if(AtmosphereEnvironmentMapLight::default(), || ibl)
+            .insert((
+                Transform::from_xyz(v[0], v[1], v[2]).looking_at(Vec3::new(v[3], v[4], v[5]), Vec3::Y),
+                bevy::camera::RenderTarget::Image(image.into()),
+                Camera {
+                    order: 1,
+                    ..default()
+                },
+            ));
+    }
 }
+
+/// The second camera's image (`ATMOSPHERE_SECOND_CAMERA`).
+#[derive(Resource)]
+struct SecondCameraTarget(Handle<Image>);
 
 #[derive(Component)]
 struct Terrain;

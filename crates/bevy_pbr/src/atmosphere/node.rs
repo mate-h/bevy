@@ -8,7 +8,7 @@ use bevy_render::{
     extract_component::DynamicUniformIndex,
     render_resource::{ComputePass, ComputePassDescriptor, PipelineCache, RenderPassDescriptor},
     renderer::{RenderContext, ViewQuery},
-    view::{ViewTarget, ViewUniformOffset},
+    view::{ExtractedView, RetainedViewEntity, ViewTarget, ViewUniformOffset},
 };
 
 use crate::{resources::GpuAtmosphere, ViewLightsUniformOffset};
@@ -33,10 +33,10 @@ pub fn atmosphere_luts(
         &ViewLightsUniformOffset,
         Option<&DynamicUniformIndex<GpuCloudLayers>>,
         &super::ExtractedAtmosphere,
+        &ExtractedView,
     )>,
     pipelines: Res<AtmosphereLutPipelines>,
-    mut lut_cache: bevy_ecs::system::Local<(u64, u32)>,
-    mut field_frame: bevy_ecs::system::Local<u32>,
+    mut per_view: bevy_ecs::system::Local<PerViewLutState>,
     pipeline_cache: Res<PipelineCache>,
     mut ctx: RenderContext,
 ) {
@@ -51,7 +51,11 @@ pub fn atmosphere_luts(
         lights_uniforms_offset,
         cloud_layer_uniforms_offset,
         extracted_atmosphere,
+        extracted_view,
     ) = view.into_inner();
+    // This system runs once per view: amortised state (the LUT cache, the cloud-field rebuild
+    // stage) is per view, or two views would split one counter between them (audit 9).
+    let state = per_view.get(extracted_view.retained_view_entity);
 
     let (
         Some(transmittance_lut_pipeline),
@@ -134,13 +138,14 @@ pub fn atmosphere_luts(
             textures.multiscattering_lut.texture.id().hash(&mut h);
             h.finish()
         };
-        let lut_static_dirty = lut_cache.0 != lut_key
-            || lut_cache.1 >= 240
+        let lut_static_dirty = state.lut_key != Some(lut_key)
+            || state.lut_age >= 240
             || std::env::var_os("ATMOSPHERE_LUT_ALWAYS").is_some();
         if lut_static_dirty {
-            *lut_cache = (lut_key, 0);
+            state.lut_key = Some(lut_key);
+            state.lut_age = 0;
         } else {
-            lut_cache.1 += 1;
+            state.lut_age += 1;
         }
 
         if lut_static_dirty {
@@ -319,12 +324,17 @@ pub fn atmosphere_luts(
             );
             // Amortised rebuild: one stage per frame (init, x, y, z + escape), then 4 idle frames,
             // so the field follows weather/wind within 8 frames at ~1/8 of the full cost per frame.
-            let stage = (*field_frame % 8) as usize;
-            *field_frame = field_frame.wrapping_add(1);
+            // A field this view has not built yet (a new view, or new textures) is built in full
+            // first, so nothing reads an incomplete field (audit 9, 20).
+            let field_id = textures.cloud_field_sdf.texture.id();
+            let full_build = state.field_texture != Some(field_id);
+            state.field_texture = Some(field_id);
+            let stage = (state.field_frame % 8) as usize;
+            state.field_frame = if full_build { 0 } else { state.field_frame.wrapping_add(1) };
             for (i, pipeline) in resolved.into_iter().enumerate() {
                 // escape (4) runs right after edt_z (3) in the same frame: both switch to the new
                 // build cell together (clouds_raymarch reads the escape volume with the SDF's cell).
-                if i != stage && !(i == 4 && stage == 3) {
+                if !full_build && i != stage && !(i == 4 && stage == 3) {
                     continue;
                 }
                 let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -726,4 +736,35 @@ pub fn render_sky(
         );
     }
     super::gpu_timing::end_frame(&timing_device, command_encoder);
+}
+
+/// Amortised per-view state of [`atmosphere_luts`].
+#[derive(Default)]
+pub struct PerViewLutState {
+    views: bevy_platform::collections::HashMap<RetainedViewEntity, (u64, ViewLutState)>,
+    tick: u64,
+}
+
+#[derive(Default)]
+pub struct ViewLutState {
+    /// Inputs of the cached transmittance / multiscattering LUTs and frames since their build.
+    lut_key: Option<u64>,
+    lut_age: u32,
+    /// Cloud-field rebuild stage counter and the SDF texture it was built into.
+    field_frame: u32,
+    field_texture: Option<bevy_render::render_resource::TextureId>,
+}
+
+impl PerViewLutState {
+    /// The state of a view; views not rendered for 600 invocations are forgotten.
+    fn get(&mut self, view: RetainedViewEntity) -> &mut ViewLutState {
+        self.tick += 1;
+        let tick = self.tick;
+        if tick.is_multiple_of(600) {
+            self.views.retain(|_, (last, _)| tick - *last < 600);
+        }
+        let entry = self.views.entry(view).or_default();
+        entry.0 = tick;
+        &mut entry.1
+    }
 }
