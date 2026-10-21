@@ -34,12 +34,15 @@ pub enum CloudProfiles {
     /// spreads from the surface fluxes, lifted with entrainment 1 / (tau w); cloud fraction is the
     /// share of saturated rising parcels plus the saturated mean state, liquid water their mean.
     /// Cloud fraction is the share of saturated rising parcels plus the saturated mean state,
-    /// liquid water the parcels' mean, against height above the base. One air mass: the BOMEX
-    /// trade-cumulus case (Siebesma et al. 2003) for every type. The fraction jumps to its peak
-    /// within ~60 m of the base (the parcels condense at nearly one level), is ~0.3 of it at
-    /// 250 m, ~0.1 at 1 km and ends at ~1.4 km, the LES profile's shape (its clouds share a base
-    /// and stop at different heights); liquid water reaches ~1e-3 kg/m^3 at 1 km. The baker
-    /// records its inputs in the KTX2 key/value data.
+    /// liquid water the parcels' mean, against height above the base. The type axis orders
+    /// published LES cases by cloud depth, like Nubis's stratus .. cumulus axis, linear between:
+    /// - 0: stratocumulus, DYCOMS-II RF01 (Stevens et al. 2005): an overcast deck ~270 m deep;
+    /// - 0.5: shallow trade cumulus, BOMEX (Siebesma et al. 2003): the fraction peaks at the base
+    ///   and falls off to ~1.4 km (within ~20 % of the LES above 1 km);
+    /// - 1: deeper trade cumulus, RICO's equilibrium state (van Zanten et al. 2011, Fig. 4):
+    ///   0.05 at the base, ~0.015 through the cloud layer, tops near 3 km (LES: 0.06, ~0.02,
+    ///   ~2.7 km).
+    /// The baker records its inputs in the KTX2 key/value data.
     #[default]
     Physical,
     /// The analytic envelope `x^bottom (1 - x)^top`, normalized to a peak of 1, of the height x
