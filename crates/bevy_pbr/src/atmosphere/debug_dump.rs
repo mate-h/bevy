@@ -2,7 +2,12 @@
 //!
 //! `CLOUD_DUMP_DIR=<dir>` + `CLOUD_DUMP_FRAMES=4,300` copies the listed textures to buffers on
 //! those frames and writes raw RGBA16F/R32F files `<dir>/<name>_f<frame>_<w>x<h>x<d>.<fmt>` (rows
-//! padded to 256 bytes; the padded width is in the file name).
+//! padded to 256 bytes; the padded width is in the file name). Frames are [`FrameCount`]s, so
+//! every view dumps on the same frame (callers tag names with the view); copies are mapped in a
+//! later frame, after their submission (a per-invocation counter mapped an earlier view's copies
+//! during a later view of the same frame, before they were submitted: audit 31).
+//!
+//! [`FrameCount`]: bevy_diagnostic::FrameCount
 
 use bevy_math::UVec3;
 use bevy_render::{
@@ -12,18 +17,13 @@ use bevy_render::{
     },
     renderer::RenderDevice,
 };
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Mutex,
-};
+use std::sync::Mutex;
 
-static FRAME: AtomicU32 = AtomicU32::new(0);
 static PENDING: Mutex<Vec<(Buffer, String, u32)>> = Mutex::new(Vec::new());
 
-/// Returns the frame index if a dump is requested this frame; maps last frame's copies.
-pub fn begin_frame() -> Option<u32> {
+/// Returns `frame` if a dump is requested on it; maps the copies of earlier frames.
+pub fn begin_frame(frame: u32) -> Option<u32> {
     let dir = std::env::var("CLOUD_DUMP_DIR").ok()?;
-    let frame = FRAME.fetch_add(1, Ordering::Relaxed);
     let mut pending = PENDING.lock().unwrap();
     pending.retain(|(buffer, file, f)| {
         if *f >= frame {

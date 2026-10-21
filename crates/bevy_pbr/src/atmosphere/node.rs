@@ -452,9 +452,11 @@ pub fn render_sky(
         Option<&MainPassResolutionOverride>,
         &AtmosphereTextures,
         Option<&RenderSkyHazePipelineId>,
+        Option<&crate::light_probe::generate::RenderEnvironmentMap>,
     )>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Res<AtmosphereLutPipelines>,
+    frame_count: Res<bevy_diagnostic::FrameCount>,
     noise_dump: (
         Option<Res<super::perlin_worley_noise::PerlinWorleyNoiseTexture>>,
         Option<Res<super::detail_noise::DetailNoiseTexture>>,
@@ -476,6 +478,7 @@ pub fn render_sky(
         resolution_override,
         textures,
         haze_pipeline_id,
+        env_map,
     ) = view.into_inner();
 
     let Some(render_sky_pipeline) = pipeline_cache.get_render_pipeline(render_sky_pipeline_id.0)
@@ -492,7 +495,7 @@ pub fn render_sky(
 
     // Debug readback (CLOUD_DUMP_DIR): textures as they are when this frame's sky starts, i.e.
     // this frame's shadow map / noise and the *previous* frame's cloud trace + reconstruct.
-    let dump_frame = super::debug_dump::begin_frame();
+    let dump_frame = super::debug_dump::begin_frame(frame_count.0);
     if let Some(frame) = dump_frame {
         use bevy_math::UVec3;
         let d = |enc: &mut _,
@@ -502,7 +505,9 @@ pub fn render_sky(
                  size: UVec3,
                  bpt: u32,
                  ext: &str| {
-            super::debug_dump::dump(&dump_device, enc, frame, name, tex, mip, size, bpt, ext);
+            // Views dump on the same frame: tag the files with the camera order.
+            let name = format!("{name}_c{}", camera.order);
+            super::debug_dump::dump(&dump_device, enc, frame, &name, tex, mip, size, bpt, ext);
         };
         let s2 = |t: &bevy_render::render_resource::Texture| UVec3::new(t.width(), t.height(), 1);
         for (name, t) in [
@@ -514,6 +519,11 @@ pub fn render_sky(
             ("sky_view_lut", &textures.sky_view_lut.texture),
         ] {
             d(command_encoder, name, t, 0, s2(t), 8, "rgba16f");
+        }
+        // The view's raw atmosphere probe cube (6 layers), before the environment-map filter.
+        if let Some(env) = env_map {
+            let t = &env.environment_map.texture;
+            d(command_encoder, "env_raw", t, 0, UVec3::new(t.width(), t.height(), 6), 8, "rgba16f");
         }
         let (pw, det, wx) = &noise_dump;
         if let Some(pw) = pw {
@@ -727,7 +737,7 @@ pub fn render_sky(
             &dump_device,
             command_encoder,
             frame,
-            "scene_hdr",
+            &format!("scene_hdr_c{}", camera.order),
             t,
             0,
             UVec3::new(t.width(), t.height(), 1),
