@@ -143,6 +143,7 @@ fn main() {
                 dynamic_scene,
                 sun_drag,
                 atmosphere_controls,
+                cycle_cloud_profiles,
                 visibility_toggle.after(atmosphere_controls),
                 camera_pose_title,
             ),
@@ -281,6 +282,7 @@ fn print_controls() {
     println!("    5          - Switch between normal and planet scale (space) view");
     println!("    C          - Toggle cloud layer");
     println!("    Left/Right - Decrease/Increase cloud density");
+    println!("    P          - Cycle cloud profiles (physical, Nubis, adiabatic, Nubis envelope)");
     println!("    Enter      - Pause/Resume sun motion");
     println!("    T          - Toggle 60x cloud time-lapse (wind, rising thermals, cloud life cycle)");
     println!("    Right drag - Slide the time of day (sun position)");
@@ -419,6 +421,29 @@ fn atmosphere_controls(
         if let Some(_cloud_layer) = cloud_layer {
             // _cloud_layer.noise_offset.x += time.delta_secs() * 100.0;
         }
+    }
+}
+
+/// Cycles the vertical cloud profiles of the cloud layer: the baked physical set, Nubis's
+/// reconstructed lookup, and the two analytic envelopes.
+fn cycle_cloud_profiles(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut profiles: Query<&mut CloudProfiles, With<VolumetricCloudLayer>>,
+) {
+    if !keyboard_input.just_pressed(KeyCode::KeyP) {
+        return;
+    }
+    for mut profile in &mut profiles {
+        let (next, name) = match *profile {
+            CloudProfiles::Physical | CloudProfiles::Image(_) => (CloudProfiles::Nubis, "Nubis"),
+            CloudProfiles::Nubis => (CloudProfiles::ADIABATIC, "adiabatic envelope"),
+            CloudProfiles::Envelope { bottom, .. } if bottom == 1.0 => {
+                (CloudProfiles::NUBIS_ENVELOPE, "Nubis envelope")
+            }
+            CloudProfiles::Envelope { .. } => (CloudProfiles::Physical, "physical"),
+        };
+        *profile = next;
+        println!("Cloud profiles: {name}");
     }
 }
 
