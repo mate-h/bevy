@@ -555,7 +555,11 @@ fn setup_camera_fog(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600.0),
-            detail_strength: 1.0,
+            // `ATMOSPHERE_CLOUD_DETAIL=<x>` overrides the detail-erosion strength (validation).
+            detail_strength: std::env::var("ATMOSPHERE_CLOUD_DETAIL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
             ..default()
         }
         .with_liquid_water(

@@ -11,8 +11,9 @@
 //!   the eroded density;
 //! - A: unused (1).
 //!
-//! A last row, filled on the GPU from the shape noise, holds the noise quantiles that make the
-//! erosion threshold exact (`clouds.wesl` `cloud_erosion_threshold`). SI throughout: m, kg/m^3.
+//! The last rows, filled on the GPU, hold the shape- and billow-noise distributions per noise mip
+//! and the cloud scheme's threshold table, which make the profile the cloud fraction exactly
+//! (`clouds.wesl` `cloud_thermal_excess`). SI throughout: m, kg/m^3.
 
 use bevy_asset::Handle;
 use bevy_ecs::component::Component;

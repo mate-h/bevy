@@ -183,10 +183,11 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
 /// Height range of the profile lookups (m above the cloud base; `cloud_profile.rs`
 /// CLOUD_PROFILE_RANGE_M).
 const CLOUD_PROFILE_RANGE_M: f32 = 4000.0;
-/// Rows of the profile texture: one per cloud type, then the shape-noise quantiles of each noise
-/// mip (`cloud_noise_quantiles.wesl`).
+/// Rows of the profile texture: one per cloud type, then the shape- and billow-noise
+/// distributions of each noise mip, then the cloud-scheme row (`cloud_noise_quantiles.wesl`).
 const CLOUD_PROFILE_TYPE_ROWS: f32 = 64.0;
 const CLOUD_NOISE_QUANTILE_ROWS: f32 = 8.0;
+const CLOUD_SCHEME_ROW: f32 = 72.0;
 
 /// Vertical profile of a column: (dimensional profile, in-cloud liquid water / the layer's).
 /// - Lookups (`CloudProfiles` physical or image, `cloud_profile.rs`), the Nubis Evolved (2022)
@@ -233,19 +234,6 @@ fn cloud_vertical_profile(h: f32, coverage: f32, cloud_type: f32) -> vec2<f32> {
     return vec2(saturate(lut.r * lut.g * coverage), lut.b / max(cloud_layer.liquid_water, 1e-9));
 }
 
-/// Range of the standardized fluctuation's distribution in the quantile rows (G channel;
-/// `cloud_noise_quantiles.wesl`).
-const CLOUD_FLUCT_MIN: f32 = -6.0;
-const CLOUD_FLUCT_MAX: f32 = 6.0;
-
-/// Weight of the billow noise in the moisture fluctuation: Kolmogorov scaling, the fluctuation
-/// amplitude of a -5/3 spectrum grows as scale^(1/3), between the billow tile
-/// (detail_noise_scale) and the shape-noise tile (noise_scale / 8). Hogan & Kew 2005 use the same
-/// spectrum for the cirrus field. Must match `fbm_noise.rs` (the quantile pass).
-fn cloud_fluctuation_weight() -> f32 {
-    return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.noise_scale * 0.125, 1.0), 1.0 / 3.0);
-}
-
 /// Mip offset of the detail noise relative to the shape noise (footprint LOD, see
 /// sample_cumulus_shape_lod). Must match `fbm_noise.rs`.
 fn cloud_detail_mip_offset() -> f32 {
@@ -253,20 +241,14 @@ fn cloud_detail_mip_offset() -> f32 {
     return max(log2(4000.0 * 2.2e-3 / detail_texel), 0.0);
 }
 
-/// Distribution F(f) of the standardized moisture fluctuation f = z_shape + r z_billow at a
-/// shape-noise mip (the G channel of the quantile rows).
-fn cloud_fluctuation_cdf(shape: f32, billow: f32, mip: f32) -> f32 {
+/// Standard normal variable of a noise value v in [0, 1] through its measured distribution at a
+/// shape-noise mip (`cloud_noise_quantiles.wesl`): channel 0 the shape noise, 1 the billow noise.
+fn cloud_noise_gaussian(v: f32, mip: f32, channel: u32) -> f32 {
     let size = vec2<f32>(textureDimensions(cloud_profile_lut));
-    let level = clamp(mip, 0.0, CLOUD_NOISE_QUANTILE_ROWS - 1.0);
-    let stat_row = i32(CLOUD_PROFILE_TYPE_ROWS + round(level));
-    let shape_moments = textureLoad(cloud_profile_lut, vec2(0, stat_row), 0).ba;
-    let billow_moments = textureLoad(cloud_profile_lut, vec2(1, stat_row), 0).ba;
-    let f = (shape - shape_moments.x) / max(shape_moments.y, 1e-3)
-        + cloud_fluctuation_weight() * (billow - billow_moments.x) / max(billow_moments.y, 1e-3);
-    let u = saturate((f - CLOUD_FLUCT_MIN) / (CLOUD_FLUCT_MAX - CLOUD_FLUCT_MIN));
-    let row = CLOUD_PROFILE_TYPE_ROWS + level;
-    return textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
-        vec2((u * (size.x - 1.0) + 0.5) / size.x, (row + 0.5) / size.y), 0.0).g;
+    let row = CLOUD_PROFILE_TYPE_ROWS + clamp(mip, 0.0, CLOUD_NOISE_QUANTILE_ROWS - 1.0);
+    let f = textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
+        vec2((saturate(v) * (size.x - 1.0) + 0.5) / size.x, (row + 0.5) / size.y), 0.0);
+    return normal_quantile(select(f.r, f.g, channel == 1u));
 }
 
 /// Standard normal quantile, Abramowitz & Stegun 26.2.23 (|error| < 4.5e-4).
@@ -279,61 +261,48 @@ fn normal_quantile(p: f32) -> f32 {
     return select(x, -x, lower);
 }
 
-/// Mills ratio R(x) = Q(x) / phi(x) of the standard normal (Q the upper tail), from Abramowitz &
-/// Stegun 7.1.26 erfc (|error| < 1.5e-7) without its exponential, so it stays finite in the tail.
-fn mills_ratio(x: f32) -> f32 {
-    let z = abs(x) * 0.70710678;
-    let k = 1.0 / (1.0 + 0.3275911 * z);
-    let poly = k * (0.254829592 + k * (-0.284496736 + k * (1.421413741 + k * (-1.453152027 + k * 1.061405429))));
-    let r_abs = 0.5 * poly * 2.50662827; // R(|x|)
-    if (x >= 0.0) {
-        return r_abs;
-    }
-    // Q(x) = 1 - Q(|x|) = 1 - R(|x|) phi(x), phi symmetric.
-    let phi = 0.39894228 * exp(-0.5 * x * x);
-    return (1.0 - r_abs * phi) / phi;
+/// Weight of the thermal bubbles (billow noise) against the shape noise: Kolmogorov scaling,
+/// the fluctuation amplitude of a -5/3 spectrum grows as scale^(1/3), between the billow tile
+/// (detail_noise_scale) and the shape-noise tile (noise_scale / 8). Must match `fbm_noise.rs`
+/// (the scheme table).
+fn cloud_bubble_weight() -> f32 {
+    return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.noise_scale * 0.125, 1.0), 1.0 / 3.0);
 }
 
-/// Statistical cloud scheme with a Gaussian fluctuation (Sommeria & Deardorff 1977). The moisture
-/// fluctuation is multi-scale, the shape noise plus the billow noise at their Kolmogorov weight
-/// (`cloud_fluctuation_cdf`), mapped to a normal variable g = Phi^-1(F(f)) through its measured
-/// distribution. A point is cloud where g exceeds g_t = Phi^-1(1 - p) (probability p, the cloud
-/// fraction); its liquid water is proportional to the excess g - g_t, whose mean over the cloud is
-/// the inverse Mills ratio minus g_t. Returns x = excess / mean (mean 1 over the cloud; 0 outside).
-/// Thresholding the smooth shape noise alone kept only its peaks at cumulus cloud fractions
-/// (10-30 %): convex domes the later detail erosion only nibbled; the billows in the threshold
-/// give the edges their structure, and the tail excess is skewed (a diluted margin around dense
-/// cores, as measured in cumulus).
-fn cloud_gaussian_excess(shape: f32, billow: f32, p: f32, mip: f32) -> f32 {
-    let g = normal_quantile(cloud_fluctuation_cdf(shape, billow, mip));
-    let gt = normal_quantile(1.0 - p);
-    let mean_excess = max(1.0 / mills_ratio(gt) - gt, 1e-4);
-    return max(g - gt, 0.0) / mean_excess;
+/// The cloud-scheme row at cloud fraction p (texel i at p = (i / (N - 1))^2): (threshold t,
+/// mean cloudy excess, liquid-water magnitude), `cloud_noise_quantiles.wesl` scheme.
+fn cloud_scheme(p: f32) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(cloud_profile_lut));
+    let u = (sqrt(saturate(p)) * (size.x - 1.0) + 0.5) / size.x;
+    return textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
+        vec2(u, (CLOUD_SCHEME_ROW + 0.5) / size.y), 0.0).rgb;
 }
 
-/// 1 / E[1 - exp(-x)] over the cloud for the normalized excess x of `cloud_gaussian_excess` at
-/// cloud fraction p: the up-res takes 1 - exp(-x) (in [0, 1)), and this restores the mean liquid
-/// water. For a truncated normal, E[exp(-a (g - t))] = R(t + a) / R(t), a = 1 / mean excess.
-fn cloud_gaussian_magnitude(p: f32) -> f32 {
-    let gt = normal_quantile(1.0 - p);
-    let a = 1.0 / max(1.0 / mills_ratio(gt) - gt, 1e-4);
-    return 1.0 / max(1.0 - mills_ratio(gt + a) / mills_ratio(gt), 1e-3);
+/// Statistical cloud scheme (Sommeria & Deardorff 1977) with a skewed, two-component moisture
+/// distribution, the form cumulus need (Larson, Golaz & Cotton 2002: cumulus PDFs are highly
+/// skewed, the cloud a long tail; a single Gaussian fails them), realized as a union of thermals:
+/// a cumulus is a cluster of rising bubbles (Scorer & Ludlam 1953; Blyth et al. 2005), so
+/// small-scale structure adds turrets to a cloud and never carves into it:
+///     Y = g + r max(z, 0),
+/// g the Gaussianized shape noise (the coherent plumes), z the Gaussianized billow noise
+/// (cellular: bubbles), r its Kolmogorov weight (`cloud_bubble_weight`). Half the air carries a
+/// bubble, half none: a positively skewed mixture of N(0, 1) and N(0, 1) + r |z|. Cloud where
+/// Y > t, exceeded with probability p (the cloud fraction; tabulated); liquid water proportional
+/// to Y - t. A symmetric small-scale term (thresholding g + r z, a single Gaussian) left holes
+/// through 13-29 % of plume cores at cumulus fractions; the analytic double Gaussian with
+/// constant in-plume width (Larson et al. ADG1) has solid cores but leaves the plume outlines
+/// smooth. Returns x = (Y - t) / its mean over the cloud (0 outside).
+fn cloud_thermal_excess(shape: f32, billow: f32, p: f32, mip: f32) -> f32 {
+    let g = cloud_noise_gaussian(shape, mip, 0u);
+    let z = cloud_noise_gaussian(billow, mip, 1u);
+    let scheme = cloud_scheme(p);
+    return max(g + cloud_bubble_weight() * max(z, 0.0) - scheme.x, 0.0) / max(scheme.y, 1e-4);
 }
 
-/// Erosion threshold for a dimensional profile p at a shape-noise mip: with the lookups, the noise
-/// quantile of that mip (the last rows of the profile texture, measured from the noise texture),
-/// so the noise exceeds it with probability p at every level of detail and p is the cloud
-/// fraction (a threshold from mip 0 let most of the smoothed coarse mips through, and the light
-/// taps saw a continuous deck); 1 - p with the analytic envelope (Nubis).
-fn cloud_erosion_threshold(p: f32, mip: f32) -> f32 {
-    if (cloud_layer.profile_mode != 0u) {
-        return 1.0 - p;
-    }
-    let n = vec2<f32>(textureDimensions(cloud_profile_lut));
-    let u = ((1.0 - saturate(p)) * (n.x - 1.0) + 0.5) / n.x;
-    let row = CLOUD_PROFILE_TYPE_ROWS + clamp(mip, 0.0, CLOUD_NOISE_QUANTILE_ROWS - 1.0);
-    let v = (row + 0.5) / n.y;
-    return textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(u, v), 0.0).r;
+/// 1 / E[1 - exp(-x)] over the cloud for x of `cloud_thermal_excess` at cloud fraction p: the
+/// up-res takes 1 - exp(-x) (in [0, 1)), and this restores the mean liquid water.
+fn cloud_thermal_magnitude(p: f32) -> f32 {
+    return cloud_scheme(p).z;
 }
 
 /// Coarse density context: weather + dimensional profile (Nubis 2022 vertical_profile *
@@ -356,7 +325,7 @@ fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
     let profile = cloud_vertical_profile(h, coverage, cloud_type);
     // Lookups: the eroded profile reaches 1 (times the Gaussian scheme's magnitude) wherever the
     // noise passes the threshold.
-    let bound = select(0.0, select(profile.x, cloud_gaussian_magnitude(profile.x),
+    let bound = select(0.0, select(profile.x, cloud_thermal_magnitude(profile.x),
         cloud_layer.profile_mode == 0u), profile.x > 0.0);
     // Return bound, density_scale, h, liquid water (sample_pos reconstructed by callers).
     return vec4(bound, density_scale, h, profile.y);
@@ -408,14 +377,16 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     // Large-scale shape from the 2022 noise (low-frequency Perlin-Worley eroded by Worley fBm,
     // HZD15: fbm = 0.625 lo + 0.25 med + 0.125 hi, remap(pw, fbm - 1, 1, 0, 1)), applied as the
     // 2022 sky density: saturate(noise - threshold), threshold = 1 - dimensional_profile in
-    // Nubis, the noise quantile with the physical lookups (`cloud_erosion_threshold`).
+    // Nubis; with the physical lookups it places the coherent plumes (`cloud_thermal_excess`).
     let pw = sample_shape_noise(sample_pos, h, mip);
     let wfbm = pw.y * 0.625 + pw.z * 0.25 + pw.w * 0.125;
     let shape_noise = saturate(remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0));
-    // Physical lookups: the Gaussian statistical cloud scheme (`cloud_gaussian_excess`), its
-    // normalized excess compressed to [0, 1) for the up-res, the mean restored by `magnitude`.
+    // Physical lookups: the thermal (bubble-union) cloud scheme (`cloud_thermal_excess`), its
+    // normalized excess compressed to [0, 1) for the up-res, the mean restored by `magnitude`;
+    // the excess grows from a cloud's edge toward its core, so the up-res erosion below works on
+    // the edges.
     // Nubis and the envelopes: Nubis's plain excess over 1 - profile.
-    // Detail noise (also the billows of the physical fluctuation). Detail LOD from the sample
+    // Detail noise (also the thermal bubbles of the physical scheme). Detail LOD from the sample
     // footprint (anti-aliasing and cache): `mip` is log2(1 + d / 4 km) (shape noise); a half-res
     // pixel spans ~2.2 mrad, and a detail texel is detail_noise_scale / 128, so the footprint LOD
     // is mip + log2(4000 m * 2.2e-3 / texel).
@@ -423,14 +394,14 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     var profile: f32;
     var magnitude = 1.0;
     if (cloud_layer.profile_mode == 0u) {
-        let x = cloud_gaussian_excess(shape_noise, n.b, base_profile, mip);
+        let x = cloud_thermal_excess(shape_noise, n.b, base_profile, mip);
         if (x <= 0.0) {
             return 0.0;
         }
         profile = 1.0 - exp(-x);
-        magnitude = cloud_gaussian_magnitude(base_profile);
+        magnitude = cloud_thermal_magnitude(base_profile);
     } else {
-        profile = saturate(shape_noise - cloud_erosion_threshold(base_profile, mip));
+        profile = saturate(shape_noise - (1.0 - base_profile));
     }
 
     // Nubis Cubed (2023) up-res of that profile (Guerrilla's VoxelCloudSampler,
