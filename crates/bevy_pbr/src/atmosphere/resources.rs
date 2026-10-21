@@ -2512,6 +2512,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_NO_CLOUD_MOTION`: reproject the cloud history without the wind displacement.
 /// - `ATM_DBG_NO_THIN_SHADOW`: no thin-layer (cirrus) shadow in the cloud shadow map's alpha.
 /// - `ATM_DBG_ESC_FALLBACK`: the out-of-field escape/column estimate everywhere (validation).
+/// - `ATM_DBG_ESC_FIELD_ONLY`: the cloud field's escape probability only (no local estimate).
+/// - `ATM_DBG_ESC_ZERO`: zero escape probability (the infinitely thick multiple-scattering limit).
 /// - `ATM_DBG_NO_COARSE`: fine samples everywhere, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
 /// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.

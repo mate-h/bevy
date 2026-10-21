@@ -233,6 +233,62 @@ fn cloud_vertical_profile(h: f32, coverage: f32, cloud_type: f32) -> vec2<f32> {
     return vec2(saturate(lut.r * lut.g * coverage), lut.b / max(cloud_layer.liquid_water, 1e-9));
 }
 
+/// Forward distribution F(n) of the shape noise at a mip (the G channel of the quantile rows).
+fn cloud_noise_cdf(n: f32, mip: f32) -> f32 {
+    let size = vec2<f32>(textureDimensions(cloud_profile_lut));
+    let u = (saturate(n) * (size.x - 1.0) + 0.5) / size.x;
+    let row = CLOUD_PROFILE_TYPE_ROWS + clamp(mip, 0.0, CLOUD_NOISE_QUANTILE_ROWS - 1.0);
+    return textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(u, (row + 0.5) / size.y), 0.0).g;
+}
+
+/// Standard normal quantile, Abramowitz & Stegun 26.2.23 (|error| < 4.5e-4).
+fn normal_quantile(p: f32) -> f32 {
+    let q = clamp(p, 1e-6, 1.0 - 1e-6);
+    let lower = q < 0.5;
+    let t = sqrt(-2.0 * log(select(1.0 - q, q, lower)));
+    let x = t - (2.515517 + t * (0.802853 + t * 0.010328))
+        / (1.0 + t * (1.432788 + t * (0.189269 + t * 0.001308)));
+    return select(x, -x, lower);
+}
+
+/// Mills ratio R(x) = Q(x) / phi(x) of the standard normal (Q the upper tail), from Abramowitz &
+/// Stegun 7.1.26 erfc (|error| < 1.5e-7) without its exponential, so it stays finite in the tail.
+fn mills_ratio(x: f32) -> f32 {
+    let z = abs(x) * 0.70710678;
+    let k = 1.0 / (1.0 + 0.3275911 * z);
+    let poly = k * (0.254829592 + k * (-0.284496736 + k * (1.421413741 + k * (-1.453152027 + k * 1.061405429))));
+    let r_abs = 0.5 * poly * 2.50662827; // R(|x|)
+    if (x >= 0.0) {
+        return r_abs;
+    }
+    // Q(x) = 1 - Q(|x|) = 1 - R(|x|) phi(x), phi symmetric.
+    let phi = 0.39894228 * exp(-0.5 * x * x);
+    return (1.0 - r_abs * phi) / phi;
+}
+
+/// Statistical cloud scheme with a Gaussian fluctuation (Sommeria & Deardorff 1977), on the shape
+/// noise mapped to a normal variable g = Phi^-1(F(noise)) through its measured distribution. A point
+/// is cloud where g exceeds g_t = Phi^-1(1 - p) (probability p, the cloud fraction); its liquid
+/// water is proportional to the excess g - g_t, whose mean over the cloud is the inverse Mills ratio
+/// minus g_t. Returns x = excess / mean (mean 1 over the cloud; 0 outside): the tail excess is
+/// skewed, a broad diluted margin around dense cores, as measured in cumulus (entrainment dilutes the
+/// edges), where a linear excess of the noise made smooth domes.
+fn cloud_gaussian_excess(noise: f32, p: f32, mip: f32) -> f32 {
+    let g = normal_quantile(cloud_noise_cdf(noise, mip));
+    let gt = normal_quantile(1.0 - p);
+    let mean_excess = max(1.0 / mills_ratio(gt) - gt, 1e-4);
+    return max(g - gt, 0.0) / mean_excess;
+}
+
+/// 1 / E[1 - exp(-x)] over the cloud for the normalized excess x of `cloud_gaussian_excess` at
+/// cloud fraction p: the up-res takes 1 - exp(-x) (in [0, 1)), and this restores the mean liquid
+/// water. For a truncated normal, E[exp(-a (g - t))] = R(t + a) / R(t), a = 1 / mean excess.
+fn cloud_gaussian_magnitude(p: f32) -> f32 {
+    let gt = normal_quantile(1.0 - p);
+    let a = 1.0 / max(1.0 / mills_ratio(gt) - gt, 1e-4);
+    return 1.0 / max(1.0 - mills_ratio(gt + a) / mills_ratio(gt), 1e-3);
+}
+
 /// Erosion threshold for a dimensional profile p at a shape-noise mip: with the lookups, the noise
 /// quantile of that mip (the last rows of the profile texture, measured from the noise texture),
 /// so the noise exceeds it with probability p at every level of detail and p is the cloud
@@ -267,8 +323,10 @@ fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
     let cloud_type = clamp(weather.g, 0.0, 1.0);
     let density_scale = pow(clamp(weather.b, 0.0, 1.0), 4.0);
     let profile = cloud_vertical_profile(h, coverage, cloud_type);
-    // Lookups: the renormalized excess reaches 1 wherever the noise passes the threshold.
-    let bound = select(0.0, select(profile.x, 1.0, cloud_layer.profile_mode == 0u), profile.x > 0.0);
+    // Lookups: the eroded profile reaches 1 (times the Gaussian scheme's magnitude) wherever the
+    // noise passes the threshold.
+    let bound = select(0.0, select(profile.x, cloud_gaussian_magnitude(profile.x),
+        cloud_layer.profile_mode == 0u), profile.x > 0.0);
     // Return bound, density_scale, h, liquid water (sample_pos reconstructed by callers).
     return vec4(bound, density_scale, h, profile.y);
 }
@@ -323,13 +381,21 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     let pw = sample_shape_noise(sample_pos, h, mip);
     let wfbm = pw.y * 0.625 + pw.z * 0.25 + pw.w * 0.125;
     let shape_noise = saturate(remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0));
-    let threshold = cloud_erosion_threshold(base_profile, mip);
-    // Lookups: the excess over the threshold, renormalized (Nubis value erosion, (v - e) / (1 - e)),
-    // so a cloudy point spans the full range and the liquid-water channel sets its magnitude;
-    // the analytic envelope keeps Nubis's plain excess.
-    let excess = shape_noise - threshold;
-    let profile = saturate(select(excess, excess / max(1.0 - threshold, 1e-4),
-        cloud_layer.profile_mode == 0u));
+    // Physical lookups: the Gaussian statistical cloud scheme (`cloud_gaussian_excess`), its
+    // normalized excess compressed to [0, 1) for the up-res, the mean restored by `magnitude`.
+    // Nubis and the envelopes: Nubis's plain excess over 1 - profile.
+    var profile: f32;
+    var magnitude = 1.0;
+    if (cloud_layer.profile_mode == 0u) {
+        let x = cloud_gaussian_excess(shape_noise, base_profile, mip);
+        if (x <= 0.0) {
+            return 0.0;
+        }
+        profile = 1.0 - exp(-x);
+        magnitude = cloud_gaussian_magnitude(base_profile);
+    } else {
+        profile = saturate(shape_noise - cloud_erosion_threshold(base_profile, mip));
+    }
 
     // Nubis Cubed (2023) up-res of that profile (Guerrilla's VoxelCloudSampler,
     // GetUprezzedVoxelCloudDensity): wispy = lerp(R, G, profile), billowy = lerp(B, A,
@@ -359,7 +425,7 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     dens *= powered_scale;
     dens = pow(dens, mix(0.3, 0.6, max(1e-4, powered_scale)));
     // In-cloud liquid water with height (peak 1): the coarse bound carries the same factor.
-    return near_camera_reshape(dens, mip) * vertical.y;
+    return near_camera_reshape(dens, mip) * vertical.y * magnitude;
 }
 
 /// Nubis Cubed near-camera density reshape (within 150 m of the camera, from the shape LOD

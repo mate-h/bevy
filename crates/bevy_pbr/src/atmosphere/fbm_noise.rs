@@ -314,7 +314,7 @@ pub fn init_fbm_noise_texture(
         .map(|i| i as usize % CLOUD_PROFILE_HEIGHT_RES)
         .flat_map(|i| {
             let q = i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32;
-            [q, 0.0, 0.0, 1.0].map(f32_to_f16)
+            [q, q, 0.0, 1.0].map(f32_to_f16)
         })
         .flat_map(u16::to_le_bytes)
         .collect();

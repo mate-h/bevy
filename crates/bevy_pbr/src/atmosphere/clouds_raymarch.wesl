@@ -674,6 +674,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let sigma_s_unit = get_cloud_scattering_coeff();
         let sigma_t_unit = sigma_s_unit + get_cloud_absorption_coeff();
         var transmittance = 1.0;
+        // Optical depth along the view ray since it entered the current cloud (reset on empty
+        // samples): the view-side half of the local escape estimate below.
+        var view_od_in_cloud = 0.0;
         var depth_weight_sum = 0.0;
         var depth_sum = 0.0;
         var luminance = vec3(0.0);
@@ -728,6 +731,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             if (fine_mode) {
                 density = get_cloud_medium_density_lod(r_p, p, mip);
                 if (density <= 0.0) {
+                    view_od_in_cloud = 0.0;
                     fine_empty += 1u;
                     var to_coarse = fine_empty >= CLOUD_FINE_EMPTY_TO_COARSE;
                     @if(ATM_DBG_NO_COARSE) { to_coarse = false; }
@@ -851,7 +855,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     // P_esc of a finite cloud is positive; the escape volume stores it in
                     // RGBA16F, whose smallest normal (6.1e-5) is the floor kept here, so a thick
                     // conservative cloud (zero absorption) cannot make 1 - f_ms zero (audit 22).
-                    let f_ms = albedo * (1.0 - max(esc_col.x, 6.1035e-5));
+                    // Escape probability: the cloud field's (375 m cells; validated for clouds
+                    // larger than that) or, where smaller, a local estimate from the fine density
+                    // along the two directions the march already knows, toward the sun and back
+                    // along the view ray: P_esc ~ mean of exp(-(1 - g) tau) (similarity-reduced,
+                    // as the field's). Small cumuli are much smaller than a field cell, which
+                    // diluted their extinction there: P_esc ~ 1, no multiple scattering, and
+                    // their sunlit sides rendered gray although tau ~ 10-20 across them.
+                    let tau_view = view_od_in_cloud + 0.5 * sigma_t * dt;
+                    let p_esc_local = 0.5 * (exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun)
+                        + exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_view));
+                    var p_esc = min(esc_col.x, p_esc_local);
+                    @if(ATM_DBG_ESC_ZERO) { p_esc = 0.0; }
+                    @if(ATM_DBG_ESC_FIELD_ONLY) { p_esc = esc_col.x; }
+                    let f_ms = albedo * (1.0 - max(p_esc, 6.1035e-5));
                     let ms_vol = exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun) * f_ms / (1.0 - f_ms);
                     direct += ms_vol * (0.25 / PI);
                 }
@@ -869,6 +886,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             depth_sum += w * t;
             depth_weight_sum += w;
             transmittance *= step_t;
+            view_od_in_cloud += sigma_t * dt;
             t += dt;
         }
 

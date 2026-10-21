@@ -3,7 +3,8 @@
 // cloud profile texture: texel i holds the value the noise exceeds with probability 1 - i / 63.
 // The erosion threshold at a dimensional profile p is then the quantile at 1 - p of the sampled
 // mip, so p is the cloud fraction at every level of detail (statistical cloud scheme, Sommeria &
-// Deardorff 1977). Measured over the whole tile.
+// Deardorff 1977). G holds the forward distribution F(n) at noise value n = i / (width - 1), to
+// map the noise to a Gaussian variable. Measured over the whole tile.
 
 @group(0) @binding(0) var noise: texture_3d<f32>;
 @group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>, 2048>;
@@ -62,6 +63,15 @@ fn quantiles(@builtin(local_invocation_index) m: u32) {
         let in_bin = f32(max(atomicLoad(&bins[base + b]), 1u));
         let frac = saturate((rank - f32(cumulative)) / in_bin);
         let value = (f32(b) + frac) / f32(BINS);
-        textureStore(profile_lut, vec2<i32>(i32(i), i32(FIRST_QUANTILE_ROW + m)), vec4(value, 0.0, 0.0, 1.0));
+        // G: the forward distribution F(n) at noise value n = i / (width - 1) (bins below n plus
+        // the covered part of n's bin), for the Gaussian mapping of the statistical cloud scheme.
+        let n = f32(i) / f32(quantiles - 1u) * f32(BINS);
+        let nb = min(u32(n), BINS - 1u);
+        var below = 0u;
+        for (var k = 0u; k < nb; k++) {
+            below += atomicLoad(&bins[base + k]);
+        }
+        let cdf = (f32(below) + (n - f32(nb)) * f32(atomicLoad(&bins[base + nb]))) / f32(max(total, 1u));
+        textureStore(profile_lut, vec2<i32>(i32(i), i32(FIRST_QUANTILE_ROW + m)), vec4(value, saturate(cdf), 0.0, 1.0));
     }
 }
