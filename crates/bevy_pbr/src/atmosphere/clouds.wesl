@@ -45,6 +45,9 @@ struct GpuCloudLayers {
 @group(0) @binding(22) var noise_sampler_3d: sampler;
 @group(0) @binding(24) var perlin_worley_noise_3d: texture_3d<f32>;
 @group(0) @binding(33) var detail_worley_noise_3d: texture_3d<f32>;
+// Vertical profile lookups (`cloud_profile.rs`): R presence bottom, G presence top, B in-cloud
+// liquid water; x = height in the column (texel i at i / 63), y = cloud type (texel j at j / 31).
+@group(0) @binding(34) var cloud_profile_lut: texture_2d<f32>;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let l2 = dot(v, v);
@@ -172,33 +175,35 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     return mix(c, d, t);
 }
 
-/// Dimensional profile (Nubis Evolved 2022 sky model: vertical_profile * coverage) with a
-/// parameterized vertical envelope, h' = height / cloud-top height of the column:
-///   vertical_profile = norm * h'^a * (1 - h')^b,  norm = 1 / max (peak 1 at h' = a / (a + b)).
-/// a = profile_bottom_exponent, b = profile_top_exponent (`VolumetricCloudLayer`):
-///  - physical default a = b = 1: adiabatic liquid water grows linearly above the flat
-///    condensation base, and entrainment lowers the adiabatic fraction ~linearly toward the top
-///    (cloud-physics texts, e.g. Rogers & Yau, A Short Course in Cloud Physics, ch. 2-3);
-///  - Nubis Evolved envelope model (2022 p97): a = 2, b = 1.5.
+/// Vertical profile of a column: (dimensional profile, in-cloud liquid water).
+/// - Dimensional profile (Nubis Evolved 2022 sky model) = presence * coverage, with presence
+///   = bottom(h', type) * top(h', type), Nubis's two lookups, by h' = height / cloud-top height
+///   of the column and the cloud type (0 stratus, 0.5 stratocumulus, 1 cumulus). It drives the
+///   erosion: the noise is the small-scale fluctuation and 1 - profile the saturation threshold,
+///   a statistical cloud scheme (Sommeria & Deardorff 1977), so presence is the cloud fraction.
+/// - Liquid water (peak 1) scales the eroded density with height.
+/// Top and bottom type are one weather channel until the weather map carries both.
+/// `cloud_profile.rs` fills the lookups: by default the analytic envelope h'^a (1 - h')^b of
+/// `VolumetricCloudLayer` with uniform liquid water; a `CloudProfiles` image replaces it with
+/// profiles baked offline (surface-layer parcel ensemble).
 /// The column's cloud top rises with coverage from profile_top_min to the layer top (Nubis:
 /// cloud height follows coverage), so cells are domed rather than extruded.
-fn cloud_dimensional_profile(h: f32, coverage: f32, cloud_type: f32) -> f32 {
-    let a = cloud_layer.profile_bottom_exponent;
-    let b = cloud_layer.profile_top_exponent;
+fn cloud_vertical_profile(h: f32, coverage: f32, cloud_type: f32) -> vec2<f32> {
     let top = mix(cloud_layer.profile_top_min, 1.0, coverage);
     let x = h / max(top, 1e-3);
     if (x >= 1.0 || coverage <= 0.0) {
-        return 0.0;
+        return vec2(0.0);
     }
-    let peak = a / max(a + b, 1e-6);
-    let max_v = max(pow(peak, a) * pow(1.0 - peak, b), 1e-6);
-    let vertical_profile = pow(x, a) * pow(1.0 - x, b) / max_v;
-    return saturate(vertical_profile * coverage);
+    // Texel i holds x = i / (N - 1): sample the ends at texel centres.
+    let n = vec2<f32>(textureDimensions(cloud_profile_lut));
+    let uv = (vec2(x, saturate(cloud_type)) * (n - 1.0) + 0.5) / n;
+    let lut = textureSampleLevel(cloud_profile_lut, noise_sampler_3d, uv, 0.0);
+    return vec2(saturate(lut.r * lut.g * coverage), lut.b);
 }
 
 /// Coarse density context: weather + dimensional profile (Nubis 2022 vertical_profile *
 /// coverage) at the same sample position as the fine density (sample_cumulus_shape_lod).
-/// Returns (dimensional_profile, density_scale^4, h, cloud_type).
+/// Returns (dimensional_profile, density_scale^4, h, liquid water).
 fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
     let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
     let height_in_layer = r - cloud_layer.cloud_layer_start;
@@ -211,9 +216,9 @@ fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
     var coverage = clamp(weather.r, 0.0, 1.0);
     let cloud_type = clamp(weather.g, 0.0, 1.0);
     let density_scale = pow(clamp(weather.b, 0.0, 1.0), 4.0);
-    let dimensional_profile = cloud_dimensional_profile(h, coverage, cloud_type);
-    // Return profile, density_scale, h, cloud_type (sample_pos reconstructed by callers).
-    return vec4(dimensional_profile, density_scale, h, cloud_type);
+    let profile = cloud_vertical_profile(h, coverage, cloud_type);
+    // Return profile, density_scale, h, liquid water (sample_pos reconstructed by callers).
+    return vec4(profile.x, density_scale, h, profile.y);
 }
 
 /// Sample position in the moving cloud field (all density inputs: weather, shape, detail):
@@ -237,7 +242,7 @@ fn cloud_sample_pos(world_pos: vec3<f32>, r: f32) -> vec3<f32> {
 fn sample_cumulus_shape_coarse(r: f32, world_pos: vec3<f32>) -> f32 {
     let ctx = cloud_density_context(r, world_pos);
     let x = saturate(ctx.x * ctx.y);
-    return select(0.0, pow(x, mix(0.3, 0.6, max(1e-4, ctx.y))), x > 0.0);
+    return select(0.0, pow(x, mix(0.3, 0.6, max(1e-4, ctx.y))), x > 0.0) * ctx.w;
 }
 
 /// Fine density with mip LOD (design.md §1.3 / §1.4).
@@ -253,7 +258,8 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     let detail_type = clamp(weather.g, 0.0, 1.0);
     let density_scale = clamp(weather.b, 0.0, 1.0);
     // Nubis Evolved (2022) sky model: dimensional_profile = vertical_profile * coverage.
-    let base_profile = cloud_dimensional_profile(h, coverage, detail_type);
+    let vertical = cloud_vertical_profile(h, coverage, detail_type);
+    let base_profile = vertical.x;
     if (base_profile <= 0.0) {
         return 0.0;
     }
@@ -293,7 +299,8 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     let powered_scale = pow(density_scale, 4.0);
     dens *= powered_scale;
     dens = pow(dens, mix(0.3, 0.6, max(1e-4, powered_scale)));
-    return near_camera_reshape(dens, mip);
+    // In-cloud liquid water with height (peak 1): the coarse bound carries the same factor.
+    return near_camera_reshape(dens, mip) * vertical.y;
 }
 
 /// Nubis Cubed near-camera density reshape (within 150 m of the camera, from the shape LOD

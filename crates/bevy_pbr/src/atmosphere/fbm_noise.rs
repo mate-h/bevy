@@ -3,10 +3,11 @@
 //! This module generates a 3D texture filled with Fractional Brownian Motion (FBM) noise,
 //! which can be used for atmospheric effects like clouds, fog, and volumetric effects.
 
-use bevy_asset::load_embedded_asset;
+use bevy_asset::{load_embedded_asset, AssetId, Assets};
+use bevy_image::Image;
 use bevy_ecs::{
     resource::Resource,
-    system::{Res, ResMut},
+    system::{Local, Query, Res, ResMut},
     world::{FromWorld, World},
 };
 use bevy_math::UVec2;
@@ -15,8 +16,15 @@ use bevy_render::{
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
     settings::WgpuFeatures,
     texture::CachedTexture,
+    Extract,
 };
 use bevy_utils::default;
+use tracing::warn;
+
+use super::{
+    cloud_profile::{CloudProfileTables, CloudProfiles, CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_TYPE_RES},
+    VolumetricCloudLayer,
+};
 
 /// Storage format of the cirrus generating field: R16Float is a storage format only with the
 /// adapter-specific format features, not in WebGPU's guaranteed set; elsewhere the field falls
@@ -206,6 +214,8 @@ pub struct FbmNoiseTexture {
     pub cirrus: CachedTexture,
     /// Single-mip views of [`FbmNoiseTexture::cirrus`] for generation.
     pub cirrus_mips: Vec<TextureView>,
+    /// Vertical profile lookups (Rgba16Float, height x type; `cloud_profile.rs`).
+    pub profile: CachedTexture,
 }
 
 /// Size of the cirrus generating-field texture.
@@ -231,6 +241,7 @@ pub struct FbmNoiseParamsBuffer {
 /// so this `RenderStartup` system does not need to run after `init_gpu_resource::<TextureCache>`.
 pub fn init_fbm_noise_texture(
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
     formats: Res<CloudNoiseFormats>,
     mut commands: bevy_ecs::system::Commands,
 ) {
@@ -280,6 +291,23 @@ pub fn init_fbm_noise_texture(
         })
         .collect();
 
+    let profile_texture = render_device.create_texture(&TextureDescriptor {
+        label: Some("cloud_profile_lut_texture"),
+        size: CLOUD_PROFILE_EXTENT,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_cloud_profile(
+        &render_queue,
+        &profile_texture,
+        &CloudProfileTables::analytic(1.0, 1.0).to_rgba16f_bytes(),
+    );
+    let profile_view = profile_texture.create_view(&TextureViewDescriptor::default());
+
     commands.insert_resource(FbmNoiseTexture {
         texture: CachedTexture {
             texture,
@@ -291,7 +319,98 @@ pub fn init_fbm_noise_texture(
             default_view: cirrus_view,
         },
         cirrus_mips,
+        profile: CachedTexture {
+            texture: profile_texture,
+            default_view: profile_view,
+        },
     });
+}
+
+const CLOUD_PROFILE_EXTENT: Extent3d = Extent3d {
+    width: CLOUD_PROFILE_HEIGHT_RES as u32,
+    height: CLOUD_PROFILE_TYPE_RES as u32,
+    depth_or_array_layers: 1,
+};
+
+fn write_cloud_profile(queue: &RenderQueue, texture: &Texture, rgba16f: &[u8]) {
+    queue.write_texture(
+        texture.as_image_copy(),
+        rgba16f,
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8 * CLOUD_PROFILE_HEIGHT_RES as u32),
+            rows_per_image: None,
+        },
+        CLOUD_PROFILE_EXTENT,
+    );
+}
+
+/// Profile lookup texels (Rgba16Float) chosen in the extract schedule, uploaded by
+/// [`upload_cloud_profiles`].
+#[derive(Resource, Default)]
+pub struct PendingCloudProfiles(pub(crate) Option<Vec<u8>>);
+
+/// What the lookup holds: a loaded [`CloudProfiles`] image, or the layer's analytic envelope.
+#[derive(PartialEq)]
+pub(crate) enum ProfileSource {
+    Image(AssetId<Image>),
+    Analytic(u32, u32),
+}
+
+/// Picks the lookups of the first cloud layer and queues an upload when they change: its
+/// [`CloudProfiles`] image once loaded (Rgba16Float, 64 x 32), else the analytic envelope of
+/// its profile exponents. One set for all atmospheres, like the weather map.
+pub(crate) fn extract_cloud_profiles(
+    layers: Extract<Query<(&VolumetricCloudLayer, Option<&CloudProfiles>)>>,
+    images: Extract<Res<Assets<Image>>>,
+    mut last: Local<Option<ProfileSource>>,
+    mut pending: ResMut<PendingCloudProfiles>,
+) {
+    let Some((layer, profiles)) = layers.iter().next() else {
+        return;
+    };
+    let image = profiles.and_then(|p| Some((p.0.id(), images.get(&p.0)?)));
+    let expected = (
+        TextureFormat::Rgba16Float,
+        CLOUD_PROFILE_EXTENT.width,
+        CLOUD_PROFILE_EXTENT.height,
+    );
+    let usable = image.filter(|(_, image)| {
+        let d = &image.texture_descriptor;
+        (d.format, d.size.width, d.size.height) == expected && image.data.is_some()
+    });
+    let source = match usable {
+        Some((id, _)) => ProfileSource::Image(id),
+        None => ProfileSource::Analytic(
+            layer.profile_bottom_exponent.to_bits(),
+            layer.profile_top_exponent.to_bits(),
+        ),
+    };
+    if last.as_ref() == Some(&source) {
+        return;
+    }
+    if let (Some((_, image)), None) = (image, usable) {
+        let d = &image.texture_descriptor;
+        warn!(
+            "CloudProfiles image is {:?} {}x{}, expected Rgba16Float {}x{}: using the analytic profile",
+            d.format, d.size.width, d.size.height, expected.1, expected.2
+        );
+    }
+    pending.0 = Some(match usable {
+        Some((_, image)) => image.data.clone().unwrap_or_default(),
+        None => CloudProfileTables::for_layer(layer).to_rgba16f_bytes(),
+    });
+    *last = Some(source);
+}
+
+pub fn upload_cloud_profiles(
+    mut pending: ResMut<PendingCloudProfiles>,
+    texture: Option<Res<FbmNoiseTexture>>,
+    queue: Res<RenderQueue>,
+) {
+    if let (Some(texture), Some(texels)) = (texture, pending.0.take()) {
+        write_cloud_profile(&queue, &texture.profile.texture, &texels);
+    }
 }
 
 /// System to prepare the FBM noise bind group
@@ -371,9 +490,9 @@ pub fn generate_fbm_noise_once(
     bind_group: Option<Res<FbmNoiseBindGroup>>,
     texture: Res<FbmNoiseTexture>,
     params_buffer: Option<Res<FbmNoiseParamsBuffer>>,
-    layers: bevy_ecs::system::Query<&crate::GpuCloudLayers>,
-    mut last_life_t: bevy_ecs::system::Local<Option<f32>>,
-    mut cirrus_done: bevy_ecs::system::Local<bool>,
+    layers: Query<&crate::GpuCloudLayers>,
+    mut last_life_t: Local<Option<f32>>,
+    mut cirrus_done: Local<bool>,
     mut noise_generated: ResMut<NoiseGenerated>,
 ) {
     let life = layers

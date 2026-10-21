@@ -8,6 +8,7 @@
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`,
 //!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
+//!   `ATMOSPHERE_CLOUD_PROFILES` (vertical profiles baked from a parcel ensemble),
 //!   `ATMOSPHERE_LUT_MODE`.
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse).
@@ -41,7 +42,7 @@ use bevy::{
     },
     pbr::{
         AtmosphereMode, AtmosphereSettings, AtmosphereWind, CloudTimeScale, CloudWeather,
-        ThinCloudLayer, VolumetricCloudLayer,
+        CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
         DefaultOpaqueRendererMethod,
         VolumetricCloudSettings,
         ExtendedMaterial, MaterialExtension, ScreenSpaceReflections,
@@ -492,7 +493,7 @@ fn setup_camera_fog(
     });
 
     // Spawn earth atmosphere
-    commands.spawn((
+    let mut earth = commands.spawn((
         // Ground albedo 0.28 to match the cloud ground bounce (CLOUD_GROUND_ALBEDO) and the reference.
         Atmosphere {
             ground_albedo: Vec3::splat(0.28),
@@ -545,6 +546,11 @@ fn setup_camera_fog(
             _ => AtmosphereWind::fair_weather(),
         },
     ));
+    // `ATMOSPHERE_CLOUD_PROFILES`: cloud presence and liquid-water profiles baked offline from a
+    // surface-layer parcel ensemble (stratocumulus: DYCOMS-II RF01, cumulus: BOMEX).
+    if std::env::var("ATMOSPHERE_CLOUD_PROFILES").is_ok() {
+        earth.insert(CloudProfiles(asset_server.load("textures/cloud_profiles.ktx2")));
+    }
 
     let mut camera = commands.spawn_empty();
     if let Some(image) = offscreen {

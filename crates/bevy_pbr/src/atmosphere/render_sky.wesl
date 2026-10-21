@@ -22,12 +22,6 @@ enable dual_source_blending;
 @else
 @group(0) @binding(13) var depth_texture: texture_depth_2d;
 
-@if(NO_CUBE_ARRAY_TEXTURES_SUPPORT)
-@group(0) @binding(14) var point_shadow_textures: texture_depth_cube;
-@else
-@group(0) @binding(14) var point_shadow_textures: texture_depth_cube_array;
-@group(0) @binding(15) var point_shadow_textures_comparison_sampler: sampler_comparison;
-
 // Output of the low-res `clouds_raymarch` pass: rgb = pre-exposed cloud luminance, a = cloud
 // transmittance; and the transmittance-weighted cloud distance (m).
 @if(CLOUDS_ENABLED)

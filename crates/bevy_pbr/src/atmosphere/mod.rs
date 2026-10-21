@@ -39,6 +39,7 @@
 //!
 //! [Unreal Engine Implementation]: https://github.com/sebh/UnrealEngineSkyAtmosphere
 
+mod cloud_profile;
 mod environment;
 pub mod fbm_noise;
 mod debug_dump;
@@ -92,6 +93,7 @@ use fbm_noise::{
     generate_fbm_noise_once, init_fbm_noise_params_buffer, init_fbm_noise_texture,
     prepare_fbm_noise_bind_group, FbmNoiseBindGroupLayout, FbmNoisePipeline, NoiseGenerated,
 };
+pub use cloud_profile::CloudProfiles;
 use node::{atmosphere_luts, render_sky};
 use perlin_worley_noise::{
     generate_perlin_worley_noise_once, init_perlin_worley_noise_params_buffer,
@@ -211,6 +213,7 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<FbmNoiseBindGroupLayout>()
             .init_resource::<FbmNoisePipeline>()
             .init_resource::<NoiseGenerated>()
+            .init_resource::<fbm_noise::PendingCloudProfiles>()
             .init_resource::<PerlinWorleyNoiseBindGroupLayout>()
             .init_resource::<PerlinWorleyNoisePipeline>()
             .init_resource::<PerlinWorleyNoiseGenerated>()
@@ -224,7 +227,10 @@ impl Plugin for AtmospherePlugin {
             // Registered here, after the capability checks: it needs `NoiseGenerated`, which only
             // exists when the plugin loads (registered in `build`, a GPU without compute support
             // panicked on the missing resource instead of falling back).
-            .add_systems(ExtractSchedule, extract_cloud_weather_regen)
+            .add_systems(
+                ExtractSchedule,
+                (extract_cloud_weather_regen, fbm_noise::extract_cloud_profiles),
+            )
             .add_systems(
                 RenderStartup,
                 (
@@ -273,6 +279,7 @@ impl Plugin for AtmospherePlugin {
                         .in_set(RenderSystems::Render)
                         .after(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_buffers.in_set(RenderSystems::PrepareResources),
+                    fbm_noise::upload_cloud_profiles.in_set(RenderSystems::PrepareResources),
                 ),
             )
             .add_systems(
@@ -842,7 +849,8 @@ pub struct VolumetricCloudLayer {
     /// Vertical density envelope `h'^bottom * (1 - h')^top` (normalized to a peak of 1), with h'
     /// the height relative to the column's cloud top. The defaults (1, 1) are physical: adiabatic
     /// liquid water grows linearly above the flat base, and entrainment lowers it toward the
-    /// top. [`VolumetricCloudLayer::NUBIS_ENVELOPE`] gives Nubis's (2, 1.5).
+    /// top. [`VolumetricCloudLayer::NUBIS_ENVELOPE`] gives Nubis's (2, 1.5). A [`CloudProfiles`]
+    /// image on the same entity replaces the envelope with profiles baked offline.
     pub profile_bottom_exponent: f32,
     /// See [`VolumetricCloudLayer::profile_bottom_exponent`].
     pub profile_top_exponent: f32,

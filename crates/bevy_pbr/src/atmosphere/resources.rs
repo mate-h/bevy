@@ -77,6 +77,25 @@ fn shadow_map_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArr
     )
 }
 
+/// The directional half of [`shadow_map_layout_entries`]: `render_sky` reads no point-light
+/// shadows, and the slot keeps its passes within 16 sampled textures.
+fn directional_shadow_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<2> {
+    (
+        (
+            16,
+            #[cfg(any(
+                not(feature = "webgl"),
+                not(target_arch = "wasm32"),
+                feature = "webgpu"
+            ))]
+            texture_2d_array(TextureSampleType::Depth),
+            #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
+            texture_2d(TextureSampleType::Depth),
+        ),
+        (17, sampler(SamplerBindingType::Comparison)),
+    )
+}
+
 /// Cloud bind group layout entries (cloud layer uniform, noise textures, cloud shadow map, STBN).
 /// Sampled outputs of the `clouds_raymarch` pass, read by `render_sky` (26: luminance and
 /// transmittance, 27: transmittance-weighted cloud depth).
@@ -109,7 +128,7 @@ fn render_sky_composite_cloud_entries() -> impl IntoIndexedBindGroupLayoutEntryB
 
 /// Placed at 20..=25, 33 so they don't collide with the shadow map entries (14..=17)
 /// or the clouds_reconstruct history/storage bindings (28..=32).
-fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<7> {
+fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<8> {
     (
         (20, uniform_buffer::<GpuCloudLayers>(true)), // cloud layer parameters
         // 2D noise texture for cloud coverage / weather
@@ -138,6 +157,8 @@ fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<7>
             33,
             texture_3d(TextureSampleType::Float { filterable: true }),
         ),
+        // Vertical profile lookups, height x type (`cloud_profile.rs`).
+        (34, texture_2d(TextureSampleType::Float { filterable: true })),
     )
 }
 
@@ -325,6 +346,8 @@ impl AtmosphereBindGroupLayouts {
                         33,
                         texture_3d(TextureSampleType::Float { filterable: true }),
                     ),
+                    // Vertical profile lookups (`cloud_profile.rs`).
+                    (34, texture_2d(TextureSampleType::Float { filterable: true })),
                     // Cloud SDF seeds (`cloud_field.wesl` init entry point).
                     (
                         40,
@@ -705,7 +728,7 @@ pub struct CloudShadowTemporalState {
 
 impl FromWorld for RenderSkyBindGroupLayouts {
     fn from_world(world: &mut World) -> Self {
-        // Base render-sky entries (0..=13) + shadow map entries (14..=17).
+        // Base render-sky entries (0..=13) + directional shadow map entries (16, 17).
         let base_entries = |depth: BindGroupLayoutEntryBuilder| {
             DynamicBindGroupLayoutEntries::new_with_indices(
                 ShaderStages::FRAGMENT,
@@ -729,7 +752,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (13, depth),
                 ),
             )
-            .extend_with_indices(shadow_map_layout_entries())
+            .extend_with_indices(directional_shadow_layout_entries())
         };
 
         // Two variants:
@@ -745,8 +768,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
         );
         // Each pass binds only what it reads: WebGPU allows 16 sampled textures per shader stage,
         // and one layout for the prepass and the composite declared 20.
-        // - haze prepass: base (9 textures) + cloud inputs (5) + haze history (2) = 16
-        // - composite with half-res haze: base + cloud shadow map + clouds (2) + haze (2) = 14
+        // - haze prepass: base (8 textures) + cloud inputs (6) + haze history (2) = 16
+        // - composite with half-res haze: base + cloud shadow map + clouds (2) + haze (2) = 13
         // - MSAA composite (full-res march, no haze prepass): base + cloud inputs + clouds = 16
         let render_sky_clouds = BindGroupLayoutDescriptor::new(
             "render_sky_bind_group_layout_clouds",
@@ -2011,6 +2034,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     (24, &perlin_worley_noise_texture.texture.default_view),
                     (25, stbn_view.as_ref()),
                     (33, &detail_noise_texture.texture.default_view),
+                    (34, &fbm_noise_texture.profile.default_view),
                     (13, trace_storage),
                     (40, &textures.cloud_field_a.default_view),
                     (45, &textures.cloud_field_ext.default_view),
@@ -2095,9 +2119,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &atmosphere_sampler.0),
                 // view depth texture
                 (13, depth_view),
-                // shadow maps
-                (14, &shadow_bindings.point_light_depth_texture_view),
-                (15, &shadow_samplers.shadow_comparison_sampler),
+                // directional shadow maps
                 (16, &shadow_bindings.directional_light_depth_texture_view),
                 (17, &shadow_samplers.shadow_comparison_sampler),
             )),
@@ -2128,9 +2150,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &atmosphere_sampler.0),
                 // view depth texture
                 (13, depth_view),
-                // shadow maps
-                (14, &shadow_bindings.point_light_depth_texture_view),
-                (15, &shadow_samplers.shadow_comparison_sampler),
+                // directional shadow maps
                 (16, &shadow_bindings.directional_light_depth_texture_view),
                 (17, &shadow_samplers.shadow_comparison_sampler),
             ))
@@ -2170,6 +2190,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
+                        (34, &fbm_noise_texture.profile.default_view),
                         (26, &textures.clouds.default_view),
                         (27, &textures.clouds_depth.default_view),
                     )),
@@ -2193,6 +2214,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
+                        (34, &fbm_noise_texture.profile.default_view),
                         (50, &textures.haze_history_inscattering.default_view),
                         (51, &textures.haze_history_transmittance.default_view),
                         (52, haze_params),
@@ -2233,6 +2255,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
+                        (34, &fbm_noise_texture.profile.default_view),
                         (26, &textures.clouds_trace.default_view),
                         (27, &textures.clouds_trace_depth.default_view),
                         (44, &textures.cloud_field_sdf.default_view),
@@ -2326,6 +2349,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
+                        (34, &fbm_noise_texture.profile.default_view),
                     )),
                 )
             });
@@ -2359,6 +2383,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
+                        (34, &fbm_noise_texture.profile.default_view),
                     )),
                 )
             });

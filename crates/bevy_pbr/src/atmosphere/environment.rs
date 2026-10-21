@@ -156,6 +156,7 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
                     33,
                     texture_3d(TextureSampleType::Float { filterable: true }),
                 ), // detail
+                (34, texture_2d(TextureSampleType::Float { filterable: true })), // vertical profiles
                 // output 2D array texture
                 (
                     13,
@@ -295,6 +296,7 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
                     (24, &perlin_worley_noise_texture.texture.default_view),
                     (25, stbn_view.as_ref()),
                     (33, &detail_noise_texture.texture.default_view),
+                    (34, &fbm_noise_texture.profile.default_view),
                     // output
                     (13, &textures.environment),
                 )),
