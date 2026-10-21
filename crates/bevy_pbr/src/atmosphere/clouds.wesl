@@ -120,6 +120,14 @@ fn sample_weather(world_pos: vec3<f32>, weather_scale: f32) -> vec4<f32> {
     return w;
 }
 
+/// Shape-noise mip at the distance LOD `mip` (`cloud_mip_from_distance`, set for a 4 km shape
+/// tile): offset by the tile size so a texel covers the same metres at a given distance with any
+/// `shape_noise_scale` (a 6.4 km tile at the plain distance mip was 1.6x coarser: ~250 m at
+/// 16 km). The detail noise and the camera distance keep the distance mip.
+fn cloud_shape_mip(mip: f32) -> f32 {
+    return max(mip - log2(max(cloud_layer.shape_noise_scale, 1.0) / 4000.0), 0.0);
+}
+
 fn sample_shape_noise(world_pos: vec3<f32>, h: f32, mip: f32) -> vec4<f32> {
     let rot = mat2x2<f32>(
         0.8660254, -0.5,
@@ -326,8 +334,8 @@ fn cloud_scheme(p: f32) -> vec3<f32> {
 /// through 13-29 % of plume cores at cumulus fractions; the analytic double Gaussian with
 /// constant in-plume width (Larson et al. ADG1) has solid cores but leaves the plume outlines
 /// smooth. Returns x = (Y - t) / its mean over the cloud (0 outside).
-fn cloud_thermal_excess(shape: f32, billow: vec2<f32>, p: f32, mip: f32) -> f32 {
-    let g = cloud_noise_gaussian(shape, mip, 0u);
+fn cloud_thermal_excess(shape: f32, billow: vec2<f32>, p: f32, shape_mip: f32, mip: f32) -> f32 {
+    let g = cloud_noise_gaussian(shape, shape_mip, 0u);
     let z1 = -cloud_noise_gaussian(billow.x, mip, 1u);
     let z2 = -cloud_noise_gaussian(billow.y, mip, 2u);
     let r = cloud_bubble_weight();
@@ -423,7 +431,8 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     // HZD15: fbm = 0.625 lo + 0.25 med + 0.125 hi, remap(pw, fbm - 1, 1, 0, 1)), applied as the
     // 2022 sky density: saturate(noise - threshold), threshold = 1 - dimensional_profile in
     // Nubis; with the physical lookups it places the coherent plumes (`cloud_thermal_excess`).
-    let pw = sample_shape_noise(sample_pos, h, mip);
+    let shape_mip = cloud_shape_mip(mip);
+    let pw = sample_shape_noise(sample_pos, h, shape_mip);
     let wfbm = pw.y * 0.625 + pw.z * 0.25 + pw.w * 0.125;
     let shape_noise = saturate(remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0));
     // Physical lookups: the thermal (bubble-union) cloud scheme (`cloud_thermal_excess`), its
@@ -439,7 +448,7 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     var profile: f32;
     var magnitude = 1.0;
     if (cloud_layer.profile_mode == 0u) {
-        let x = cloud_thermal_excess(shape_noise, n.ba, base_profile, mip);
+        let x = cloud_thermal_excess(shape_noise, n.ba, base_profile, shape_mip, mip);
         if (x <= 0.0) {
             return 0.0;
         }
