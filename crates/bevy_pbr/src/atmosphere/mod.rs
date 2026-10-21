@@ -838,9 +838,16 @@ pub struct VolumetricCloudLayer {
     /// units: kg/m^3
     pub liquid_water: f32,
 
-    /// World-space size (m) of one weather-map tile. The 128³ shape noise repeats every
-    /// `noise_scale / 8` m (isotropic) and curl every `noise_scale / 8` m.
+    /// World-space size (m) of one weather-map tile.
     pub noise_scale: f32,
+
+    /// World-space period (m, isotropic) of the 128³ shape noise, which sets the size of the
+    /// individual clouds. The default 6.4 km puts the cover-weighted cloud size at ~600-760 m at
+    /// 5-10 % cloud fraction with the physical profiles, the cumulus scale where cloud cover
+    /// peaks in LES (BOMEX 700 m; 400-1250 m across cases; Neggers et al. 2003, J. Atmos. Sci.
+    /// 60, Table 2), measured on the noise in `.clouds-handoff/noise_study`; size scales
+    /// linearly with the period.
+    pub shape_noise_scale: f32,
 
     /// Accumulated displacement of the cloud field (m): xz by [`VolumetricCloudLayer::wind`] (advection;
     /// the density at `p` is the pattern at `p - noise_offset`), y by
@@ -935,7 +942,8 @@ impl Default for VolumetricCloudLayer {
             cloud_absorption: 0.0,
             cloud_scattering: 0.0,
             liquid_water: Self::CUMULUS_LIQUID_WATER,
-            noise_scale: 32_000.0, // weather tile; shape noise period = 1/8 (4 km)
+            noise_scale: 32_000.0, // weather tile
+            shape_noise_scale: 6_400.0,
             noise_offset: Vec3::ZERO,
             detail_noise_scale: 600.0,
             detail_strength: 1.0,
@@ -1191,6 +1199,7 @@ pub struct GpuCloudLayers {
     pub cirrus_outer_scale: f32,
     pub cirrus_asymmetry: f32,
     pub coverage: f32,
+    pub shape_noise_scale: f32,
 }
 
 impl GpuCloudLayers {
@@ -1262,6 +1271,7 @@ impl GpuCloudLayers {
             cirrus_outer_scale: ci.outer_scale.max(1.0),
             cirrus_asymmetry: ci.asymmetry.clamp(-0.99, 0.99),
             coverage: c.coverage.max(0.0),
+            shape_noise_scale: c.shape_noise_scale.max(1.0),
         }
     }
 }

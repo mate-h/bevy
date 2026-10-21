@@ -44,6 +44,7 @@ struct GpuCloudLayers {
     cirrus_outer_scale: f32,
     cirrus_asymmetry: f32,
     coverage: f32,
+    shape_noise_scale: f32,
 }
 
 @group(0) @binding(20) var<uniform> cloud_layer: GpuCloudLayers;
@@ -125,10 +126,9 @@ fn sample_shape_noise(world_pos: vec3<f32>, h: f32, mip: f32) -> vec4<f32> {
         0.5, 0.8660254
     );
     let xz = rot * world_pos.xz;
-    // Shape tiles at noise_scale; height uses normalized layer height + slow vertical scroll.
-    // Isotropic period in meters (Nubis: 128³ shape tile spans a few km). Using normalized
+    // Shape tiles at shape_noise_scale (isotropic, m; it sets the cloud size). Using normalized
     // layer height for w made the vertical period ≈ layer thickness while xz spanned 16 km.
-    let period = max(1.0, cloud_layer.noise_scale * 0.125);
+    let period = max(1.0, cloud_layer.shape_noise_scale);
     let uv = xz / period;
     // Rising thermals: the noise moves up through the fixed vertical envelope (noise_offset.y).
     let w = (h * cloud_layer_thickness_m() - cloud_layer.noise_offset.y) / period;
@@ -270,7 +270,7 @@ const CLOUD_BUBBLE_OCTAVE: f32 = 0.71137866;
 
 /// Weight of the thermal bubbles (billow noise) against the shape noise: amplitude growing with
 /// scale as scale^H between the billow tile (detail_noise_scale) and the shape-noise tile
-/// (noise_scale / 8), H = 2/3. A level set of a Gaussian field with Hurst exponent H has
+/// (shape_noise_scale), H = 2/3. A level set of a Gaussian field with Hurst exponent H has
 /// fractal dimension 3 - H (Adler 1981), and cloud surfaces measure D_s = 7/3 (LES 2.32 +- 0.01,
 /// as observed: Siebesma & Jonker 2000; the dimension of turbulent / non-turbulent interfaces,
 /// Sreenivasan & Meneveau 1986). The passive-scalar Kolmogorov exponent H = 1/3 gives 8/3: in
@@ -278,7 +278,7 @@ const CLOUD_BUBBLE_OCTAVE: f32 = 0.71137866;
 /// densities of exponent -2.2 to -2.6, against -1.70 in LES (Neggers et al. 2003). Must match
 /// `fbm_noise.rs` (the scheme table).
 fn cloud_bubble_weight() -> f32 {
-    return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.noise_scale * 0.125, 1.0), 2.0 / 3.0);
+    return pow(max(cloud_layer.detail_noise_scale, 1.0) / max(cloud_layer.shape_noise_scale, 1.0), 2.0 / 3.0);
 }
 
 /// The cloud-scheme row at cloud fraction p (texel i at p = (i / (N - 1))^2): (threshold t,

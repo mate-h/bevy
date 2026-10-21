@@ -546,7 +546,7 @@ fn setup_camera_fog(
                 std::env::var("ATMOSPHERE_CLOUD_DENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
             },
             // Larger scale = larger cloud features (more “big cumulus”, less “small puffs”)
-            noise_scale: 32_000.0, // weather tile; shape noise period = 1/8 (4 km)
+            noise_scale: 32_000.0, // weather tile (shape noise: shape_noise_scale, 6.4 km)
             noise_offset: Vec3::ZERO,
             // Detail noise tile; `ATMOSPHERE_CLOUD_DETAIL_SCALE=<m>` overrides (validation).
             detail_noise_scale: std::env::var("ATMOSPHERE_CLOUD_DETAIL_SCALE")
