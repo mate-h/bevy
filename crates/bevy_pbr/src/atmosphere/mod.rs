@@ -93,7 +93,9 @@ use fbm_noise::{
     generate_fbm_noise_once, init_fbm_noise_params_buffer, init_fbm_noise_texture,
     prepare_fbm_noise_bind_group, FbmNoiseBindGroupLayout, FbmNoisePipeline, NoiseGenerated,
 };
-pub use cloud_profile::CloudProfiles;
+pub use cloud_profile::{
+    CloudProfiles, CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_RANGE_M, CLOUD_PROFILE_TYPE_RES,
+};
 use node::{atmosphere_luts, render_sky};
 use perlin_worley_noise::{
     generate_perlin_worley_noise_once, init_perlin_worley_noise_params_buffer,
@@ -141,6 +143,7 @@ impl Plugin for AtmospherePlugin {
         embedded_asset!(app, "render_sky.wesl");
         embedded_asset!(app, "environment.wesl");
         embedded_asset!(app, "fbm_noise_3d.wesl");
+        embedded_asset!(app, "cloud_noise_quantiles.wesl");
         embedded_asset!(app, "perlin_worley_noise_3d.wesl");
         embedded_asset!(app, "detail_noise_3d.wesl");
         embedded_asset!(app, "noise_mip_downsample_3d.wesl");
@@ -214,6 +217,7 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<FbmNoisePipeline>()
             .init_resource::<NoiseGenerated>()
             .init_resource::<fbm_noise::PendingCloudProfiles>()
+            .init_resource::<fbm_noise::CloudNoiseQuantilePipeline>()
             .init_resource::<PerlinWorleyNoiseBindGroupLayout>()
             .init_resource::<PerlinWorleyNoisePipeline>()
             .init_resource::<PerlinWorleyNoiseGenerated>()
@@ -275,6 +279,9 @@ impl Plugin for AtmospherePlugin {
                     generate_perlin_worley_noise_once
                         .in_set(RenderSystems::Render)
                         .after(RenderSystems::PrepareBindGroups),
+                    fbm_noise::compute_cloud_noise_quantiles
+                        .in_set(RenderSystems::Render)
+                        .after(generate_perlin_worley_noise_once),
                     generate_detail_noise_once
                         .in_set(RenderSystems::Render)
                         .after(RenderSystems::PrepareBindGroups),
@@ -310,6 +317,7 @@ pub fn extract_atmosphere(
             Option<&VolumetricCloudLayer>,
             Option<&ThinCloudLayer>,
             Option<&AtmosphereWind>,
+            Option<&CloudProfiles>,
         )>,
     >,
     cameras: Extract<
@@ -337,7 +345,7 @@ pub fn extract_atmosphere(
         let cam_world = cam_global.translation();
         let selected = candidates
             .iter()
-            .min_by(|(ea, _, gt_a, _, _, _), (eb, _, gt_b, _, _, _)| {
+            .min_by(|(ea, _, gt_a, _, _, _, _), (eb, _, gt_b, _, _, _, _)| {
                 let da = cam_world.distance(gt_a.translation());
                 let db = cam_world.distance(gt_b.translation());
                 da.total_cmp(&db).then_with(|| ea.cmp(eb))
@@ -348,6 +356,7 @@ pub fn extract_atmosphere(
         let cloud_layer = selected.3;
         let cirrus_layer = selected.4;
         let wind = selected.5;
+        let profiles = selected.6;
         // Atmospheres are spherically symmetric, so ignore their orientation.
         let (scale, _, translation) = gt.to_scale_rotation_translation();
 
@@ -364,7 +373,8 @@ pub fn extract_atmosphere(
         commands.entity(render_entity).insert(extracted);
         let mut gpu_settings = GpuAtmosphereSettings::from(settings.clone());
         if cloud_layer.is_some() || cirrus_layer.is_some() {
-            let layers = GpuCloudLayers::new(cloud_layer, cirrus_layer, wind, atmo.inner_radius);
+            let layers =
+                GpuCloudLayers::new(cloud_layer, cirrus_layer, wind, profiles, atmo.inner_radius);
             gpu_settings.cloud_shadow_anchor_max_radius = layers.cloud_layer_end;
             gpu_settings.cloud_thin_shadow_max_radius =
                 layers.cirrus_top - 0.5 * layers.cirrus_thickness;
@@ -798,7 +808,7 @@ impl Default for VolumetricCloudSettings {
 /// that select that atmosphere.
 #[derive(Clone, Component, Reflect)]
 #[reflect(Clone, Default)]
-#[require(CloudWeather, AtmosphereWind)]
+#[require(CloudWeather, AtmosphereWind, CloudProfiles)]
 pub struct VolumetricCloudLayer {
     /// Altitude at which the cloud layer starts (from planet center)
     /// units: m
@@ -820,6 +830,13 @@ pub struct VolumetricCloudLayer {
     /// to derive it from the droplet microphysics.
     /// units: m^-1
     pub cloud_scattering: f32,
+
+    /// Liquid water content at density 1, the reference of [`VolumetricCloudLayer::cloud_scattering`]
+    /// and [`VolumetricCloudLayer::cloud_absorption`]: the in-cloud liquid water of the
+    /// [`CloudProfiles`] (kg/m^3) divided by it is the density, so extinction is
+    /// `mass coefficient * liquid water`. Set by [`VolumetricCloudLayer::with_liquid_water`].
+    /// units: kg/m^3
+    pub liquid_water: f32,
 
     /// World-space size (m) of one weather-map tile. The 128³ shape noise repeats every
     /// `noise_scale / 8` m (isotropic) and curl every `noise_scale / 8` m.
@@ -846,16 +863,9 @@ pub struct VolumetricCloudLayer {
     /// `None`: [`AtmosphereWind`] at the base altitude.
     pub wind: Option<Vec3>,
 
-    /// Vertical density envelope `h'^bottom * (1 - h')^top` (normalized to a peak of 1), with h'
-    /// the height relative to the column's cloud top. The defaults (1, 1) are physical: adiabatic
-    /// liquid water grows linearly above the flat base, and entrainment lowers it toward the
-    /// top. [`VolumetricCloudLayer::NUBIS_ENVELOPE`] gives Nubis's (2, 1.5). A [`CloudProfiles`]
-    /// image on the same entity replaces the envelope with profiles baked offline.
-    pub profile_bottom_exponent: f32,
-    /// See [`VolumetricCloudLayer::profile_bottom_exponent`].
-    pub profile_top_exponent: f32,
-    /// Cloud-top height (fraction of the layer) of the thinnest cells; the top rises linearly
-    /// with weather coverage to the layer top.
+    /// With [`CloudProfiles::Envelope`]: cloud-top height (fraction of the layer) of the thinnest
+    /// cells; the top rises linearly with weather coverage to the layer top. The physical profiles
+    /// take the column top from the distribution of parcel tops instead.
     pub profile_top_min: f32,
 
     /// Override of the vertical wind shear dU/dz above the cloud base (1/s, horizontal; 1e-3 =
@@ -878,20 +888,6 @@ pub struct VolumetricCloudLayer {
 }
 
 impl VolumetricCloudLayer {
-    /// Nubis Evolved (SIGGRAPH 2022) envelope-model vertical gradients:
-    /// bottom `pow(h, 2)`, top `pow(1 - h, 1.5)`. Use with [`VolumetricCloudLayer::with_vertical_profile`].
-    pub const NUBIS_ENVELOPE: (f32, f32) = (2.0, 1.5);
-    /// Physical default: adiabatic liquid water (linear above the base) times a linearly
-    /// decreasing adiabatic fraction (entrainment).
-    pub const ADIABATIC_PROFILE: (f32, f32) = (1.0, 1.0);
-
-    /// Sets the vertical envelope exponents `(bottom, top)`.
-    pub fn with_vertical_profile(mut self, (bottom, top): (f32, f32)) -> Self {
-        self.profile_bottom_exponent = bottom;
-        self.profile_top_exponent = top;
-        self
-    }
-
     /// Peak cumulus liquid water content, i.e. the LWC at density 1 (the peak of the adiabatic x
     /// entrainment vertical profile, ~mid-height). The saturated-adiabatic liquid water gradient
     /// is ~2 g/m^3 per km for a ~10 C cloud base, so ~1 km above the base the adiabatic LWC is ~2
@@ -920,6 +916,7 @@ impl VolumetricCloudLayer {
         let q_abs = Q_ABS_PER_M * effective_radius;
         self.cloud_scattering = (Q_EXT - q_abs) * geometric;
         self.cloud_absorption = q_abs * geometric;
+        self.liquid_water = liquid_water_content;
         self
     }
 }
@@ -932,13 +929,12 @@ impl Default for VolumetricCloudLayer {
             cloud_density: 1.0,
             cloud_absorption: 0.0,
             cloud_scattering: 0.0,
+            liquid_water: Self::CUMULUS_LIQUID_WATER,
             noise_scale: 32_000.0, // weather tile; shape noise period = 1/8 (4 km)
             noise_offset: Vec3::ZERO,
             detail_noise_scale: 600.0,
             detail_strength: 1.0,
             wind: None,
-            profile_bottom_exponent: Self::ADIABATIC_PROFILE.0,
-            profile_top_exponent: Self::ADIABATIC_PROFILE.1,
             profile_top_min: 0.25,
             wind_shear: None,
             updraft_speed: 3.0,
@@ -1158,14 +1154,17 @@ pub struct GpuCloudLayers {
     pub cloud_density: f32,
     pub cloud_absorption: f32,
     pub cloud_scattering: f32,
+    pub liquid_water: f32,
+    /// 0: profile lookups (physical or image), 1: analytic envelope.
+    pub profile_mode: u32,
+    pub profile_bottom_exponent: f32,
+    pub profile_top_exponent: f32,
+    pub profile_top_min: f32,
     pub noise_scale: f32,
     pub noise_offset: Vec3,
     pub detail_noise_scale: f32,
     pub detail_strength: f32,
     pub wind: Vec3,
-    pub profile_bottom_exponent: f32,
-    pub profile_top_exponent: f32,
-    pub profile_top_min: f32,
     pub wind_shear: Vec3,
     pub updraft_speed: f32,
     pub lifetime: f32,
@@ -1192,6 +1191,7 @@ impl GpuCloudLayers {
         cumulus: Option<&VolumetricCloudLayer>,
         cirrus: Option<&ThinCloudLayer>,
         wind: Option<&AtmosphereWind>,
+        profiles: Option<&CloudProfiles>,
         inner_radius: f32,
     ) -> Self {
         let default_wind = AtmosphereWind::default();
@@ -1216,20 +1216,27 @@ impl GpuCloudLayers {
         let sigma = ci.ln_iwc_std.max(0.0);
         let in_cloud_mean = (0.5 * sigma * sigma).exp() * normal_sf(threshold - sigma)
             / normal_sf(threshold).max(1e-12);
+        // Analytic envelope: evaluated in the shader (profile_mode 1); otherwise the lookups.
+        let (profile_mode, profile_bottom_exponent, profile_top_exponent) = match profiles {
+            Some(CloudProfiles::Envelope { bottom, top }) => (1, *bottom, *top),
+            _ => (0, 1.0, 1.0),
+        };
         Self {
             cloud_layer_start: c.cloud_layer_start,
             cloud_layer_end: c.cloud_layer_end,
             cloud_density: c.cloud_density,
             cloud_absorption: c.cloud_absorption,
             cloud_scattering: c.cloud_scattering,
+            liquid_water: c.liquid_water,
+            profile_mode,
+            profile_bottom_exponent,
+            profile_top_exponent,
+            profile_top_min: c.profile_top_min,
             noise_scale: c.noise_scale,
             noise_offset: c.noise_offset,
             detail_noise_scale: c.detail_noise_scale,
             detail_strength: c.detail_strength,
             wind: c_wind,
-            profile_bottom_exponent: c.profile_bottom_exponent,
-            profile_top_exponent: c.profile_top_exponent,
-            profile_top_min: c.profile_top_min,
             wind_shear: c_shear,
             updraft_speed: c.updraft_speed,
             lifetime: c.lifetime,

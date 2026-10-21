@@ -6,9 +6,8 @@
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`,
-//!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`,
-//!   `ATMOSPHERE_CLOUD_PROFILE=nubis`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
-//!   `ATMOSPHERE_CLOUD_PROFILES` (vertical profiles baked from a parcel ensemble),
+//!   `ATMOSPHERE_MIE_SCALE`, `ATMOSPHERE_MIE_G`, `ATMOSPHERE_NO_HAZE` (no aerosol or local haze),
+//!   `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis`, `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_LUT_MODE`.
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse).
@@ -460,10 +459,16 @@ fn setup_camera_fog(
     // Scale the Earth Mie term only; leave the local haze term alone. Default 10 → τ≈0.05
     // (+ ~0.02 ground haze ≈ 0.07, clean continental AERONET range 0.05–0.15).
     // ATMOSPHERE_MIE_SCALE=1 restores Bruneton-clear.
-    let mie_scale: f32 = std::env::var("ATMOSPHERE_MIE_SCALE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10.0);
+    // `ATMOSPHERE_NO_HAZE`: no aerosol (Mie) and no local haze, for clear views of the clouds.
+    let no_haze = std::env::var("ATMOSPHERE_NO_HAZE").is_ok();
+    let mie_scale: f32 = if no_haze {
+        0.0
+    } else {
+        std::env::var("ATMOSPHERE_MIE_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10.0)
+    };
     // Mie asymmetry 0.7: continental aerosol retrievals give g ≈ 0.6-0.7 at 550 nm (AERONET,
     // Dubovik et al. 2002); Bruneton's 0.8 over-concentrated the haze glow and shafts around the
     // sun. `ATMOSPHERE_MIE_G=<g>` overrides it.
@@ -477,12 +482,14 @@ fn setup_camera_fog(
             }
         }
     }
-    medium.terms.push(ScatteringTerm {
-        absorption: Vec3::splat(2e-5),
-        scattering: Vec3::splat(1e-4),
-        falloff: Falloff::Exponential { scale: 0.2 / 60.0 },
-        phase: PhaseFunction::Mie { asymmetry: 0.76 },
-    });
+    if !no_haze {
+        medium.terms.push(ScatteringTerm {
+            absorption: Vec3::splat(2e-5),
+            scattering: Vec3::splat(1e-4),
+            falloff: Falloff::Exponential { scale: 0.2 / 60.0 },
+            phase: PhaseFunction::Mie { asymmetry: 0.76 },
+        });
+    }
     let earth_medium = scattering_mediums.add(medium);
     let mars_phase = asset_server.load("textures/mars_mie_phase.ktx2");
     let mars_medium = scattering_mediums.add(ScatteringMedium::mars(256, 256, mars_phase));
@@ -493,7 +500,7 @@ fn setup_camera_fog(
     });
 
     // Spawn earth atmosphere
-    let mut earth = commands.spawn((
+    commands.spawn((
         // Ground albedo 0.28 to match the cloud ground bounce (CLOUD_GROUND_ALBEDO) and the reference.
         Atmosphere {
             ground_albedo: Vec3::splat(0.28),
@@ -522,13 +529,14 @@ fn setup_camera_fog(
         .with_liquid_water(
             std::env::var("ATMOSPHERE_CLOUD_LWC").ok().and_then(|v| v.parse::<f32>().ok()).map_or(VolumetricCloudLayer::CUMULUS_LIQUID_WATER, |g| g * 1e-3),
             VolumetricCloudLayer::CUMULUS_EFFECTIVE_RADIUS,
-        )
-        // `ATMOSPHERE_CLOUD_PROFILE=nubis`: Nubis envelope instead of the adiabatic default.
-        .with_vertical_profile(if std::env::var("ATMOSPHERE_CLOUD_PROFILE").as_deref() == Ok("nubis") {
-            VolumetricCloudLayer::NUBIS_ENVELOPE
-        } else {
-            VolumetricCloudLayer::ADIABATIC_PROFILE
-        }),
+        ),
+        // Vertical cloud profiles: physically based by default (baked parcel ensemble);
+        // `ATMOSPHERE_CLOUD_PROFILE=adiabatic|nubis` selects an analytic envelope instead.
+        match std::env::var("ATMOSPHERE_CLOUD_PROFILE").as_deref() {
+            Ok("adiabatic") => CloudProfiles::ADIABATIC,
+            Ok("nubis") => CloudProfiles::NUBIS_ENVELOPE,
+            _ => CloudProfiles::Physical,
+        },
         CloudWeather::default(),
         // High-altitude cirrus (thin ice cloud at 9 km); `ATMOSPHERE_NO_CIRRUS` removes it.
         ThinCloudLayer {
@@ -546,11 +554,6 @@ fn setup_camera_fog(
             _ => AtmosphereWind::fair_weather(),
         },
     ));
-    // `ATMOSPHERE_CLOUD_PROFILES`: cloud presence and liquid-water profiles baked offline from a
-    // surface-layer parcel ensemble (stratocumulus: DYCOMS-II RF01, cumulus: BOMEX).
-    if std::env::var("ATMOSPHERE_CLOUD_PROFILES").is_ok() {
-        earth.insert(CloudProfiles(asset_server.load("textures/cloud_profiles.ktx2")));
-    }
 
     let mut camera = commands.spawn_empty();
     if let Some(image) = offscreen {

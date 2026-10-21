@@ -1,89 +1,91 @@
-//! Vertical cloud profiles: Nubis's height x type lookups, extended with liquid water.
+//! Vertical cloud profiles: Nubis's height x type lookup with physical contents.
 //!
-//! One Rgba16Float texture, [`CLOUD_PROFILE_HEIGHT_RES`] (x = height between the column's cloud
-//! base, 0, and top, 1) by [`CLOUD_PROFILE_TYPE_RES`] (cloud type: 0 stratus, 0.5
-//! stratocumulus, 1 cumulus):
-//! - R, G: presence as a bottom and a top factor (Nubis's two lookups); their product is the cloud
-//!   fraction at that height, and drives the erosion of the noise as the dimensional profile;
-//! - B: in-cloud liquid water, peak 1, which scales the eroded density with height;
+//! One Rgba16Float texture, [`CLOUD_PROFILE_HEIGHT_RES`] texels per row against metres above the
+//! shared cloud base (texel i at i / (N - 1) x [`CLOUD_PROFILE_RANGE_M`]), one row per cloud
+//! type ([`CLOUD_PROFILE_TYPE_RES`]: 0 stratus, 0.5 stratocumulus, 1 cumulus):
+//! - R, G: cloud fraction (peak 1) as a bottom and a top factor (Nubis's two lookups); times
+//!   coverage it is the dimensional profile that the erosion turns into clouds;
+//! - B: in-cloud liquid water (kg/m^3); divided by the layer's
+//!   [`VolumetricCloudLayer::liquid_water`](super::VolumetricCloudLayer::liquid_water) it scales
+//!   the eroded density;
 //! - A: unused (1).
 //!
-//! The engine only samples the lookups. Physically based sets are baked offline (a surface-layer
-//! parcel ensemble on published LES cases) and loaded through [`CloudProfiles`]; without one,
-//! every type holds the analytic envelope `x^a (1 - x)^b` of [`VolumetricCloudLayer`] with
-//! uniform liquid water, which is today's look.
+//! A last row, filled on the GPU from the shape noise, holds the noise quantiles that make the
+//! erosion threshold exact (`clouds.wesl` `cloud_erosion_threshold`). SI throughout: m, kg/m^3.
 
 use bevy_asset::Handle;
 use bevy_ecs::component::Component;
 use bevy_image::Image;
-use bevy_reflect::Reflect;
+use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 
-use super::VolumetricCloudLayer;
-
-/// Samples along the height in the column (texel i at x = i / (N - 1)).
+/// Texels per row: height above the cloud base (texel i at i / (N - 1) x range).
 pub const CLOUD_PROFILE_HEIGHT_RES: usize = 64;
-/// Samples along the cloud type (texel j at j / (N - 1)).
+/// Rows of cloud types (texel j at type j / (N - 1)).
 pub const CLOUD_PROFILE_TYPE_RES: usize = 32;
+/// Height range of the rows (m above the cloud base; must match `clouds.wesl`).
+pub const CLOUD_PROFILE_RANGE_M: f32 = 4000.0;
 
-/// Vertical cloud profiles baked offline (module docs): an Rgba16Float image,
-/// [`CLOUD_PROFILE_HEIGHT_RES`] x [`CLOUD_PROFILE_TYPE_RES`]. Add it to the [`Atmosphere`]
-/// entity with the [`VolumetricCloudLayer`]; images of another size or format are ignored with a
-/// warning, and the analytic envelope stays in use.
-///
-/// [`Atmosphere`]: bevy_light::Atmosphere
-#[derive(Clone, Component, Reflect)]
-#[reflect(Clone)]
-pub struct CloudProfiles(pub Handle<Image>);
-
-/// The lookup contents, row-major by type: `bottom[type * HEIGHT_RES + height]`.
-#[derive(Clone, PartialEq)]
-pub(crate) struct CloudProfileTables {
-    pub bottom: Vec<f32>,
-    pub top: Vec<f32>,
-    pub liquid_water: Vec<f32>,
+/// The vertical structure of the clouds of a [`VolumetricCloudLayer`](super::VolumetricCloudLayer) (module docs).
+#[derive(Clone, Component, Reflect, Default)]
+#[reflect(Clone, Default)]
+pub enum CloudProfiles {
+    /// Baked offline from a surface-layer parcel ensemble (Neggers, Köhler & Beljaars 2009,
+    /// J. Atmos. Sci. 66): the updrafts are the top 10 % of the surface-layer distribution with
+    /// spreads from the surface fluxes, lifted with entrainment 1 / (tau w); cloud fraction is the
+    /// share of saturated rising parcels plus the saturated mean state, liquid water their mean.
+    /// Cloud fraction is the share of saturated rising parcels plus the saturated mean state,
+    /// liquid water the parcels' mean, against height above the base. One air mass: the BOMEX
+    /// trade-cumulus case (Siebesma et al. 2003) for every type. The fraction jumps to its peak
+    /// within ~60 m of the base (the parcels condense at nearly one level), is ~0.3 of it at
+    /// 250 m, ~0.1 at 1 km and ends at ~1.4 km, the LES profile's shape (its clouds share a base
+    /// and stop at different heights); liquid water reaches ~1e-3 kg/m^3 at 1 km. The baker
+    /// records its inputs in the KTX2 key/value data.
+    #[default]
+    Physical,
+    /// The analytic envelope `x^bottom (1 - x)^top`, normalized to a peak of 1, of the height x
+    /// in a column whose top rises with coverage from
+    /// [`VolumetricCloudLayer::profile_top_min`] to the layer top, with uniform liquid water and
+    /// Nubis's `1 - profile` erosion threshold (evaluated in the shader).
+    ///
+    /// [`VolumetricCloudLayer::profile_top_min`]: super::VolumetricCloudLayer::profile_top_min
+    Envelope {
+        /// Exponent of the rise above the base.
+        bottom: f32,
+        /// Exponent of the fall toward the top.
+        top: f32,
+    },
+    /// A lookup image of the format above (Rgba16Float, 64 x 32), e.g. baked for another air
+    /// mass or painted. Until it loads, or if its format differs (logged), [`Self::Physical`].
+    Image(Handle<Image>),
 }
 
-impl CloudProfileTables {
-    /// Every type holds the analytic envelope `x^a (1 - x)^b`, peak-normalized (bottom `x^a`,
-    /// top `(1 - x)^b / max`), with uniform liquid water.
-    pub fn analytic(a: f32, b: f32) -> Self {
-        let peak = a / (a + b).max(1e-6);
-        let max_v = (peak.powf(a) * (1.0 - peak).powf(b)).max(1e-6);
-        let n = CLOUD_PROFILE_TYPE_RES * CLOUD_PROFILE_HEIGHT_RES;
-        let (mut bottom, mut top) = (Vec::with_capacity(n), Vec::with_capacity(n));
-        for _ in 0..CLOUD_PROFILE_TYPE_RES {
-            for i in 0..CLOUD_PROFILE_HEIGHT_RES {
-                let x = i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32;
-                bottom.push(x.powf(a));
-                top.push((1.0 - x).powf(b) / max_v);
-            }
-        }
-        Self {
-            bottom,
-            top,
-            liquid_water: vec![1.0; n],
-        }
-    }
-
-    /// The analytic envelope of the layer's profile exponents.
-    pub fn for_layer(layer: &VolumetricCloudLayer) -> Self {
-        Self::analytic(layer.profile_bottom_exponent, layer.profile_top_exponent)
-    }
-
-    /// Rgba16Float texels (R bottom, G top, B liquid water, A 1).
-    pub fn to_rgba16f_bytes(&self) -> Vec<u8> {
-        self.bottom
-            .iter()
-            .zip(&self.top)
-            .zip(&self.liquid_water)
-            .flat_map(|((&b, &t), &l)| [b, t, l, 1.0].map(f32_to_f16))
-            .flat_map(u16::to_le_bytes)
-            .collect()
-    }
+impl CloudProfiles {
+    /// Adiabatic liquid water growing linearly above the base times an adiabatic fraction falling
+    /// linearly toward the top (Warner 1955): `x (1 - x)`.
+    pub const ADIABATIC: Self = Self::Envelope {
+        bottom: 1.0,
+        top: 1.0,
+    };
+    /// Nubis Evolved (SIGGRAPH 2022) envelope-model gradients: `x^2 (1 - x)^1.5`.
+    pub const NUBIS_ENVELOPE: Self = Self::Envelope {
+        bottom: 2.0,
+        top: 1.5,
+    };
 }
 
-/// IEEE half from f32 for the lookup values (finite, >= 0; subnormals flush to 0).
-fn f32_to_f16(v: f32) -> u16 {
+/// The baked [`CloudProfiles::Physical`] set: an uncompressed Rgba16Float KTX2.
+const PHYSICAL_KTX2: &[u8] = include_bytes!("cloud_profiles.ktx2");
+
+/// Texels of [`CloudProfiles::Physical`]: the KTX2's single level (vkFormat 97 =
+/// R16G16B16A16_SFLOAT, 64 x 32, checked by a test).
+pub(crate) fn physical_profile_texels() -> &'static [u8] {
+    let u64_at = |o: usize| u64::from_le_bytes(PHYSICAL_KTX2[o..o + 8].try_into().unwrap()) as usize;
+    let (offset, len) = (u64_at(80), u64_at(88));
+    &PHYSICAL_KTX2[offset..offset + len]
+}
+
+/// IEEE half from f32 for values in [0, 1] (subnormals flush to 0).
+pub(crate) fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
@@ -104,14 +106,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn analytic_matches_the_envelope() {
-        let tables = CloudProfileTables::analytic(1.0, 1.0);
-        for i in 0..CLOUD_PROFILE_HEIGHT_RES {
-            let x = i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32;
-            let v = tables.bottom[i] * tables.top[i];
-            assert!((v - 4.0 * x * (1.0 - x)).abs() < 1e-5);
-            assert_eq!(tables.liquid_water[i], 1.0);
-        }
+    fn physical_set_is_rgba16f_64x32() {
+        let u32_at = |o: usize| u32::from_le_bytes(PHYSICAL_KTX2[o..o + 4].try_into().unwrap());
+        assert_eq!(&PHYSICAL_KTX2[..12], b"\xabKTX 20\xbb\r\n\x1a\n");
+        assert_eq!(u32_at(12), 97);
+        assert_eq!(u32_at(20) as usize, CLOUD_PROFILE_HEIGHT_RES);
+        assert_eq!(u32_at(24) as usize, CLOUD_PROFILE_TYPE_RES);
+        assert_eq!(
+            physical_profile_texels().len(),
+            8 * CLOUD_PROFILE_HEIGHT_RES * CLOUD_PROFILE_TYPE_RES
+        );
     }
 
     #[test]

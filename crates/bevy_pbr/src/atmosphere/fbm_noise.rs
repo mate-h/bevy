@@ -6,11 +6,12 @@
 use bevy_asset::{load_embedded_asset, AssetId, Assets};
 use bevy_image::Image;
 use bevy_ecs::{
+    query::With,
     resource::Resource,
     system::{Local, Query, Res, ResMut},
     world::{FromWorld, World},
 };
-use bevy_math::UVec2;
+use bevy_math::{UVec2, UVec3};
 use bevy_render::{
     render_resource::{binding_types::*, *},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
@@ -22,7 +23,11 @@ use bevy_utils::default;
 use tracing::warn;
 
 use super::{
-    cloud_profile::{CloudProfileTables, CloudProfiles, CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_TYPE_RES},
+    cloud_profile::{
+        f32_to_f16, physical_profile_texels, CloudProfiles, CLOUD_PROFILE_HEIGHT_RES,
+        CLOUD_PROFILE_TYPE_RES,
+    },
+    perlin_worley_noise::{PerlinWorleyNoiseGenerated, PerlinWorleyNoiseTexture},
     VolumetricCloudLayer,
 };
 
@@ -293,18 +298,47 @@ pub fn init_fbm_noise_texture(
 
     let profile_texture = render_device.create_texture(&TextureDescriptor {
         label: Some("cloud_profile_lut_texture"),
-        size: CLOUD_PROFILE_EXTENT,
+        size: CLOUD_PROFILE_TEXTURE_EXTENT,
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: TextureFormat::Rgba16Float,
-        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        usage: TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_DST
+            | TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
-    write_cloud_profile(
-        &render_queue,
-        &profile_texture,
-        &CloudProfileTables::analytic(1.0, 1.0).to_rgba16f_bytes(),
+    write_cloud_profile(&render_queue, &profile_texture, physical_profile_texels());
+    // Noise quantile row: identity (threshold 1 - profile, as Nubis) until measured.
+    let identity: Vec<u8> = (0..CLOUD_PROFILE_HEIGHT_RES)
+        .flat_map(|i| {
+            let q = i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32;
+            [q, 0.0, 0.0, 1.0].map(f32_to_f16)
+        })
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    render_queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &profile_texture,
+            mip_level: 0,
+            origin: Origin3d {
+                x: 0,
+                y: CLOUD_PROFILE_TYPE_RES as u32,
+                z: 0,
+            },
+            aspect: TextureAspect::All,
+        },
+        &identity,
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8 * CLOUD_PROFILE_HEIGHT_RES as u32),
+            rows_per_image: None,
+        },
+        Extent3d {
+            width: CLOUD_PROFILE_HEIGHT_RES as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
     );
     let profile_view = profile_texture.create_view(&TextureViewDescriptor::default());
 
@@ -326,9 +360,16 @@ pub fn init_fbm_noise_texture(
     });
 }
 
+/// The profile rows (one per cloud type).
 const CLOUD_PROFILE_EXTENT: Extent3d = Extent3d {
     width: CLOUD_PROFILE_HEIGHT_RES as u32,
     height: CLOUD_PROFILE_TYPE_RES as u32,
+    depth_or_array_layers: 1,
+};
+/// The profile rows plus the noise quantile row.
+const CLOUD_PROFILE_TEXTURE_EXTENT: Extent3d = Extent3d {
+    width: CLOUD_PROFILE_HEIGHT_RES as u32,
+    height: CLOUD_PROFILE_TYPE_RES as u32 + 1,
     depth_or_array_layers: 1,
 };
 
@@ -350,55 +391,53 @@ fn write_cloud_profile(queue: &RenderQueue, texture: &Texture, rgba16f: &[u8]) {
 #[derive(Resource, Default)]
 pub struct PendingCloudProfiles(pub(crate) Option<Vec<u8>>);
 
-/// What the lookup holds: a loaded [`CloudProfiles`] image, or the layer's analytic envelope.
+/// What the lookup holds.
 #[derive(PartialEq)]
 pub(crate) enum ProfileSource {
+    Physical,
     Image(AssetId<Image>),
-    Analytic(u32, u32),
 }
 
-/// Picks the lookups of the first cloud layer and queues an upload when they change: its
-/// [`CloudProfiles`] image once loaded (Rgba16Float, 64 x 32), else the analytic envelope of
-/// its profile exponents. One set for all atmospheres, like the weather map.
+/// Picks the lookups of the first cloud layer's [`CloudProfiles`] and queues an upload when they
+/// change: a loaded image of the lookup format, else the physical set (the analytic envelope is
+/// evaluated in the shader and leaves the lookups unused). One set for all atmospheres, like the
+/// weather map.
 pub(crate) fn extract_cloud_profiles(
-    layers: Extract<Query<(&VolumetricCloudLayer, Option<&CloudProfiles>)>>,
+    layers: Extract<Query<&CloudProfiles, With<VolumetricCloudLayer>>>,
     images: Extract<Res<Assets<Image>>>,
     mut last: Local<Option<ProfileSource>>,
     mut pending: ResMut<PendingCloudProfiles>,
 ) {
-    let Some((layer, profiles)) = layers.iter().next() else {
+    let Some(profiles) = layers.iter().next() else {
         return;
     };
-    let image = profiles.and_then(|p| Some((p.0.id(), images.get(&p.0)?)));
     let expected = (
         TextureFormat::Rgba16Float,
         CLOUD_PROFILE_EXTENT.width,
         CLOUD_PROFILE_EXTENT.height,
     );
+    let image = match profiles {
+        CloudProfiles::Image(handle) => images.get(handle).map(|image| (handle.id(), image)),
+        _ => None,
+    };
     let usable = image.filter(|(_, image)| {
         let d = &image.texture_descriptor;
         (d.format, d.size.width, d.size.height) == expected && image.data.is_some()
     });
-    let source = match usable {
-        Some((id, _)) => ProfileSource::Image(id),
-        None => ProfileSource::Analytic(
-            layer.profile_bottom_exponent.to_bits(),
-            layer.profile_top_exponent.to_bits(),
-        ),
-    };
+    let source = usable.map_or(ProfileSource::Physical, |(id, _)| ProfileSource::Image(id));
     if last.as_ref() == Some(&source) {
         return;
     }
     if let (Some((_, image)), None) = (image, usable) {
         let d = &image.texture_descriptor;
         warn!(
-            "CloudProfiles image is {:?} {}x{}, expected Rgba16Float {}x{}: using the analytic profile",
+            "CloudProfiles image is {:?} {}x{}, expected Rgba16Float {}x{}: using the physical profiles",
             d.format, d.size.width, d.size.height, expected.1, expected.2
         );
     }
     pending.0 = Some(match usable {
         Some((_, image)) => image.data.clone().unwrap_or_default(),
-        None => CloudProfileTables::for_layer(layer).to_rgba16f_bytes(),
+        None => physical_profile_texels().to_vec(),
     });
     *last = Some(source);
 }
@@ -411,6 +450,106 @@ pub fn upload_cloud_profiles(
     if let (Some(texture), Some(texels)) = (texture, pending.0.take()) {
         write_cloud_profile(&queue, &texture.profile.texture, &texels);
     }
+}
+
+/// Measures the shape-noise distribution once the 3D noise exists and writes its quantiles into
+/// the last row of the profile texture (`cloud_noise_quantiles.wesl`), so the erosion threshold
+/// at a dimensional profile p is exceeded with probability p (the profile is the cloud fraction).
+#[derive(Resource)]
+pub struct CloudNoiseQuantilePipeline {
+    layout: BindGroupLayoutDescriptor,
+    histogram: CachedComputePipelineId,
+    quantiles: CachedComputePipelineId,
+}
+
+impl FromWorld for CloudNoiseQuantilePipeline {
+    fn from_world(world: &mut World) -> Self {
+        let layout = BindGroupLayoutDescriptor::new(
+            "cloud_noise_quantiles_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    texture_3d(TextureSampleType::Float { filterable: false }),
+                    storage_buffer_sized(false, None),
+                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        );
+        let shader = load_embedded_asset!(world, "cloud_noise_quantiles.wesl");
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline = |entry: &'static str| {
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some(format!("cloud_noise_quantiles_{entry}").into()),
+                layout: vec![layout.clone()],
+                shader: shader.clone(),
+                entry_point: Some(entry.into()),
+                ..default()
+            })
+        };
+        Self {
+            histogram: pipeline("histogram"),
+            quantiles: pipeline("quantiles"),
+            layout,
+        }
+    }
+}
+
+/// Runs [`CloudNoiseQuantilePipeline`] once, after the shape noise is generated.
+pub fn compute_cloud_noise_quantiles(
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    pipeline_cache: Res<PipelineCache>,
+    pipeline: Res<CloudNoiseQuantilePipeline>,
+    profile: Option<Res<FbmNoiseTexture>>,
+    noise: Option<Res<PerlinWorleyNoiseTexture>>,
+    generated: Res<PerlinWorleyNoiseGenerated>,
+    mut done: Local<bool>,
+) {
+    let (Some(profile), Some(noise)) = (profile, noise) else {
+        return;
+    };
+    if *done || generated.0 < noise.mip_level_count {
+        return;
+    }
+    let (Some(histogram), Some(quantiles)) = (
+        pipeline_cache.get_compute_pipeline(pipeline.histogram),
+        pipeline_cache.get_compute_pipeline(pipeline.quantiles),
+    ) else {
+        return;
+    };
+    // 256 bins, zero-initialized at creation.
+    let bins = render_device.create_buffer(&BufferDescriptor {
+        label: Some("cloud_noise_histogram"),
+        size: 256 * 4,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let bind_group = render_device.create_bind_group(
+        "cloud_noise_quantiles_bind_group",
+        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
+        &BindGroupEntries::sequential((
+            &noise.mip_views[0],
+            bins.as_entire_binding(),
+            &profile.profile.default_view,
+        )),
+    );
+    let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("cloud_noise_quantiles"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("cloud_noise_quantiles"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_pipeline(histogram);
+        let n = (noise.size + UVec3::splat(3)) / 4;
+        pass.dispatch_workgroups(n.x, n.y, n.z);
+        pass.set_pipeline(quantiles);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    render_queue.submit([encoder.finish()]);
+    *done = true;
 }
 
 /// System to prepare the FBM noise bind group
