@@ -12,7 +12,7 @@ use bevy_ecs::{
     entity::Entity,
     lifecycle::{Insert, Remove},
     observer::On,
-    query::{Has, With, Without},
+    query::{Has, With},
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
     template::FromTemplate,

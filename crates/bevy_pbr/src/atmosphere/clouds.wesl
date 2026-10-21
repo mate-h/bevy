@@ -190,10 +190,25 @@ const CLOUD_PROFILE_TYPE_ROWS: f32 = 64.0;
 const CLOUD_NOISE_QUANTILE_ROWS: f32 = 8.0;
 const CLOUD_SCHEME_ROW: f32 = 72.0;
 
+/// Cloud base above the surface (m) of a cloud type with the profile lookups: the A channel, km
+/// (`cloud_profile.rs`).
+fn cloud_profile_base_m(cloud_type: f32) -> f32 {
+    let n = vec2<f32>(textureDimensions(cloud_profile_lut));
+    let v = (saturate(cloud_type) * (CLOUD_PROFILE_TYPE_ROWS - 1.0) + 0.5) / n.y;
+    return textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(0.5 / n.x, v), 0.0).a * 1000.0;
+}
+
+/// Cloud type (weather G) at a position, as `sample_weather` reads it.
+fn cloud_weather_type(world_pos: vec3<f32>) -> f32 {
+    let rot = mat2x2<f32>(0.8660254, -0.5, 0.5, 0.8660254);
+    let uv = (rot * world_pos.xz) / max(1.0, cloud_layer.noise_scale);
+    return clamp(textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0).g, 0.0, 1.0);
+}
+
 /// Vertical profile of a column: (dimensional profile, in-cloud liquid water / the layer's).
 /// - Lookups (`CloudProfiles` physical or image, `cloud_profile.rs`), the Nubis Evolved (2022)
-///   vertical-profile structure with physical contents: one row per cloud type (0 stratus,
-///   0.5 stratocumulus, 1 cumulus), against metres above the shared cloud base. R x G is the
+///   vertical-profile structure with physical contents: one row per cloud type (air mass),
+///   against metres above that row's cloud base (A, km above the surface). R x G is the
 ///   cloud fraction (peak 1), B the in-cloud liquid water (kg/m^3). Dimensional profile =
 ///   cloud fraction x coverage; the erosion turns it into clouds that share a base and stop at
 ///   different heights, as in a cumulus field (statistical cloud scheme, Sommeria & Deardorff
@@ -226,8 +241,10 @@ fn cloud_vertical_profile(h: f32, coverage: f32, cloud_type: f32) -> vec2<f32> {
             vec2((saturate(h) * (n.x - 1.0) + 0.5) / n.x, v), 0.0);
         return vec2(saturate(lut.r * lut.g * coverage), 1.0);
     }
-    let z = h * cloud_layer_thickness_m();
-    if (z >= CLOUD_PROFILE_RANGE_M) {
+    // Height above the row's cloud base (each air mass has its own lifting condensation level).
+    let base = cloud_profile_base_m(cloud_type);
+    let z = h * cloud_layer_thickness_m() + (cloud_layer.cloud_layer_start - atmosphere.inner_radius) - base;
+    if (z < 0.0 || z >= CLOUD_PROFILE_RANGE_M) {
         return vec2(0.0);
     }
     let u = (z / CLOUD_PROFILE_RANGE_M * (n.x - 1.0) + 0.5) / n.x;
@@ -359,7 +376,15 @@ fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
 ///   clouds are renewed by new thermals, the lean does not accumulate).
 /// Nubis/HZD scroll the noise with the wind (pseudo-motion); HZD15 also skews with height.
 fn cloud_sample_pos(world_pos: vec3<f32>, r: f32) -> vec3<f32> {
-    let z = max(r - cloud_layer.cloud_layer_start, 0.0);
+    // The lean starts at the cloud's own base: with the physical profiles, its air mass's (the
+    // type at the advected, unleaned position). From the bottom of the layer, which spans every
+    // air mass's base, a cloud with a higher base was tilted from its base up.
+    var bottom = cloud_layer.cloud_layer_start;
+    if (cloud_layer.profile_mode == 0u) {
+        let advected = world_pos - vec3(cloud_layer.noise_offset.x, 0.0, cloud_layer.noise_offset.z);
+        bottom = atmosphere.inner_radius + cloud_profile_base_m(cloud_weather_type(advected));
+    }
+    let z = max(r - bottom, 0.0);
     let lean = cloud_layer.wind_shear * (z * z / (2.0 * max(cloud_layer.updraft_speed, 0.1)));
     return world_pos - vec3(cloud_layer.noise_offset.x + lean.x, 0.0, cloud_layer.noise_offset.z + lean.z);
 }

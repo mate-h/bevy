@@ -1,7 +1,7 @@
 //! Vertical cloud profiles: Nubis's height x type lookup with physical contents.
 //!
 //! One Rgba16Float texture, [`CLOUD_PROFILE_HEIGHT_RES`] texels per row against metres above the
-//! shared cloud base (texel i at i / (N - 1) x [`CLOUD_PROFILE_RANGE_M`]), one row per cloud
+//! row's cloud base (texel i at i / (N - 1) x [`CLOUD_PROFILE_RANGE_M`]), one row per cloud
 //! type ([`CLOUD_PROFILE_TYPE_RES`]: 0 stratocumulus .. 1 deep cumulus, see
 //! [`CloudProfiles::Physical`]):
 //! - R, G: cloud fraction (peak 1) as a bottom and a top factor (Nubis's two lookups); times
@@ -9,7 +9,9 @@
 //! - B: in-cloud liquid water (kg/m^3); divided by the layer's
 //!   [`VolumetricCloudLayer::liquid_water`](super::VolumetricCloudLayer::liquid_water) it scales
 //!   the eroded density;
-//! - A: unused (1).
+//! - A: the cloud base above the surface (km, the same along a row): each air mass has its own
+//!   lifting condensation level (marine cumulus near 0.55 km, continental near 1.7 km). The
+//!   profile is sampled at the height above it.
 //!
 //! The last rows, filled on the GPU, hold the shape- and billow-noise distributions per noise mip
 //! and the cloud scheme's threshold table, which make the profile the cloud fraction exactly
@@ -36,18 +38,21 @@ pub enum CloudProfiles {
     /// spreads from the surface fluxes, lifted with entrainment 1 / (tau w); cloud fraction is the
     /// share of saturated rising parcels plus the saturated mean state, liquid water their mean.
     /// Cloud fraction is the share of saturated rising parcels plus the saturated mean state,
-    /// liquid water the parcels' mean, against height above the base. The type axis orders
-    /// published LES cases by cloud depth, like Nubis's stratus .. cumulus axis, linear between:
-    /// - 0: stratocumulus, DYCOMS-II RF01 (Stevens et al. 2005): an overcast deck ~270 m deep;
+    /// liquid water the parcels' mean, against height above the base. Each air mass has its own
+    /// cloud base (its lifting condensation level), stored with the profiles, and the cloud layer
+    /// spans them ([`physical_profile_bounds`]). The type axis orders published LES cases by
+    /// cloud-top height, like Nubis's stratus .. cumulus axis, linear between:
+    /// - 0: stratocumulus, DYCOMS-II RF01 (Stevens et al. 2005): an overcast deck ~270 m deep,
+    ///   base 575 m;
     /// - 1/3: shallow trade cumulus, BOMEX (Siebesma et al. 2003): the fraction peaks at the base
-    ///   and falls off to ~1.4 km (within ~20 % of the LES above 1 km);
-    /// - 2/3: continental cumulus, the CASS composite of the ARM Southern Great Plains site at
-    ///   1330 LST (Zhang et al. 2017, J. Atmos. Sci. 74): the fraction falls off through ~2.1 km
-    ///   as the cloudy updrafts detrain (Neggers et al. 2009, sec. 5c), within the bulk and bin
-    ///   microphysics LES; liquid water ~1.5x the bulk LES aloft;
-    /// - 1: deeper trade cumulus, RICO's equilibrium state (van Zanten et al. 2011, Fig. 4):
-    ///   0.05 at the base, ~0.015 through the cloud layer, tops near 3 km (LES: 0.06, ~0.02,
-    ///   ~2.7 km).
+    ///   (555 m) and falls off to ~1.4 km above it (within ~20 % of the LES above 1 km);
+    /// - 2/3: deeper trade cumulus, RICO's equilibrium state (van Zanten et al. 2011, Fig. 4):
+    ///   0.05 at the base (570 m), ~0.015 through the cloud layer, tops near 3 km (LES: 0.06,
+    ///   ~0.02, ~2.7 km);
+    /// - 1: continental cumulus, the CASS composite of the ARM Southern Great Plains site at
+    ///   1330 LST (Zhang et al. 2017, J. Atmos. Sci. 74): base 1675 m, the fraction falls off
+    ///   through ~2.1 km above it as the cloudy updrafts detrain (Neggers et al. 2009, sec. 5c),
+    ///   within the bulk and bin microphysics LES; liquid water ~1.5x the bulk LES aloft.
     /// The baker records its inputs in the KTX2 key/value data.
     #[default]
     Physical,
@@ -112,6 +117,46 @@ pub(crate) fn nubis_profile_texels() -> &'static [u8] {
     ktx2_texels(NUBIS_KTX2)
 }
 
+/// Height range of the clouds of [`CloudProfiles::Physical`] above the surface (m): the lowest
+/// cloud base and the highest top (cloud fraction above 1e-3 of its peak) over all types. With
+/// the physical profiles this is the cloud layer, whatever the layer's own bounds.
+pub fn physical_profile_bounds() -> (f32, f32) {
+    static BOUNDS: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
+    *BOUNDS.get_or_init(|| {
+        let texels = physical_profile_texels();
+        let texel = |row: usize, i: usize, c: usize| {
+            let o = ((row * CLOUD_PROFILE_HEIGHT_RES + i) * 4 + c) * 2;
+            f16_to_f32(u16::from_le_bytes([texels[o], texels[o + 1]]))
+        };
+        let mut lowest = f32::MAX;
+        let mut highest = 0.0f32;
+        for row in 0..CLOUD_PROFILE_TYPE_RES {
+            let base = texel(row, 0, 3) * 1000.0;
+            lowest = lowest.min(base);
+            if let Some(i) = (0..CLOUD_PROFILE_HEIGHT_RES)
+                .rev()
+                .find(|&i| texel(row, i, 0) * texel(row, i, 1) > 1e-3)
+            {
+                let z = i as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32 * CLOUD_PROFILE_RANGE_M;
+                highest = highest.max(base + z);
+            }
+        }
+        (lowest, highest)
+    })
+}
+
+/// f32 from IEEE half (finite values).
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((h >> 10) & 0x1f) as i32;
+    let mant = (h & 0x3ff) as f32;
+    sign * if exp == 0 {
+        mant * 2f32.powi(-24)
+    } else {
+        (1.0 + mant / 1024.0) * 2f32.powi(exp - 15)
+    }
+}
+
 /// IEEE half from f32 for values in [0, 1] (subnormals flush to 0).
 pub(crate) fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
@@ -149,7 +194,16 @@ mod tests {
     }
 
     #[test]
+    fn physical_bounds_span_the_air_masses() {
+        // Marine bases near 0.55 km, the continental cumulus tops near 4.5 km.
+        let (base, top) = physical_profile_bounds();
+        assert!((500.0..600.0).contains(&base), "{base}");
+        assert!((4000.0..5000.0).contains(&top), "{top}");
+    }
+
+    #[test]
     fn half_conversion() {
+        assert_eq!(f16_to_f32(f32_to_f16(0.555)), 0.55517578);
         assert_eq!(f32_to_f16(0.0), 0);
         assert_eq!(f32_to_f16(1.0), 0x3c00);
         assert_eq!(f32_to_f16(0.5), 0x3800);

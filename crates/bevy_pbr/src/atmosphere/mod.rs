@@ -94,7 +94,8 @@ use fbm_noise::{
     prepare_fbm_noise_bind_group, FbmNoiseBindGroupLayout, FbmNoisePipeline, NoiseGenerated,
 };
 pub use cloud_profile::{
-    CloudProfiles, CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_RANGE_M, CLOUD_PROFILE_TYPE_RES,
+    physical_profile_bounds, CloudProfiles, CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_RANGE_M,
+    CLOUD_PROFILE_TYPE_RES,
 };
 use node::{atmosphere_luts, render_sky};
 use perlin_worley_noise::{
@@ -811,10 +812,14 @@ impl Default for VolumetricCloudSettings {
 pub struct VolumetricCloudLayer {
     /// Altitude at which the cloud layer starts (from planet center)
     /// units: m
+    ///
+    /// With [`CloudProfiles::Physical`] (the default) the layer is the profiles' own range
+    /// instead ([`physical_profile_bounds`]): each air mass has its cloud base, so the bounds
+    /// follow the profiles. The other profiles use these bounds.
     pub cloud_layer_start: f32,
 
     /// Altitude at which the cloud layer ends (from planet center)
-    /// units: m
+    /// units: m (see [`VolumetricCloudLayer::cloud_layer_start`])
     pub cloud_layer_end: f32,
 
     /// Density multiplier for the clouds
@@ -1221,6 +1226,20 @@ impl GpuCloudLayers {
             ..ThinCloudLayer::default()
         };
         let ci = cirrus.unwrap_or(&disabled_cirrus);
+        // Physical profiles carry their air masses' cloud bases and tops: the layer spans them.
+        let physical = matches!(profiles, None | Some(CloudProfiles::Physical));
+        let physical_layer;
+        let c = if physical {
+            let (base, top) = physical_profile_bounds();
+            physical_layer = VolumetricCloudLayer {
+                cloud_layer_start: inner_radius + base,
+                cloud_layer_end: inner_radius + top,
+                ..c.clone()
+            };
+            &physical_layer
+        } else {
+            c
+        };
         let (c_wind, c_shear) = c.resolved_wind(wind, inner_radius);
         let (_, ci_shear) = ci.resolved_wind(wind, inner_radius);
         // Log-normal extinction exp(sigma g), g ~ N(0, 1), cloudy where g > g_c with
