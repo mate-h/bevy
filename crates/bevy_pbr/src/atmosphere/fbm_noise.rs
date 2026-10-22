@@ -688,6 +688,11 @@ pub struct NoiseGenerated(pub bool);
 
 /// System to generate the weather map: once, and again whenever the cloud life-cycle clock
 /// ([`crate::VolumetricCloudLayer::evolution_time`]) advances (the map holds the blended generations).
+///
+/// There is one weather map for all views, so one life cycle drives it: that of the cumulus
+/// layer with a life cycle on the camera with the lowest order (then the lowest entity), so the
+/// choice does not depend on query order and a cirrus-only or static layer does not hold it
+/// (audit 38). Turning every life cycle off re-bakes the static map.
 pub fn generate_fbm_noise_once(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -696,21 +701,28 @@ pub fn generate_fbm_noise_once(
     bind_group: Option<Res<FbmNoiseBindGroup>>,
     texture: Res<FbmNoiseTexture>,
     params_buffer: Option<Res<FbmNoiseParamsBuffer>>,
-    layers: Query<&crate::GpuCloudLayers>,
+    layers: Query<(
+        &crate::GpuCloudLayers,
+        &bevy_render::view::ExtractedView,
+        Option<&bevy_render::camera::ExtractedCamera>,
+    )>,
     mut last_life_t: Local<Option<f32>>,
     mut cirrus_done: Local<bool>,
     mut noise_generated: ResMut<NoiseGenerated>,
 ) {
     let life = layers
         .iter()
-        .next()
-        .filter(|layer| layer.lifetime > 0.0)
-        .map(|layer| layer.evolution_time / layer.lifetime + 0.5);
+        .filter(|(layer, ..)| layer.cloud_density > 0.0 && layer.lifetime > 0.0)
+        .min_by_key(|(_, view, camera)| {
+            (camera.map_or(isize::MAX, |c| c.order), view.retained_view_entity.main_entity.id())
+        })
+        .map(|(layer, ..)| layer.evolution_time / layer.lifetime + 0.5);
     // Re-bake only when the phase moved by > 1/2000 of a cycle (a weight change far below
-    // visibility; at 1x with a 20 min life time that is every ~0.6 s).
+    // visibility; at 1x with a 20 min life time that is every ~0.6 s), or the life cycle was
+    // turned on or off.
     let unchanged = match (life, *last_life_t) {
         (Some(t), Some(last)) => (t - last).abs() < 5e-4,
-        (None, _) => true,
+        (None, None) => true,
         _ => false,
     };
     if noise_generated.0 && unchanged && *cirrus_done {

@@ -188,6 +188,22 @@ fn main() {
             }
         });
     }
+    // `ATMOSPHERE_CLOUD_LIFETIME_OFF_SECS=<t>`: at t (real time), turn the cloud life cycle off
+    // (static weather); used to test that the weather map re-bakes.
+    if let Some(secs) = env_f32("ATMOSPHERE_CLOUD_LIFETIME_OFF_SECS") {
+        app.add_systems(
+            Update,
+            move |time: Res<Time<Real>>, mut layers: Query<&mut VolumetricCloudLayer>| {
+                if time.elapsed_secs() >= secs {
+                    for mut layer in &mut layers {
+                        if layer.lifetime != 0.0 {
+                            layer.lifetime = 0.0;
+                        }
+                    }
+                }
+            },
+        );
+    }
     // `ATMOSPHERE_AEROSOL_EDIT_SECS=<t>`: at t, switch the Earth medium's aerosol to
     // `Aerosol::URBAN` by editing the asset in place (same handle); used to test that the
     // atmosphere LUTs follow in-place medium edits.
@@ -548,6 +564,10 @@ fn setup_camera_fog(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600.0),
+            // `ATMOSPHERE_CLOUD_LIFETIME=<s>` sets the cloud life time (0 = static weather).
+            lifetime: env_f32("ATMOSPHERE_CLOUD_LIFETIME").unwrap_or(1200.0),
+            // `ATMOSPHERE_CLOUD_EVOLUTION=<s>` starts the cloud clock (life-cycle phase) there.
+            evolution_time: env_f32("ATMOSPHERE_CLOUD_EVOLUTION").unwrap_or(0.0),
             // `ATMOSPHERE_CLOUD_COVERAGE=<x>` sets the starting coverage scale (Left/Right change it).
             coverage: std::env::var("ATMOSPHERE_CLOUD_COVERAGE")
                 .ok()

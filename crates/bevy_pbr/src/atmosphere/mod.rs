@@ -906,6 +906,9 @@ pub struct VolumetricCloudLayer {
     /// between independent coverage patterns over this period, so each cloud grows (wider and
     /// taller, as the top follows coverage) and decays. Small cumulus live ~10-30 min (textbook
     /// range, e.g. Houze, Cloud Dynamics).
+    ///
+    /// The weather map is shared by all views: with several cameras or atmospheres, the life
+    /// cycle of the lowest-order camera whose cumulus layer has one drives everyone's weather.
     pub lifetime: f32,
     /// Accumulated cloud time (s), advanced by [`advance_cloud_wind`]; drives the life cycle.
     pub evolution_time: f32,
