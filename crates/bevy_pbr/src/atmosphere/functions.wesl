@@ -404,28 +404,41 @@ fn cloud_far_transmittance(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     return exp(-od);
 }
 
+/// Whether the cloud shadow map holds this light's shadows. The map is traced along the view's
+/// first directional light (`cloud_shadow_map.wesl`); any other light's lookup would read that
+/// light's optical depths in its own basis (a displaced, wrongly oriented shadow pattern), so
+/// its consumers march the cloud layer toward the light instead (`cloud_far_transmittance`).
+/// Parallel lights share the map.
+@if(CLOUDS_ENABLED)
+fn cloud_shadow_is_mapped_light(direction_to_light: vec3<f32>) -> bool {
+    return lights.n_directional_lights > 0u
+        && dot(direction_to_light, lights.directional_lights[0].direction_to_light) > 0.99999;
+}
+
 /// Light-space frame of the cloud shadow map (anchor and basis), for many lookups per invocation.
 @if(CLOUDS_ENABLED)
 struct CloudShadowFrame {
     anchor: vec3<f32>,
     bx: vec3<f32>,
     by: vec3<f32>,
+    mapped: bool,
 }
 
 @if(CLOUDS_ENABLED)
 fn cloud_shadow_frame(direction_to_light: vec3<f32>) -> CloudShadowFrame {
     let basis = build_light_basis(safe_normalize(-direction_to_light));
     let anchor = snap_anchor_to_texel_grid(cloud_shadow_anchor_origin(), basis, settings.cloud_shadow_map_extent, settings.cloud_shadow_map_size);
-    return CloudShadowFrame(anchor, basis.x, basis.y);
+    return CloudShadowFrame(anchor, basis.x, basis.y, cloud_shadow_is_mapped_light(direction_to_light));
 }
 
-/// Shadow-map texture coordinate of a point below every cloud (ground), or -1 outside the map.
+/// Shadow-map texture coordinate of a point below every cloud (ground), or -1 outside the map
+/// or for a light the map was not traced for.
 @if(CLOUDS_ENABLED)
 fn cloud_shadow_ground_uv(frame: CloudShadowFrame, world_pos: vec3<f32>) -> vec2<f32> {
     let extent = settings.cloud_shadow_map_extent;
     let rel = world_pos - frame.anchor;
     let xy = vec2(dot(rel, frame.bx), dot(rel, frame.by));
-    if (extent <= 0.0 || any(abs(xy) > vec2(extent))) {
+    if (!frame.mapped || extent <= 0.0 || any(abs(xy) > vec2(extent))) {
         return vec2(-1.0);
     }
     return cloud_shadow_xy_to_uv(xy, extent);
@@ -480,6 +493,9 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     let half_depth = extent * 2.0;
     if (extent <= 0.0 || half_depth <= 0.0) {
         return 1.0;
+    }
+    if (!cloud_shadow_is_mapped_light(direction_to_light)) {
+        return cloud_far_transmittance(world_pos, direction_to_light, use_optical_depth_only);
     }
 
     // IMPORTANT: use the same trace direction as the compute pass:

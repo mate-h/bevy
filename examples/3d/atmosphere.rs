@@ -822,15 +822,17 @@ fn setup_terrain_scene(
             // conditions. RAW_SUNLIGHT in comparison is the illuminance of the
             // sun unfiltered by the atmosphere, so it is the proper input for
             // sunlight to be filtered by the atmosphere.
-            illuminance: lux::RAW_SUNLIGHT,
+            // `ATMOSPHERE_SUN_SCALE=<x>` scales the sun's illuminance.
+            illuminance: lux::RAW_SUNLIGHT * env_f32("ATMOSPHERE_SUN_SCALE").unwrap_or(1.0),
             ..default()
         },
-        // `ATMOSPHERE_SUN_ELEV_DEG=<deg>` fixes the sun elevation (overrides ATMOSPHERE_SUNSET).
-        match std::env::var("ATMOSPHERE_SUN_ELEV_DEG")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-        {
-            Some(deg) => Transform::from_xyz(deg.to_radians().cos(), deg.to_radians().sin(), 0.0),
+        // `ATMOSPHERE_SUN_ELEV_DEG=<deg>` fixes the sun elevation (overrides ATMOSPHERE_SUNSET),
+        // `ATMOSPHERE_SUN_AZ_DEG=<deg>` turns it about the vertical from +X toward -Z.
+        match env_f32("ATMOSPHERE_SUN_ELEV_DEG") {
+            Some(deg) => Transform::from_translation(sun_direction(
+                deg,
+                env_f32("ATMOSPHERE_SUN_AZ_DEG").unwrap_or(0.0),
+            )),
             None => Transform::from_xyz(
                 1.0,
                 if std::env::var("ATMOSPHERE_SUNSET").is_ok() { 0.06 } else { 0.4 },
@@ -841,6 +843,22 @@ fn setup_terrain_scene(
         VolumetricLight,
         SunDisk::EARTH,
     ));
+    // `ATMOSPHERE_SECOND_SUN=<elev_deg>,<az_deg>`: a second sun (no shadow maps, not volumetric,
+    // so it sorts after the first and the cloud shadow map follows the first), to test
+    // multiple-light cloud shadows.
+    if let Some(v) = std::env::var("ATMOSPHERE_SECOND_SUN")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>())
+        .filter(|v| v.len() == 2)
+    {
+        commands.spawn((
+            DirectionalLight {
+                illuminance: lux::RAW_SUNLIGHT,
+                ..default()
+            },
+            Transform::from_translation(sun_direction(v[0], v[1])).looking_at(Vec3::ZERO, Vec3::Y),
+        ));
+    }
 
     // // spawn the fog volume
     // commands.spawn((
@@ -961,6 +979,17 @@ fn camera_pose_title(
     if window.title != title {
         window.title = title;
     }
+}
+
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// Direction toward a sun at `elev_deg` above the horizon, turned `az_deg` about the vertical
+/// from +X toward -Z.
+fn sun_direction(elev_deg: f32, az_deg: f32) -> Vec3 {
+    let (e, a) = (elev_deg.to_radians(), az_deg.to_radians());
+    Vec3::new(e.cos() * a.cos(), e.sin(), -e.cos() * a.sin())
 }
 
 fn dynamic_scene(

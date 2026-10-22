@@ -1136,13 +1136,16 @@ fn rect_light(
 /// (`atmosphere::functions::sample_cloud_shadow_map`), and the thin (cirrus) layer's optical
 /// depth in alpha below that layer. The old linear UV and per-texel snapped camera anchor read
 /// texels ~20 km from the receiver's at the map's edge, and cirrus never shadowed meshes.
-/// Returns 1 when the view has no cloud layer (the extent is zeroed on the CPU) and outside the
-/// map (no cloud bindings here for the far march).
+/// Returns 1 when the view has no cloud layer (the extent is zeroed on the CPU), outside the
+/// map, and for lights the map was not traced for (it follows the first directional light;
+/// other lights' lookups would read its shadows in their own basis). There are no cloud
+/// bindings here for a march toward those lights.
 @if(ATMOSPHERE)
 fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
     let settings = view_bindings::atmosphere_data.settings;
     let extent = settings.cloud_shadow_map_extent;
-    if (extent <= 0.0) {
+    if (extent <= 0.0 || view_bindings::lights.n_directional_lights == 0u
+        || dot(L, view_bindings::lights.directional_lights[0].direction_to_light) <= 0.99999) {
         return 1.0;
     }
     let half_depth = extent * 2.0;
