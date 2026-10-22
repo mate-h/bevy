@@ -188,6 +188,26 @@ fn main() {
             }
         });
     }
+    // `ATMOSPHERE_AEROSOL_EDIT_SECS=<t>`: at t, switch the Earth medium's aerosol to
+    // `Aerosol::URBAN` by editing the asset in place (same handle); used to test that the
+    // atmosphere LUTs follow in-place medium edits.
+    if let Some(secs) = env_f32("ATMOSPHERE_AEROSOL_EDIT_SECS") {
+        app.add_systems(
+            Update,
+            // Real time: `ATMOSPHERE_FREEZE` pauses virtual time.
+            move |time: Res<Time<Real>>,
+                  presets: Res<AtmospherePresets>,
+                  mut media: ResMut<Assets<ScatteringMedium>>,
+                  mut done: Local<bool>| {
+                if !*done && time.elapsed_secs() >= secs {
+                    *done = true;
+                    if let Some(mut medium) = media.get_mut(&presets.earth) {
+                        *medium = ScatteringMedium::earth_with_aerosol(256, 256, Aerosol::URBAN);
+                    }
+                }
+            },
+        );
+    }
     if bench.screenshot.is_some() || bench.exit_secs.is_some() || bench.exit_frame.is_some() {
         app.insert_resource(bench).add_systems(Update, bench_hooks);
     }
@@ -484,11 +504,13 @@ fn setup_camera_fog(
     commands.insert_resource(OffscreenTarget(offscreen.clone()));
     // The default aerosol (Bruneton 2017, τ≈0.005) is very clear air: its clear-sky anti-sun
     // L/Lz is 1.5–2.3× steeper than CIE S 011/E:2003 type 12 and Poly Haven HDRs.
-    let earth_medium = scattering_mediums.add(ScatteringMedium::earth_with_aerosol(
-        256,
-        256,
-        Aerosol::CONTINENTAL_CLEAN,
-    ));
+    // `ATMOSPHERE_AEROSOL=urban` starts with `Aerosol::URBAN`.
+    let aerosol = match std::env::var("ATMOSPHERE_AEROSOL").as_deref() {
+        Ok("urban") => Aerosol::URBAN,
+        _ => Aerosol::CONTINENTAL_CLEAN,
+    };
+    let earth_medium =
+        scattering_mediums.add(ScatteringMedium::earth_with_aerosol(256, 256, aerosol));
     let mars_phase = asset_server.load("textures/mars_mie_phase.ktx2");
     let mars_medium = scattering_mediums.add(ScatteringMedium::mars(256, 256, mars_phase));
 

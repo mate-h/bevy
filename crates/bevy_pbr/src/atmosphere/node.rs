@@ -36,6 +36,7 @@ pub fn atmosphere_luts(
         &ExtractedView,
     )>,
     pipelines: Res<AtmosphereLutPipelines>,
+    gpu_media: Res<bevy_render::render_asset::RenderAssets<crate::GpuScatteringMedium>>,
     mut per_view: bevy_ecs::system::Local<PerViewLutState>,
     pipeline_cache: Res<PipelineCache>,
     mut ctx: RenderContext,
@@ -108,7 +109,10 @@ pub fn atmosphere_luts(
 
         // Transmittance + multiscattering LUTs depend only on the atmosphere/medium and LUT
         // settings, not on the view or sun: rebuild them only when those inputs (or the LUT
-        // textures) change. A periodic refresh bounds staleness for in-place medium edits.
+        // textures) change. The medium enters by its prepared GPU textures, not its handle: an
+        // in-place edit of the asset keeps the handle but re-prepares it into new textures, so
+        // the LUTs follow it on the next frame (audit 17; a periodic rebuild every 240 frames
+        // used to bound that staleness).
         let lut_key = {
             use core::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -123,6 +127,10 @@ pub fn atmosphere_luts(
                 f.to_bits().hash(&mut h);
             }
             a.medium.hash(&mut h);
+            if let Some(medium) = gpu_media.get(a.medium) {
+                medium.density_lut.id().hash(&mut h);
+                medium.scattering_lut.id().hash(&mut h);
+            }
             (
                 settings.transmittance_lut_size,
                 settings.multiscattering_lut_size,
@@ -139,14 +147,8 @@ pub fn atmosphere_luts(
             h.finish()
         };
         let lut_static_dirty = state.lut_key != Some(lut_key)
-            || state.lut_age >= 240
             || std::env::var_os("ATMOSPHERE_LUT_ALWAYS").is_some();
-        if lut_static_dirty {
-            state.lut_key = Some(lut_key);
-            state.lut_age = 0;
-        } else {
-            state.lut_age += 1;
-        }
+        state.lut_key = Some(lut_key);
 
         if lut_static_dirty {
             // Transmittance LUT
@@ -757,9 +759,8 @@ pub struct PerViewLutState {
 
 #[derive(Default)]
 pub struct ViewLutState {
-    /// Inputs of the cached transmittance / multiscattering LUTs and frames since their build.
+    /// Inputs of the cached transmittance / multiscattering LUTs.
     lut_key: Option<u64>,
-    lut_age: u32,
     /// Cloud-field rebuild stage counter and the SDF texture it was built into.
     field_frame: u32,
     field_texture: Option<bevy_render::render_resource::TextureId>,
