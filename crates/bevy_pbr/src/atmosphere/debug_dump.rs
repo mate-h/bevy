@@ -7,6 +7,12 @@
 //! later frame, after their submission (a per-invocation counter mapped an earlier view's copies
 //! during a later view of the same frame, before they were submitted: audit 31).
 //!
+//! Each dump directory gets a `manifest.txt` (Q23 provenance): the commit and whether the tree
+//! had uncommitted changes, every `ATMOSPHERE_*`, `CLOUD_*` and `BEVY_*` variable, the dump
+//! frames, and the frames at which reference accumulators (re)started, from which a reference
+//! dump's samples per pixel follow: (dump frame - start - 120) / 4 (each half-res pixel is
+//! traced every 4th frame, after 120 settling frames).
+//!
 //! [`FrameCount`]: bevy_diagnostic::FrameCount
 
 use bevy_math::UVec3;
@@ -20,6 +26,43 @@ use bevy_render::{
 use std::sync::Mutex;
 
 static PENDING: Mutex<Vec<(Buffer, String, u32)>> = Mutex::new(Vec::new());
+
+/// Appends a line to the dump directory's manifest (written on first use), if dumping.
+pub fn note(line: &str) {
+    use std::io::Write;
+    let Ok(dir) = std::env::var("CLOUD_DUMP_DIR") else {
+        return;
+    };
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    let path = std::path::Path::new(&dir).join("manifest.txt");
+    STARTED.call_once(|| {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let mut header = format!(
+            "commit: {}\nuncommitted changes: {}\n",
+            git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into()),
+            git(&["status", "--porcelain", "--untracked-files=no"]).map_or("unknown".into(), |s| (!s.is_empty()).to_string()),
+        );
+        let mut vars: Vec<_> = std::env::vars()
+            .filter(|(k, _)| ["ATMOSPHERE_", "CLOUD_", "BEVY_"].iter().any(|p| k.starts_with(p)))
+            .collect();
+        vars.sort();
+        for (k, v) in vars {
+            header += &format!("env {k}={v}\n");
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&path, header);
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(&path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
 
 /// Returns `frame` if a dump is requested on it; maps the copies of earlier frames.
 pub fn begin_frame(frame: u32) -> Option<u32> {
@@ -41,11 +84,14 @@ pub fn begin_frame(frame: u32) -> Option<u32> {
         false
     });
     let frames = std::env::var("CLOUD_DUMP_FRAMES").unwrap_or_else(|_| "4,300".into());
-    frames
+    let dumping = frames
         .split(',')
         .filter_map(|v| v.trim().parse::<u32>().ok())
-        .any(|f| f == frame)
-        .then_some(frame)
+        .any(|f| f == frame);
+    if dumping {
+        note(&format!("dump frame {frame}"));
+    }
+    dumping.then_some(frame)
 }
 
 /// Copies mip `mip` of `texture` (size already at that mip) into a readback buffer.

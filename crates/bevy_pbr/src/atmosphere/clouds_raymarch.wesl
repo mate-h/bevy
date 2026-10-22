@@ -104,7 +104,11 @@ const CLOUD_STEP_REL: f32 = 0.1;
 fn cloud_view_step(t: f32) -> f32 {
     let far = CLOUD_STEP_NEAR_M + CLOUD_STEP_FAR_OFFSET_M * clamp(t / CLOUD_STEP_FAR_REF_M, 0.0, 8.0);
     let floor_m = max(cloud_layer.detail_noise_scale, 1.0) / 128.0;
-    return min(far, max(CLOUD_STEP_REL * t, floor_m));
+    var step = min(far, max(CLOUD_STEP_REL * t, floor_m));
+    // Step-size convergence (audit 24 validation).
+    @if(ATM_DBG_STEP_DIV4) { step *= 0.25; }
+    @if(ATM_DBG_STEP_DIV16) { step *= 0.0625; }
+    return step;
 }
 const CLOUD_FINE_EMPTY_TO_COARSE: u32 = 10u;
 const CLOUD_COARSE_DENSITY_EPS: f32 = 0.0005;
@@ -347,8 +351,8 @@ fn ref_rand() -> f32 {
 // exceeds the largest texel, so the maxima over the texels bound every lookup: the air over the
 // medium's density LUT (absorption + scattering rows), the clouds `cloud_density` times the
 // factors of the up-res density (`sample_cumulus_shape_lod`): the profile's liquid water
-// relative to `liquid_water` and the thermal magnitude (each can exceed 1), and the mip-0
-// near-camera reshape of an eroded density <= 1 (at most its value at 1). Each workgroup
+// relative to `liquid_water` and the thermal magnitude (each can exceed 1); the eroded density
+// and its near-camera reshape stay <= 1 at any LOD (`ref_cloud_density`). Each workgroup
 // reduces them cooperatively before tracing (`ref_compute_bounds`). The previous majorant
 // (cloud_density) did not bound the physical profiles, whose density reaches ~3.
 @if(CLOUD_REFERENCE)
@@ -391,17 +395,44 @@ fn ref_compute_bounds(li: u32) {
     }
     let bounds = ref_wg_bounds[0];
     ref_air_majorant = max(bounds.xyz, vec3(1e-9));
-    var shape = near_camera_reshape(1.0, 0.0);
+    var shape = 1.0;
     if (cloud_layer.profile_mode == 0u) {
         shape *= bounds.w / max(cloud_layer.liquid_water, 1e-9) * ref_wg_magnitude[0];
     }
     ref_cloud_bound = max(cloud_layer.cloud_density, 0.0) * shape;
 }
 
+// The camera of the traced pixel (atmosphere space), for the cloud LOD.
+var<private> ref_camera: vec3<f32>;
+
+// The cloud medium at p as the realtime march defines it for this camera: the density at the
+// LOD of p's distance to the camera (Q22). Mip 0 everywhere also applied the near-camera reshape
+// and high-frequency detail (keyed to the LOD's inferred camera distance, < 150 m) to every
+// cloud, a different medium from the realtime one beyond 150 m. Bounces and sun paths use the
+// same field (one medium per camera), so the comparison isolates transport. Like the realtime
+// march, the field ends at `cloud_max_distance` from the camera: the reference traced every
+// cloud to the horizon, 0.09 more opaque on average in a hero view.
 fn ref_cloud_density(p: vec3<f32>) -> f32 {
     @if(CLOUD_REF_NO_CLOUDS) { return 0.0; }
-    return get_cloud_medium_density_lod(length(p), p, 0.0);
+    let d = distance(p, ref_camera);
+    if (d > settings.cloud_max_distance) { return 0.0; }
+    return get_cloud_medium_density_lod(length(p), p, cloud_mip_from_distance(d));
 }
+
+// Cap diagnostics (ATM_DBG_REF_CAPS, Q21): x the bounce cap, y a flight's segment budget, z the
+// sun ray's null-collision budget was reached by this sample (each truncates the path), w a
+// flight continued past a segment's null-collision budget (exact, no truncation).
+var<private> ref_caps: vec4<f32>;
+const REF_NULL_CANDIDATES: u32 = 8192u;
+const REF_SEGMENTS: u32 = 64u;
+const REF_SUN_CANDIDATES: u32 = 65536u;
+const REF_MAX_BOUNCES: u32 = 16384u;
+// Beyond this many events, each further event also survives with REF_DEEP_SURVIVAL (unbiased
+// Russian roulette, weight 1 / q): analog cloud events keep throughput 1, so the throughput
+// roulette never ended diffusion paths in thick clouds (~tau^2 events, thousands at tau ~ 50),
+// which a hard cap of 1024 truncated (Q21). Termination and variance only, not physics.
+const REF_DEEP_EVENTS: u32 = 256u;
+const REF_DEEP_SURVIVAL: f32 = 0.99;
 
 // Distance from p0 + d t to the next intersection of the ray p0 + d s with a sphere of radius R
 // beyond s = t (inf if none). The roots are always solved from the ray's origin p0, so a
@@ -443,7 +474,7 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
     let r_cs = cloud_layer.cloud_layer_start;
     let r_ce = cloud_layer.cloud_layer_end;
     var t = 0.0;
-    for (var seg = 0u; seg < 16u; seg++) {
+    for (var seg = 0u; seg < REF_SEGMENTS; seg++) {
         let p = p0 + d * t;
         // Next boundary: cloud shell spheres, ground, top of atmosphere, t_max.
         var tb = t_max - t;
@@ -464,9 +495,10 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
         var maj = select(air_max, 0.0, rm > atmosphere.outer_radius);
         @if(!CLOUD_REF_NO_CLOUDS) { if (in_shell) { maj += sigma_t_c * ref_cloud_bound; } }
         var tt = 0.0;
-        for (var i = 0u; i < 8192u && maj > 0.0; i++) {
+        var reached = maj <= 0.0;
+        for (var i = 0u; i < REF_NULL_CANDIDATES && !reached; i++) {
             tt += -log(1.0 - ref_rand()) / maj;
-            if (tt >= tb) { break; }
+            if (tt >= tb) { reached = true; break; }
             let q = p + d * tt;
             let rq = length(q);
             var air = ref_air(rq);
@@ -487,9 +519,17 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
             if (u < t_cl + s_air) { o.t = t + tt; o.event = 1u; return o; }
             if (u < t_cl + s_air + a_air) { o.t = t + tt; o.event = 3u; return o; }
         }
+        if (!reached) {
+            // Candidate budget used up inside the segment: continue from the last candidate
+            // (exact: the candidates are a memoryless Poisson process).
+            ref_caps.w = 1.0;
+            t += tt;
+            continue;
+        }
         t += tb;
         if (ev != 6u) { o.t = t; o.event = ev; return o; }
     }
+    ref_caps.y = 1.0;
     o.t = t;
     o.event = 0u;
     return o;
@@ -555,11 +595,13 @@ fn ref_sun_vis(p: vec3<f32>, l: vec3<f32>, ch: u32) -> f32 {
         let sigma_t_c = get_cloud_scattering_coeff() + get_cloud_absorption_coeff();
         var t = max(seg.x, 0.0);
         let t_end = min(seg.y, settings.cloud_max_distance);
-        for (var i = 0u; i < 8192u; i++) {
+        var done = false;
+        for (var i = 0u; i < REF_SUN_CANDIDATES; i++) {
             t += -log(1.0 - ref_rand()) / (sigma_t_c * ref_cloud_bound);
-            if (t >= t_end || v < 1e-6) { break; }
+            if (t >= t_end || v < 1e-6) { done = true; break; }
             v *= 1.0 - ref_cloud_density(p + l * t) / ref_cloud_bound;
         }
+        if (!done) { ref_caps.z = 1.0; }
     }
     }
     return v;
@@ -571,6 +613,8 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
     var salt = 0u;
     @if(CLOUD_REF_SEED2) { salt = 0x9e3779b9u; }
     ref_rng = ref_hash(px.x ^ ref_hash(px.y ^ ref_hash(view.frame_count ^ salt)));
+    ref_camera = origin;
+    ref_caps = vec4(0.0);
     let ch = (sample_index + px.x * 7u + px.y * 13u) % 3u;
     var lum_w = array<f32, 3>(0.2126, 0.7152, 0.0722);
 
@@ -596,7 +640,8 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
     var d = view_dir;
     var t_max = t_scene;
     var first_t = 0.0;
-    for (var bounce = 0u; bounce < 1024u; bounce++) {
+    var bounce = 0u;
+    for (; bounce < REF_MAX_BOUNCES; bounce++) {
         let f = ref_flight(p, d, t_max, ch, air_max, false);
         if (bounce == 0u) { first_t = f.t; }
         if (f.event == 0u || f.event == 5u || f.event == 3u) { break; }
@@ -644,14 +689,17 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
         // realtime single-scatter octave in isolation.
         @if(CLOUD_TERM_S1) { break; }
         if (bounce > 3u) {
-            let q = clamp(thr, 0.05, 1.0);
+            var q = clamp(thr, 0.05, 1.0);
+            if (bounce >= REF_DEEP_EVENTS) { q *= REF_DEEP_SURVIVAL; }
             if (ref_rand() > q) { break; }
             thr /= q;
         }
     }
+    if (bounce == REF_MAX_BOUNCES) { ref_caps.x = 1.0; }
     var rgb = vec3(0.0);
     rgb[ch] = 3.0 * L;
     out.c = vec4(rgb, 3.0 * lum_w[ch] * t_cam);
+    @if(ATM_DBG_REF_CAPS) { out.c = ref_caps; }
     out.d = first_t;
     return out;
 }
@@ -719,6 +767,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
     let rp = cloud_reference_trace(ray_origin, ray_dir, t_scene, half_px);
     weighted_depth = rp.d;
     result = vec4(rp.c.rgb * view.exposure, rp.c.a);
+    @if(ATM_DBG_REF_CAPS) { result = rp.c; }
     }
     @if(!CLOUD_REFERENCE) {
     if (seg.z > 0.5 && t_end > t_start && cloud_layer.cloud_density > 0.0) {
@@ -750,6 +799,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // return to coarse. Light taps only in fine mode with density > 0.
         var t = t_start + jitter * cloud_view_step(t_start);
         var fine_mode = false;
+        // Ground-truth march: no coarse gate at all.
+        @if(ATM_DBG_NO_COARSE) { fine_mode = true; }
         @if(ATM_DBG_NO_COARSE) { fine_mode = true; }
         var fine_empty: u32 = 0u;
         // Length of the last coarse leap: a coarse hit steps back over it, and only it.

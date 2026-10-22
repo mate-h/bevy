@@ -2662,9 +2662,12 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   frame instead of the fixed phases, and accumulate optical depth (audit 1 validation: after
 ///   convergence half the mean error and 40 % of the edge error of the fixed phases, with
 ///   frame-to-frame noise of 0.02 in edge transmittance).
+/// - `ATM_DBG_STEP_DIV4`, `ATM_DBG_STEP_DIV16`: a 4x / 16x shorter cloud view step (with
+///   `ATM_DBG_NO_COARSE`: the step-size convergence of the view march, audit 24).
 /// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the
-///   tracer's bounce (r), flight null-collision/segment (g) and sun-ray (b) budgets.
-/// - `ATM_DBG_NO_COARSE`: fine samples everywhere, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
+///   tracer's bounce (r), flight segment (g) and sun-ray (b) budgets, and that continued past a
+///   segment's null-collision budget (a, exact).
+/// - `ATM_DBG_NO_COARSE`: fine samples everywhere from the ray start, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
 /// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.
 fn atm_dbg_defs() -> Vec<bevy_shader::ShaderDefVal> {
@@ -2787,6 +2790,10 @@ pub(super) fn prepare_cloud_reference_accumulators(
             _ => {
                 let buffer = create(bytes);
                 render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[frame_count.0, 0, 0, 0]));
+                super::debug_dump::note(&format!(
+                    "reference accumulator (re)started at frame {} for view {:?}",
+                    frame_count.0, view.retained_view_entity
+                ));
                 buffer
             }
         };
