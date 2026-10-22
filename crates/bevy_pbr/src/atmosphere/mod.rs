@@ -272,7 +272,7 @@ impl Plugin for AtmospherePlugin {
                     prepare_cloud_shadow_temporal_params
                         .in_set(RenderSystems::PrepareBindGroups)
                         .before(prepare_atmosphere_bind_groups),
-                    prepare_clouds_temporal_params
+                    (prepare_clouds_temporal_params, resources::prepare_cloud_reference_accumulators)
                         .in_set(RenderSystems::PrepareBindGroups)
                         .before(prepare_atmosphere_bind_groups),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),

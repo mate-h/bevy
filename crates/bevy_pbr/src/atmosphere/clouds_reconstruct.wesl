@@ -129,14 +129,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // Reference path tracer: progressive average per pixel (each traced every 4th frame) once
-    // the noise/shadow map have settled; no clamping.
     // Reference path tracer: exact running mean in an f32 accumulator (sum + count), started
     // once the noise/shadow map have settled. No clamping, no history blending.
+    // The accumulator belongs to this view; element 0 holds the frame it was (re)started, when
+    // the view or anything in the integrand changed (`prepare_cloud_reference_accumulators`).
+    // The average starts once the noise, shadow map and histories have settled after that.
     @if(CLOUD_REFERENCE) {
-        const REF_START: u32 = 120u;
-        let k = 2u * (id.y * size.x + id.x);
-        if (view.frame_count < REF_START) {
+        const REF_SETTLE_FRAMES: u32 = 120u;
+        let k = 1u + 2u * (id.y * size.x + id.x);
+        if (view.frame_count < bitcast<u32>(ref_accum[0].x) + REF_SETTLE_FRAMES) {
             ref_accum[k] = vec4(0.0);
             ref_accum[k + 1u] = vec4(0.0);
         } else {

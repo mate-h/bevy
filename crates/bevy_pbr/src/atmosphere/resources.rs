@@ -1940,6 +1940,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             Option<&GpuAtmosphereSettings>,
             Option<&CloudsTemporalParamsUniform>,
             Option<&CloudShadowTemporalParamsUniform>,
+            Option<&CloudReferenceAccumulator>,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
@@ -2023,6 +2024,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         settings,
         temporal_uniform,
         shadow_temporal_uniform,
+        reference_accumulator,
     ) in &views
     {
         let Some(depth_view) = view_depth_texture
@@ -2403,7 +2405,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
         let clouds_reconstruct = clouds_raymarch
             .as_ref()
             .zip(temporal_uniform.and_then(|u| u.0.binding()))
-            .map(|(_, params_binding)| {
+            .zip(reference_accumulator)
+            .map(|((_, params_binding), reference_accumulator)| {
                 render_device.create_bind_group(
                     "clouds_reconstruct_bind_group",
                     &pipeline_cache.get_bind_group_layout(&layouts.clouds_reconstruct),
@@ -2418,7 +2421,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (30, params_binding),
                         (31, &textures.clouds.default_view),
                         (32, &textures.clouds_depth.default_view),
-                        (33, reference_accumulator(&render_device, textures.clouds.texture.size()).as_entire_binding()),
+                        (33, reference_accumulator.0.as_entire_binding()),
                     )),
                 )
             });
@@ -2600,10 +2603,26 @@ pub(crate) fn prepare_atmosphere_buffers(
 /// Debug: `CLOUD_REFERENCE=1` swaps the realtime cloud march for a progressive volumetric path
 /// tracer (delta/ratio tracking, full multiple scattering) over the same density field, for
 /// ground-truth comparisons. Read once at pipeline creation.
+///
+/// Its scope (audit 34): the cumulus layer, the air and the planet's ground lit by the first
+/// directional light, from a camera inside or outside the atmosphere. Not the thin cloud layer
+/// (compare with `ATMOSPHERE_NO_CIRRUS=1`), not the sky light from other lights. Of the term
+/// flags it honours only `CLOUD_TERMS=s1`, as single scattering of any medium (the first event
+/// can be air or ground as well as cloud): mask non-cloud pixels before attributing differences
+/// to the realtime cloud single scatter. `CLOUD_TERMS=sun|amb` and `CLOUD_NO_HAZE` have no
+/// path-space definition here and are ignored, with a warning.
 fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
     let mut defs: Vec<bevy_shader::ShaderDefVal> = Vec::new();
     if std::env::var("CLOUD_REFERENCE").is_ok() {
         defs.push("CLOUD_REFERENCE".into());
+        if matches!(std::env::var("CLOUD_TERMS").as_deref(), Ok("sun" | "amb"))
+            || std::env::var_os("CLOUD_NO_HAZE").is_some()
+        {
+            bevy_log::warn_once!(
+                "CLOUD_REFERENCE ignores CLOUD_TERMS=sun|amb and CLOUD_NO_HAZE: the reference is \
+                 the full image (or single scattering with CLOUD_TERMS=s1)"
+            );
+        }
     }
     // Clear-sky validation of the reference against the LUT sky (realtime: ATMOSPHERE_NO_CLOUDS).
     if std::env::var("CLOUD_REF_SEED2").is_ok() {
@@ -2663,31 +2682,114 @@ fn cloud_term_defs() -> Vec<bevy_shader::ShaderDefVal> {
     defs
 }
 
-/// f32 running-sum accumulator for the reference path tracer (2 x vec4 per half-res pixel:
-/// sum(rgb, T), (count, first-hit distance sum, 0, 0)). The 16-bit cloud history cannot hold a
-/// true running mean (increments drop below the f16 ulp after ~1-2k samples). Recreated (zeroed)
-/// on resize; tiny when `CLOUD_REFERENCE` is off.
-fn reference_accumulator(
-    device: &RenderDevice,
-    size: Extent3d,
-) -> Buffer {
-    use std::sync::Mutex;
-    static ACC: Mutex<Option<(Buffer, u64)>> = Mutex::new(None);
-    let bytes = if std::env::var("CLOUD_REFERENCE").is_ok() {
-        (size.width as u64 * size.height as u64 * 32).max(32)
-    } else {
-        32
+/// f32 running-sum accumulator of a view for the reference path tracer (`CLOUD_REFERENCE`):
+/// a header vec4 (x: the frame it was started, as u32 bits), then 2 x vec4 per half-res pixel:
+/// sum(rgb, T), (count, first-hit distance sum, 0, 0). The 16-bit cloud history cannot hold a
+/// true running mean (increments drop below the f16 ulp after ~1-2k samples). 32 bytes when
+/// `CLOUD_REFERENCE` is off.
+#[derive(Component)]
+pub struct CloudReferenceAccumulator(pub Buffer);
+
+/// One accumulator per view, restarted (a new, zeroed buffer) whenever anything in the integrand
+/// changes: the view, its size, the lights, exposure, atmosphere, medium, cloud layers or
+/// settings (audit 32). The average was process-global and keyed only by its byte size, so views
+/// of equal size shared sums, and a changed scene kept averaging into the old one.
+pub(super) fn prepare_cloud_reference_accumulators(
+    views: Query<(
+        Entity,
+        &ExtractedView,
+        Option<&ExtractedCamera>,
+        &AtmosphereTextures,
+        &ExtractedAtmosphere,
+        Option<&GpuCloudLayers>,
+        Option<&GpuAtmosphereSettings>,
+    )>,
+    lights: Query<&ExtractedDirectionalLight>,
+    gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
+    frame_count: Res<FrameCount>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut accumulators: bevy_ecs::system::Local<HashMap<RetainedViewEntity, (u64, Buffer)>>,
+    mut placeholder: bevy_ecs::system::Local<Option<Buffer>>,
+    mut commands: Commands,
+) {
+    use core::hash::{Hash, Hasher};
+    let create = |bytes: u64| {
+        render_device.create_buffer(&BufferDescriptor {
+            label: Some("cloud_reference_accumulator"),
+            size: bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
     };
-    let mut acc = ACC.lock().unwrap();
-    if let Some((buffer, b)) = acc.as_ref() && *b == bytes {
-        return buffer.clone();
+    if std::env::var_os("CLOUD_REFERENCE").is_none() {
+        let buffer = placeholder.get_or_insert_with(|| create(32)).clone();
+        for (entity, ..) in &views {
+            commands.entity(entity).insert(CloudReferenceAccumulator(buffer.clone()));
+        }
+        return;
     }
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("cloud_reference_accumulator"),
-        size: bytes,
-        usage: BufferUsages::STORAGE,
-        mapped_at_creation: false,
+    fn shader_bytes<T: ShaderType + encase::internal::WriteInto>(value: &T) -> Vec<u8> {
+        let mut buffer = encase::UniformBuffer::new(Vec::new());
+        buffer.write(value).ok();
+        buffer.into_inner()
+    }
+    // The lights in any order.
+    let lights_key = lights.iter().fold(0u64, |acc, light| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for f in light.transform.to_matrix().to_cols_array() {
+            f.to_bits().hash(&mut h);
+        }
+        for f in [light.color.red, light.color.green, light.color.blue, light.color.alpha] {
+            f.to_bits().hash(&mut h);
+        }
+        light.illuminance.to_bits().hash(&mut h);
+        acc ^ h.finish()
     });
-    *acc = Some((buffer.clone(), bytes));
-    buffer
+    let mut seen = HashMap::default();
+    for (entity, view, camera, textures, atmosphere, cloud_layers, settings) in &views {
+        let size = textures.clouds.texture.size();
+        let bytes = 16 + size.width as u64 * size.height as u64 * 32;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        lights_key.hash(&mut h);
+        bytes.hash(&mut h);
+        for f in view
+            .world_from_view
+            .to_matrix()
+            .to_cols_array()
+            .into_iter()
+            .chain(view.clip_from_view.to_cols_array())
+            .chain([camera.map_or(1.0, |c| c.exposure)])
+            .chain([atmosphere.inner_radius, atmosphere.outer_radius])
+            .chain(atmosphere.ground_albedo.to_array())
+            .chain(atmosphere.world_to_atmosphere.to_cols_array())
+        {
+            f.to_bits().hash(&mut h);
+        }
+        atmosphere.medium.hash(&mut h);
+        if let Some(medium) = gpu_media.get(atmosphere.medium) {
+            medium.density_lut.id().hash(&mut h);
+            medium.scattering_lut.id().hash(&mut h);
+        }
+        cloud_layers.map(shader_bytes).hash(&mut h);
+        settings.map(shader_bytes).hash(&mut h);
+        let key = h.finish();
+        let buffer = match accumulators.get(&view.retained_view_entity) {
+            Some((k, buffer)) if *k == key => buffer.clone(),
+            _ => {
+                let buffer = create(bytes);
+                render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[frame_count.0, 0, 0, 0]));
+                buffer
+            }
+        };
+        if cloud_layers.is_some_and(|c| c.cirrus_optical_depth > 0.0) {
+            bevy_log::warn_once!(
+                "CLOUD_REFERENCE traces the cumulus layer and air only: the thin cloud layer \
+                 (cirrus) is not in the reference image; compare without it"
+            );
+        }
+        commands.entity(entity).insert(CloudReferenceAccumulator(buffer.clone()));
+        seen.insert(view.retained_view_entity, (key, buffer));
+    }
+    *accumulators = seen;
 }

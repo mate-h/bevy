@@ -13,7 +13,7 @@
 import bevy_render::maths::{PI, ray_sphere_intersect};
 import package::render::utils::interleaved_gradient_noise;
 import package::atmosphere::{
-    bindings::{atmosphere, settings, view, lights, stbn_texture, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map},
+    bindings::{atmosphere, settings, view, lights, stbn_texture, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map, medium_density_lut},
     bruneton_functions::{ray_intersects_ground, sample_transmittance_lut_segment, sample_transmittance_lut_segment_tau_red, distance_to_top_atmosphere_boundary},
     functions::{
         uv_to_ray_direction, uv_to_ndc, ndc_to_camera_dist, get_view_position,
@@ -26,6 +26,7 @@ import package::atmosphere::{
         get_cloud_medium_density_lod, cloud_mip_from_distance, get_cloud_scattering_coeff,
         get_cloud_absorption_coeff, cloud_density_context, cloud_layer, cirrus_slant_optical_depth, CIRRUS_SLICES,
         cloud_field_uvw, cloud_field_voxel_m, CLOUD_FIELD_EXTENT_M,
+        cloud_profile_lut, CLOUD_PROFILE_TYPE_ROWS, CLOUD_SCHEME_ROW,
     },
 };
 
@@ -341,23 +342,82 @@ fn ref_rand() -> f32 {
     return f32(w) * (1.0 / 4294967296.0);
 }
 
+// Majorants of the null-collision estimators (audit 33): the air's per-channel extinction and an
+// upper bound of the cloud density, from the data the tracer samples. Linear interpolation never
+// exceeds the largest texel, so the maxima over the texels bound every lookup: the air over the
+// medium's density LUT (absorption + scattering rows), the clouds `cloud_density` times the
+// factors of the up-res density (`sample_cumulus_shape_lod`): the profile's liquid water
+// relative to `liquid_water` and the thermal magnitude (each can exceed 1), and the mip-0
+// near-camera reshape of an eroded density <= 1 (at most its value at 1). Each workgroup
+// reduces them cooperatively before tracing (`ref_compute_bounds`). The previous majorant
+// (cloud_density) did not bound the physical profiles, whose density reaches ~3.
+@if(CLOUD_REFERENCE)
+var<workgroup> ref_wg_bounds: array<vec4<f32>, 64>;
+@if(CLOUD_REFERENCE)
+var<workgroup> ref_wg_magnitude: array<f32, 64>;
+var<private> ref_air_majorant: vec3<f32>;
+var<private> ref_cloud_bound: f32;
+
+@if(CLOUD_REFERENCE)
+fn ref_compute_bounds(li: u32) {
+    var b = vec4(0.0);
+    var magnitude = 0.0;
+    let n_air = textureDimensions(medium_density_lut);
+    for (var i = li; i < n_air.x; i += 64u) {
+        var e = vec3(0.0);
+        for (var row = 0u; row < n_air.y; row++) {
+            e += textureLoad(medium_density_lut, vec2(i, row), 0).xyz;
+        }
+        b = vec4(max(b.xyz, e), b.w);
+    }
+    if (cloud_layer.profile_mode == 0u) {
+        let n = textureDimensions(cloud_profile_lut);
+        for (var i = li; i < n.x * u32(CLOUD_PROFILE_TYPE_ROWS); i += 64u) {
+            b.w = max(b.w, textureLoad(cloud_profile_lut, vec2(i % n.x, i / n.x), 0).b);
+        }
+        for (var i = li; i < n.x; i += 64u) {
+            magnitude = max(magnitude, textureLoad(cloud_profile_lut, vec2(i, u32(CLOUD_SCHEME_ROW)), 0).b);
+        }
+    }
+    ref_wg_bounds[li] = b;
+    ref_wg_magnitude[li] = magnitude;
+    workgroupBarrier();
+    for (var stride = 32u; stride > 0u; stride >>= 1u) {
+        if (li < stride) {
+            ref_wg_bounds[li] = max(ref_wg_bounds[li], ref_wg_bounds[li + stride]);
+            ref_wg_magnitude[li] = max(ref_wg_magnitude[li], ref_wg_magnitude[li + stride]);
+        }
+        workgroupBarrier();
+    }
+    let bounds = ref_wg_bounds[0];
+    ref_air_majorant = max(bounds.xyz, vec3(1e-9));
+    var shape = near_camera_reshape(1.0, 0.0);
+    if (cloud_layer.profile_mode == 0u) {
+        shape *= bounds.w / max(cloud_layer.liquid_water, 1e-9) * ref_wg_magnitude[0];
+    }
+    ref_cloud_bound = max(cloud_layer.cloud_density, 0.0) * shape;
+}
+
 fn ref_cloud_density(p: vec3<f32>) -> f32 {
     @if(CLOUD_REF_NO_CLOUDS) { return 0.0; }
     return get_cloud_medium_density_lod(length(p), p, 0.0);
 }
 
-// Next positive intersection distance of the ray with a sphere of radius R (inf if none).
-fn ref_sphere_next(p: vec3<f32>, d: vec3<f32>, radius: f32) -> f32 {
-    let r = length(p);
-    let b = dot(p, d);
+// Distance from p0 + d t to the next intersection of the ray p0 + d s with a sphere of radius R
+// beyond s = t (inf if none). The roots are always solved from the ray's origin p0, so a
+// boundary just crossed is never found again: stepping a little past it from the crossing point
+// (5 cm) could land back on the sphere, as a float32 position resolves only ~0.5 m at planetary
+// radius, and a ray re-hit the same boundary until its segment budget ran out (and counted as
+// escaped: the clear colour showed through the ground from orbit, audit 35/36).
+fn ref_sphere_after(p0: vec3<f32>, d: vec3<f32>, radius: f32, t: f32) -> f32 {
+    let r = length(p0);
+    let b = dot(p0, d);
     let c = (r - radius) * (r + radius);
     let disc = b * b - c;
     if (disc < 0.0) { return 1e30; }
     let s = sqrt(disc);
-    let t1 = -b - s;
-    let t2 = -b + s;
-    if (t1 > 1e-3) { return t1; }
-    if (t2 > 1e-3) { return t2; }
+    if (-b - s > t) { return -b - s - t; }
+    if (-b + s > t) { return -b + s - t; }
     return 1e30;
 }
 
@@ -388,20 +448,23 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
         // Next boundary: cloud shell spheres, ground, top of atmosphere, t_max.
         var tb = t_max - t;
         var ev = 0u;
-        let t_g = ref_sphere_next(p, d, atmosphere.inner_radius);
+        let t_g = ref_sphere_after(p0, d, atmosphere.inner_radius, t);
         if (t_g < tb) { tb = t_g; ev = 4u; }
-        let t_top = ref_sphere_next(p, d, atmosphere.outer_radius);
+        let t_top = ref_sphere_after(p0, d, atmosphere.outer_radius, t);
         if (t_top < tb) { tb = t_top; ev = 5u; }
-        var t_shell = min(ref_sphere_next(p, d, r_cs), ref_sphere_next(p, d, r_ce));
+        var t_shell = min(ref_sphere_after(p0, d, r_cs, t), ref_sphere_after(p0, d, r_ce, t));
         if (t_shell < tb) { tb = t_shell; ev = 6u; }
         let pm = p + d * (0.5 * tb);
         let rm = length(pm);
+        // The top of the atmosphere at the end of a segment in vacuum is entry from space, crossed
+        // like the shell boundaries; from inside it is escape (audit 36).
+        if (ev == 5u && rm > atmosphere.outer_radius) { ev = 6u; }
         let in_shell = rm > r_cs && rm < r_ce;
-        var maj = air_max;
-        @if(!CLOUD_REF_NO_CLOUDS) { if (in_shell) { maj += sigma_t_c; } }
+        // Vacuum outside the atmosphere: no collisions (the density LUT clamps to the top value).
+        var maj = select(air_max, 0.0, rm > atmosphere.outer_radius);
+        @if(!CLOUD_REF_NO_CLOUDS) { if (in_shell) { maj += sigma_t_c * ref_cloud_bound; } }
         var tt = 0.0;
-        var collided = false;
-        for (var i = 0u; i < 8192u; i++) {
+        for (var i = 0u; i < 8192u && maj > 0.0; i++) {
             tt += -log(1.0 - ref_rand()) / maj;
             if (tt >= tb) { break; }
             let q = p + d * tt;
@@ -426,7 +489,6 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
         }
         t += tb;
         if (ev != 6u) { o.t = t; o.event = ev; return o; }
-        t += 0.05; // step across the shell boundary
     }
     o.t = t;
     o.event = 0u;
@@ -488,14 +550,15 @@ fn ref_sun_vis(p: vec3<f32>, l: vec3<f32>, ch: u32) -> f32 {
     }
     @if(!CLOUD_REF_NO_CLOUDS) {
     let seg = cloud_layer_segment(p, l);
-    if (seg.z > 0.5 && v > 0.0) {
+    if (seg.z > 0.5 && v > 0.0 && ref_cloud_bound > 0.0) {
+        // Ratio tracking with the cloud majorant sigma_t * ref_cloud_bound.
         let sigma_t_c = get_cloud_scattering_coeff() + get_cloud_absorption_coeff();
         var t = max(seg.x, 0.0);
         let t_end = min(seg.y, settings.cloud_max_distance);
         for (var i = 0u; i < 8192u; i++) {
-            t += -log(1.0 - ref_rand()) / sigma_t_c;
+            t += -log(1.0 - ref_rand()) / (sigma_t_c * ref_cloud_bound);
             if (t >= t_end || v < 1e-6) { break; }
-            v *= 1.0 - ref_cloud_density(p + l * t);
+            v *= 1.0 - ref_cloud_density(p + l * t) / ref_cloud_bound;
         }
     }
     }
@@ -511,14 +574,7 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
     let ch = (sample_index + px.x * 7u + px.y * 13u) % 3u;
     var lum_w = array<f32, 3>(0.2126, 0.7152, 0.0722);
 
-    // Air majorant for this channel (max over altitude).
-    var air_max = 1e-9;
-    for (var k = 0u; k <= 32u; k++) {
-        let r = mix(atmosphere.inner_radius, atmosphere.outer_radius, f32(k) / 32.0);
-        var a = ref_air(r);
-        air_max = max(air_max, a[0][ch] + a[1][ch]);
-    }
-    air_max *= 1.05; // LUT interpolation between the probed altitudes
+    let air_max = ref_air_majorant[ch];
 
     let has_light = lights.n_directional_lights > 0u;
     var l = vec3(0.0, 1.0, 0.0);
@@ -531,7 +587,8 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
     var out: RefOut;
     // Camera-ray transmittance (ratio tracking, same channel).
     let tf = ref_flight(origin, view_dir, t_scene, ch, air_max, true);
-    let t_cam = select(tf.tr, 0.0, tf.event == 3u);
+    // The ground is opaque (audit 35): only reaching the scene depth or escaping transmits.
+    let t_cam = select(tf.tr, 0.0, tf.event == 3u || tf.event == 4u);
 
     var L = 0.0;
     var thr = 1.0;
@@ -600,7 +657,9 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    // Before any invocation returns: the whole workgroup takes part (barriers).
+    @if(CLOUD_REFERENCE) { ref_compute_bounds(li); }
     let trace_size = textureDimensions(out_clouds);
     if (any(id.xy >= trace_size)) {
         return;

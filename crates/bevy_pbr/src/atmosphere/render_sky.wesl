@@ -301,7 +301,9 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     @if(CLOUD_REFERENCE) {
     let ref_c = textureSampleLevel(cloud_texture, atmosphere_lut_sampler, in.uv, 0.0);
     var sun_term = vec3(0.0);
-    if depth == 0.0 { sun_term = sun_radiance * sample_transmittance_lut(r, mu) * ref_c.a * view.exposure; }
+    // ref_c.a is the camera ray's transmittance through air and clouds (ratio tracking); the
+    // transmittance LUT would count the air twice (audit 35).
+    if depth == 0.0 { sun_term = sun_radiance * ref_c.a * view.exposure; }
     @if(DUAL_SOURCE_BLENDING)
     return RenderSkyOutput(vec4(ref_c.rgb + sun_term, 0.0), vec4(vec3(ref_c.a), 1.0));
     @if(!DUAL_SOURCE_BLENDING)
