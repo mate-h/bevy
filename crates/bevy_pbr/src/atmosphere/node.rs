@@ -37,7 +37,7 @@ pub fn atmosphere_luts(
     )>,
     pipelines: Res<AtmosphereLutPipelines>,
     gpu_media: Res<bevy_render::render_asset::RenderAssets<crate::GpuScatteringMedium>>,
-    mut per_view: bevy_ecs::system::Local<PerViewLutState>,
+    mut per_view: bevy_ecs::system::ResMut<PerViewLutState>,
     pipeline_cache: Res<PipelineCache>,
     mut ctx: RenderContext,
 ) {
@@ -455,9 +455,12 @@ pub fn render_sky(
         &AtmosphereTextures,
         Option<&RenderSkyHazePipelineId>,
         Option<&crate::light_probe::generate::RenderEnvironmentMap>,
+        &ExtractedView,
     )>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Res<AtmosphereLutPipelines>,
+    lut_state: Res<PerViewLutState>,
+    mut history_writes: bevy_ecs::system::ResMut<super::resources::CloudHistoryWrites>,
     frame_count: Res<bevy_diagnostic::FrameCount>,
     noise_dump: (
         Option<Res<super::perlin_worley_noise::PerlinWorleyNoiseTexture>>,
@@ -481,12 +484,23 @@ pub fn render_sky(
         textures,
         haze_pipeline_id,
         env_map,
+        extracted_view,
     ) = view.into_inner();
 
     let Some(render_sky_pipeline) = pipeline_cache.get_render_pipeline(render_sky_pipeline_id.0)
     else {
         return;
     }; //TODO: warning
+    // Like a pipeline that is not ready: no sky until this view's cloud field is built, rather
+    // than clouds lit from an unbuilt field (zero escape probability, f_ms/(1 - f_ms) ~ 3e6).
+    if cloud_layer_uniforms_offset.is_some()
+        && !lut_state.field_built(
+            extracted_view.retained_view_entity,
+            textures.cloud_field_sdf.texture.id(),
+        )
+    {
+        return;
+    }
 
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
@@ -563,6 +577,10 @@ pub fn render_sky(
         }
     }
 
+    // What this frame writes of the cloud and haze histories (`CloudHistoryWrites`).
+    let mut clouds_written = None;
+    let mut haze_written = haze_pipeline_id.is_none().then(|| textures.haze_inscattering.texture.id());
+
     // Dedicated low-res cloud raymarch (design.md §1.2). Its output is composited by render_sky.
     if let (Some(cloud_layer_offset), Some(bind_group), Some(pipeline)) = (
         cloud_layer_uniforms_offset.as_ref(),
@@ -618,6 +636,7 @@ pub fn render_sky(
             let size = textures.clouds.texture.size();
             pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
             pass_span.end(&mut pass);
+            clouds_written = Some(textures.clouds.texture.id());
         }
     }
 
@@ -669,7 +688,9 @@ pub fn render_sky(
         );
         haze_pass.draw(0..3, 0..1);
         drop(haze_pass);
+        haze_written = Some(textures.haze_inscattering.texture.id());
     }
+    history_writes.record(extracted_view.retained_view_entity, frame_count.0, clouds_written, haze_written);
 
     let mut render_sky_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
         label: Some("render_sky"),
@@ -750,8 +771,9 @@ pub fn render_sky(
     super::gpu_timing::end_frame(&timing_device, command_encoder);
 }
 
-/// Amortised per-view state of [`atmosphere_luts`].
-#[derive(Default)]
+/// Amortised per-view state of [`atmosphere_luts`]. A resource, not a `Local`, so
+/// [`render_sky`] can tell whether a view's cloud field has been built.
+#[derive(Default, bevy_ecs::resource::Resource)]
 pub struct PerViewLutState {
     views: bevy_platform::collections::HashMap<RetainedViewEntity, (u64, ViewLutState)>,
     tick: u64,
@@ -767,6 +789,15 @@ pub struct ViewLutState {
 }
 
 impl PerViewLutState {
+    /// Whether `view` has completed a full build of the cloud field into `field`. A field that
+    /// was never built (its pipelines or bind groups were not ready yet) holds zeroed metadata
+    /// and escape probabilities, which the cloud trace would read as a valid field (audit 20).
+    pub fn field_built(&self, view: RetainedViewEntity, field: bevy_render::render_resource::TextureId) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|(_, state)| state.field_texture == Some(field))
+    }
+
     /// The state of a view; views not rendered for 600 invocations are forgotten.
     fn get(&mut self, view: RetainedViewEntity) -> &mut ViewLutState {
         self.tick += 1;

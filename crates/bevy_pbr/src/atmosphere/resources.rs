@@ -617,6 +617,8 @@ pub(super) fn prepare_clouds_temporal_params(
         With<ExtractedAtmosphere>,
     >,
     mut previous: bevy_ecs::system::Local<HashMap<RetainedViewEntity, PreviousCloudFrame>>,
+    writes: Res<CloudHistoryWrites>,
+    frame_count: Res<FrameCount>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut commands: Commands,
@@ -644,11 +646,17 @@ pub(super) fn prepare_clouds_temporal_params(
             }),
         };
         // The history is what this view wrote last frame: the ping-pong textures it reads now
-        // must be the ones it wrote then (a new view, a reallocation or a resize breaks that).
-        let history_ids = (textures.clouds_history.texture.id(), textures.haze_history_inscattering.texture.id());
+        // must be the ones `render_sky` actually wrote then (a new view, a reallocation, a resize
+        // or a skipped frame breaks that).
+        let history_written = writes.wrote_last_frame(
+            view.retained_view_entity,
+            frame_count.0,
+            textures.clouds_history.texture.id(),
+            textures.haze_history_inscattering.texture.id(),
+        );
         let (prev_clip_from_world, history_valid, prev_offset, prev_cirrus_offset, prev_exposure) =
             match previous.get(&view.retained_view_entity) {
-                Some(prev) if prev.written == history_ids => {
+                Some(prev) if history_written => {
                     (prev.clip_from_world, 1, prev.offset, prev.cirrus_offset, prev.exposure)
                 }
                 _ => (clip_from_world, 0, offset, cirrus_offset, exposure),
@@ -675,7 +683,6 @@ pub(super) fn prepare_clouds_temporal_params(
                 offset,
                 cirrus_offset,
                 exposure,
-                written: (textures.clouds.texture.id(), textures.haze_inscattering.texture.id()),
             },
         );
     }
@@ -688,8 +695,27 @@ pub struct PreviousCloudFrame {
     offset: Vec3,
     cirrus_offset: Vec3,
     exposure: f32,
-    /// The cloud and haze targets written (next frame's histories).
-    written: (TextureId, TextureId),
+}
+
+/// The cloud and haze targets each view's `render_sky` wrote, and in which frame: the next
+/// frame's histories. Prepared targets are not necessarily written: `render_sky` skips views
+/// whose pipelines or cloud field are not ready (audit 5, 20).
+#[derive(Resource, Default)]
+pub struct CloudHistoryWrites(HashMap<RetainedViewEntity, (u32, Option<TextureId>, Option<TextureId>)>);
+
+impl CloudHistoryWrites {
+    /// Records this frame's writes of a view: the cloud target if the reconstruction ran, the
+    /// haze target if the haze prepass ran (or the view has none, so nothing reads its history).
+    pub fn record(&mut self, view: RetainedViewEntity, frame: u32, clouds: Option<TextureId>, haze: Option<TextureId>) {
+        self.0.retain(|_, (written, ..)| frame.wrapping_sub(*written) <= 1);
+        self.0.insert(view, (frame, clouds, haze));
+    }
+
+    fn wrote_last_frame(&self, view: RetainedViewEntity, frame: u32, clouds: TextureId, haze: TextureId) -> bool {
+        self.0.get(&view).is_some_and(|&(written, c, h)| {
+            written == frame.wrapping_sub(1) && c == Some(clouds) && h == Some(haze)
+        })
+    }
 }
 
 /// Parameters for the cloud shadow temporal filter pass.

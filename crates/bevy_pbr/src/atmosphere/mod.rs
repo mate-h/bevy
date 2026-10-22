@@ -214,6 +214,8 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<environment::AtmosphereProbeSource>()
             .init_resource::<fbm_noise::CloudNoiseFormats>()
             .init_resource::<AtmosphereLutPipelines>()
+            .init_resource::<node::PerViewLutState>()
+            .init_resource::<resources::CloudHistoryWrites>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
             .init_resource::<FbmNoiseBindGroupLayout>()
