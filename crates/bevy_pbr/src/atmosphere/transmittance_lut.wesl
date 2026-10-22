@@ -20,10 +20,25 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
 
     // RGB optical depth → ballistic T; alpha = reducible Mie/haze OD (∫ g·σ_s dt).
     let optical_depth = ray_optical_depth(r_mu.x, r_mu.y, settings.transmittance_lut_samples);
-    let transmittance = exp(-optical_depth.rgb);
 
-    textureStore(transmittance_lut_out, idx.xy, vec4(transmittance, optical_depth.a));
+    // Store optical depth (see `sample_optical_depth_lut`), kept finite: bilinear filtering turns
+    // an infinite or NaN texel into NaN in every lookup next to it. NaN fails the comparison.
+    let finite_depth = select(
+        vec3(MAX_OPTICAL_DEPTH),
+        optical_depth.rgb,
+        optical_depth.rgb < vec3(MAX_OPTICAL_DEPTH),
+    );
+    // τ_red ≤ τ in every channel, which keeps T · exp(τ_red) ≤ 1 once τ is clamped.
+    let finite_tau_red = select(
+        0.0,
+        min(optical_depth.a, min(finite_depth.r, min(finite_depth.g, finite_depth.b))),
+        optical_depth.a >= 0.0,
+    );
+    textureStore(transmittance_lut_out, idx.xy, vec4(finite_depth, finite_tau_red));
 }
+
+/// Largest optical depth the LUT stores; `exp(-64)` is negligible for any light.
+const MAX_OPTICAL_DEPTH: f32 = 64.0;
 
 /// Optical depth from (r, mu) to the top atmosphere boundary.
 /// .rgb = absorption + scattering (all terms); .a = Σ g·σ_s for Mie/haze only.

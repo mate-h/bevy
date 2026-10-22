@@ -60,7 +60,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // NOTE: We intentionally do NOT add the analytic sun-disk term here.
     // `sample_sun_radiance()` uses `fwidth()` for anti-aliasing, which is forbidden in compute stages.
 
-    let color = vec4<f32>(inscattering, 1.0);
+    // Pre-exposed like the sky-view LUT; `EnvironmentMapExposures` records the exposure.
+    let color = vec4<f32>(inscattering * view.exposure, 1.0);
 
     textureStore(output, vec2<i32>(global_id.xy), i32(slice_index), color);
 }

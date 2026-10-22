@@ -2233,9 +2233,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
 
         // Only create clouds bind group for views that have VolumetricCloudLayer; otherwise use no_clouds
         // to avoid passing clouds layout to no_clouds pipeline when disabling clouds.
-        // The haze prepass writes this frame's half-res haze, so its bind group carries the
-        // previous frame's (its temporal history) in the haze slots.
-        let haze_params = temporal_uniform.and_then(|u| u.0.binding());
         let base_sky_entries = || {
             DynamicBindGroupEntries::new_with_indices((
                 // uniforms

@@ -1198,7 +1198,8 @@ fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
 @if(ATMOSPHERE)
 fn sample_transmittance_lut(r: f32, mu: f32) -> vec3<f32> {
     let uv = transmittance_lut_r_mu_to_uv(view_bindings::atmosphere_data.atmosphere, r, mu);
-    return textureSampleLevel(
+    // The LUT stores optical depth.
+    return exp(-textureSampleLevel(
         view_bindings::atmosphere_transmittance_texture,
-        view_bindings::linear_sampler, uv, 0.0).rgb;
+        view_bindings::linear_sampler, uv, 0.0).rgb);
 }

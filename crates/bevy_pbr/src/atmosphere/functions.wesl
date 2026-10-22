@@ -174,9 +174,16 @@ fn sky_view_lut_uv_to_zenith_azimuth(r: f32, uv: vec2<f32>) -> vec2<f32> {
 
 // LUT SAMPLING
 
-fn sample_transmittance_lut(r: f32, mu: f32) -> vec3<f32> {
+/// Optical depth from radius `r` along zenith cosine `mu` to the top of the atmosphere, or to
+/// the ground. The transmittance LUT stores optical depth because the transmittance toward a sun
+/// below the horizon underflows f16.
+fn sample_optical_depth_lut(r: f32, mu: f32) -> vec3<f32> {
     let uv = transmittance_lut_r_mu_to_uv(atmosphere, r, mu);
     return textureSampleLevel(transmittance_lut, atmosphere_lut_sampler, uv, 0.0).rgb;
+}
+
+fn sample_transmittance_lut(r: f32, mu: f32) -> vec3<f32> {
+    return exp(-sample_optical_depth_lut(r, mu));
 }
 
 /// Reducible Mie/haze optical depth (∫ g·σ_s dt) from (r, mu) to the top of atmosphere.
@@ -188,14 +195,15 @@ fn sample_transmittance_lut_tau_red(r: f32, mu: f32) -> f32 {
 
 fn sample_multiscattering_lut(r: f32, mu: f32) -> vec3<f32> {
     let uv = multiscattering_lut_r_mu_to_uv(r, mu);
-    return textureSampleLevel(multiscattering_lut, atmosphere_lut_sampler, uv, 0.0).rgb;
+    return exp(textureSampleLevel(multiscattering_lut, atmosphere_lut_sampler, uv, 0.0).rgb);
 }
 
 fn sample_sky_view_lut(r: f32, ray_dir_as: vec3<f32>) -> vec3<f32> {
     let mu = ray_dir_as.y;
     let azimuth = fast_atan2(ray_dir_as.x, -ray_dir_as.z);
     let uv = sky_view_lut_r_mu_azimuth_to_uv(r, mu, azimuth);
-    return textureSampleLevel(sky_view_lut, atmosphere_lut_sampler, uv, 0.0).rgb;
+    // The LUT is pre-exposed.
+    return textureSampleLevel(sky_view_lut, atmosphere_lut_sampler, uv, 0.0).rgb / view.exposure;
 }
 
 fn ndc_to_camera_dist(ndc: vec3<f32>) -> f32 {
@@ -230,8 +238,8 @@ fn sample_aerial_view_lut(uv: vec2<f32>, t: f32) -> vec3<f32> {
     // up to (n / (n - 1 + 0.3))^2 too strong for n samples per slice (audit 29).
     let t_first_slice = t_max / (num_slices * num_slices);
     let fade = saturate(t / t_first_slice);
-    // Recover the values from log space
-    return exp(sample.rgb) * fade;
+    // Recover the values from log space and undo the pre-exposure
+    return exp(sample.rgb) / view.exposure * fade;
 }
 
 // ATMOSPHERE SAMPLING
@@ -669,7 +677,8 @@ fn calculate_visible_sun_ratio(atmosphere: Atmosphere, r: f32, mu: f32, sun_angu
     // Invert the horizon angle calculation to fix shading direction
     let horizon_cos = -sqrt(1.0 - (inner_radius * inner_radius) / (r * r));
     let horizon_angle = fast_acos_4(horizon_cos);
-    let sun_zenith_angle = fast_acos_4(mu);
+    // A zenith light's `mu` can round past 1, where `fast_acos_4` is NaN.
+    let sun_zenith_angle = fast_acos_4(clamp(mu, -1.0, 1.0));
 
     // If sun is completely above horizon
     if sun_zenith_angle + sun_angular_size * 0.5 <= horizon_angle {
