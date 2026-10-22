@@ -276,6 +276,9 @@ fn main(@builtin(global_invocation_id) thread_id: vec3<u32>) {
         } else {
             j = hash_2d_to_01(gid.xy, 0x1000u + i);
         }
+        // ATM_DBG_SHADOW_JITTER: rotate the phases by a per-texel, per-frame offset (audit 1
+        // validation of the fixed quadrature).
+        @if(ATM_DBG_SHADOW_JITTER) { j = fract(j + hash_2d_to_01(gid.xy, 0x2000u + view.frame_count)); }
         let t = t_start + (f32(i) + j) * dt;
         let p = ray_origin + trace_dir * t;
         let r = length(p);

@@ -101,13 +101,41 @@ fn cloud_shadow_xy_to_uv(xy: vec2<f32>, extent: f32) -> vec2<f32> {
     return 0.5 * (xy / extent) * (rho / max(r, 1e-6)) + 0.5;
 }
 
+/// Bilinear lookup of the history with the cumulus optical depth (b) interpolated as
+/// transmittance. Cumulus optical depths are ~50: a linear blend of the stored depths put a clear
+/// texel next to a cloud at depth 1-2 (transmittance 0.1-0.4) from a few percent of weight, and
+/// untraced texels are reprojected every frame until their next trace, so the shadows grew and
+/// darkened for up to 15 frames and snapped back at the trace (audit 1 validation: at the
+/// default interleave, transmittance 0.087 too low on average against a dense trace, 0.41 at
+/// shadow edges, and a 0.03 sawtooth flicker in a frozen scene). Interpolating transmittance
+/// keeps its mean. The other channels are smooth or small and stay linear.
+fn sample_history(uv: vec2<f32>) -> vec4<f32> {
+    let size = vec2<i32>(temporal_params.size);
+    let st = uv * vec2<f32>(size) - 0.5;
+    let i0 = vec2<i32>(floor(st));
+    let f = st - floor(st);
+    var linear = vec4(0.0);
+    var vis = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2(k & 1, k >> 1);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        let tap = textureLoad(prev_cloud_shadow, clamp(i0 + o, vec2(0), size - 1), 0);
+        linear += w * tap;
+        vis += w * exp(-max(tap.b, 0.0));
+    }
+    // Below ~1e-30 (depth ~69) the blend is opaque either way: keep the linear depth.
+    linear.b = select(linear.b, -log(vis), vis > 1e-30);
+    return linear;
+}
+
 fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, half_depth: f32, nearest: bool, motion: vec3<f32>) -> vec4<f32> {
     let max_t = 2.0 * half_depth;
     let curr_xy = cloud_shadow_uv_to_xy(uv, extent);
-    let curr_ray_origin = temporal_params.curr_anchor
-        + temporal_params.curr_basis_x * curr_xy.x
-        + temporal_params.curr_basis_y * curr_xy.y
-        - temporal_params.curr_light_dir * half_depth;
+    // Positions relative to the anchors, not absolute: at planetary radius (~6.4e6 m) a float32
+    // position resolves ~0.5 m, and the absolute round trip moved a static history by ~0.05 of
+    // a 20 m central texel every frame, a blur that the untraced texels accumulated until their
+    // next trace. The anchor difference is exactly 0 for a static anchor.
+    let anchor_delta = temporal_params.curr_anchor - temporal_params.prev_anchor;
     // Depth estimate: history front depth at the same texel ("no cloud" texels use the
     // anchor depth, where the visible shadows are).
     let depth_estimate_km = textureLoad(prev_cloud_shadow, coord, 0).r;
@@ -115,11 +143,13 @@ fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, 
     if (depth_estimate >= 0.999 * max_t) {
         depth_estimate = half_depth;
     }
-    // The occluder moved with the wind: look it up where it was last frame.
-    let world_pos = curr_ray_origin + temporal_params.curr_light_dir * depth_estimate - motion;
-
-    let prev_ray_origin = temporal_params.prev_anchor - temporal_params.prev_light_dir * half_depth;
-    let prev_rel = world_pos - temporal_params.prev_anchor;
+    // The occluder moved with the wind: look it up where it was last frame. Relative to the
+    // current anchor:
+    let curr_rel = temporal_params.curr_basis_x * curr_xy.x
+        + temporal_params.curr_basis_y * curr_xy.y
+        + temporal_params.curr_light_dir * (depth_estimate - half_depth)
+        - motion;
+    let prev_rel = curr_rel + anchor_delta;
     let prev_xy = vec2(
         dot(prev_rel, temporal_params.prev_basis_x),
         dot(prev_rel, temporal_params.prev_basis_y),
@@ -127,12 +157,17 @@ fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, 
     if (any(abs(prev_xy) > vec2(extent))) {
         return vec4(-1.0);
     }
-    let prev_uv = cloud_shadow_xy_to_uv(prev_xy, extent);
+    // Differential: this texel's uv plus the change of the inverse warp. The inverse goes
+    // through sinh / asinh, whose GPU error moved even a static history systematically (up to a
+    // tenth of a texel per frame at the rim, so clear texels gathered optical depth until their
+    // next trace: map transmittance 0.09 below the trace at the rim, against 0.001 at the
+    // centre). Differencing two evaluations cancels that error; a static map maps to itself.
+    let prev_uv = uv + (cloud_shadow_xy_to_uv(prev_xy, extent) - cloud_shadow_xy_to_uv(curr_xy, extent));
     if (any(prev_uv < vec2(0.0)) || any(prev_uv > vec2(1.0))) {
         return vec4(-1.0);
     }
 
-    var prev = textureSampleLevel(prev_cloud_shadow, prev_cloud_sampler, prev_uv, 0.0);
+    var prev = sample_history(prev_uv);
     if (nearest) {
         // Untraced texels are reprojected every frame until their next trace. Front depth is
         // discontinuous at cloud edges, so it is taken from the nearest texel (bilinear would
@@ -150,11 +185,15 @@ fn reproject_cloud_shadow_history(coord: vec2<i32>, uv: vec2<f32>, extent: f32, 
     // Only when the anchor moved: the map is Rgba16Float, so converting every frame (e.g. for the
     // slow sun rotation) would re-quantize the depth, which is stored in km at up to 4 * extent.
     if (temporal_params.anchor_moved != 0u && prev.r * 1000.0 < 0.999 * max_t) {
-        let prev_pos = prev_ray_origin
-            + (temporal_params.prev_basis_x * dot(prev_rel, temporal_params.prev_basis_x)
-                + temporal_params.prev_basis_y * dot(prev_rel, temporal_params.prev_basis_y))
-            + temporal_params.prev_light_dir * (prev.r * 1000.0);
-        prev.r = clamp(dot(prev_pos - curr_ray_origin, temporal_params.curr_light_dir), 0.0, max_t) * 0.001;
+        // The previous front point relative to the current ray origin (anchor-relative, as above).
+        let prev_front = temporal_params.prev_basis_x * prev_xy.x
+            + temporal_params.prev_basis_y * prev_xy.y
+            + temporal_params.prev_light_dir * (prev.r * 1000.0 - half_depth)
+            - anchor_delta;
+        let curr_origin = temporal_params.curr_basis_x * curr_xy.x
+            + temporal_params.curr_basis_y * curr_xy.y
+            - temporal_params.curr_light_dir * half_depth;
+        prev.r = clamp(dot(prev_front - curr_origin, temporal_params.curr_light_dir), 0.0, max_t) * 0.001;
     }
     return prev;
 }
@@ -248,7 +287,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Do NOT filter depth (Unreal: precision/convergence issues)
             let alpha = temporal_params.temporal_alpha;
             filtered_data.g = prev.g + alpha * (curr_data.g - prev.g);
-            filtered_data.b = prev.b + alpha * (curr_data.b - prev.b);
+            // The cumulus optical depth blends as transmittance (see `sample_history`): a linear
+            // blend of depths is darker than the blend of the transmittances (exp is convex), so
+            // a history that differs from the trace (after a reset, or blurred by reprojection
+            // under motion) darkened and dilated the shadows. With the fixed quadrature the trace
+            // is deterministic and either space converges to it; transmittance recovers faster
+            // from a reset (audit 1: 0.05 vs 0.11 mean error 300 frames after startup).
+            let vis = mix(exp(-max(prev.b, 0.0)), exp(-max(curr_data.b, 0.0)), alpha);
+            filtered_data.b = select(prev.b + alpha * (curr_data.b - prev.b), -log(vis), vis > 1e-30);
+            // ATM_DBG_SHADOW_JITTER: the traces are noisy, unbiased estimates of the optical depth,
+            // and only their depth average is unbiased (an average of transmittances is too bright).
+            @if(ATM_DBG_SHADOW_JITTER) { filtered_data.b = prev.b + alpha * (curr_data.b - prev.b); }
             filtered_data.a = prev.a + alpha * (curr_data.a - prev.a);
             filtered_data.r = curr_data.r;
         }

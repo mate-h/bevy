@@ -955,6 +955,7 @@ impl FromWorld for AtmosphereLutPipelines {
             label: Some("cloud_shadow_map_pipeline".into()),
             layout: vec![layouts.cloud_shadow_map.clone()],
             shader: load_embedded_asset!(world, "cloud_shadow_map.wesl"),
+            shader_defs: atm_dbg_defs(),
             ..default()
         });
 
@@ -971,6 +972,7 @@ impl FromWorld for AtmosphereLutPipelines {
                 label: Some("cloud_shadow_temporal_pipeline".into()),
                 layout: vec![layouts.cloud_shadow_temporal.clone()],
                 shader: load_embedded_asset!(world, "cloud_shadow_temporal.wesl"),
+                shader_defs: atm_dbg_defs(),
                 ..default()
             });
 
@@ -2656,6 +2658,12 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_ESC_FALLBACK`: the out-of-field escape/column estimate everywhere (validation).
 /// - `ATM_DBG_ESC_FIELD_ONLY`: the cloud field's escape probability only (no local estimate).
 /// - `ATM_DBG_ESC_ZERO`: zero escape probability (the infinitely thick multiple-scattering limit).
+/// - `ATM_DBG_SHADOW_JITTER`: rotate the cloud shadow map's per-step sample phases per texel and
+///   frame instead of the fixed phases, and accumulate optical depth (audit 1 validation: after
+///   convergence half the mean error and 40 % of the edge error of the fixed phases, with
+///   frame-to-frame noise of 0.02 in edge transmittance).
+/// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the
+///   tracer's bounce (r), flight null-collision/segment (g) and sun-ray (b) budgets.
 /// - `ATM_DBG_NO_COARSE`: fine samples everywhere, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
 /// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.
