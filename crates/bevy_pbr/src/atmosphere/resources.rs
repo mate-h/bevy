@@ -1720,9 +1720,15 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
     // and motion.
     let mut lights: Vec<_> = directional_lights.iter().collect();
     // The order of the GPU's directional lights (render/light.rs `prepare_lights`): sorted by
-    // (volumetric, shadow maps enabled, entity), then filtered by the view's render layers. The
-    // cloud shadow map follows light 0 of its view (`lights.directional_lights[0]`).
-    lights.sort_by_key(|(entity, light, _)| (light.volumetric, light.shadow_maps_enabled, *entity));
+    // volumetric first, then shadow maps enabled, then entity, and filtered by the view's render
+    // layers. The cloud shadow map follows light 0 of its view (`lights.directional_lights[0]`).
+    lights.sort_by_key(|(entity, light, _)| {
+        (
+            core::cmp::Reverse(light.volumetric),
+            core::cmp::Reverse(light.shadow_maps_enabled),
+            *entity,
+        )
+    });
     let mut seen = HashMap::default();
     for (entity, view, atmosphere, settings, textures, cloud_layer, view_layers) in &views {
         if !settings.cloud_shadow_uses_temporal_pass() || cloud_layer.is_none() {
