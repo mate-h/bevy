@@ -605,8 +605,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (any(id.xy >= trace_size)) {
         return;
     }
-    let full_size_u = textureDimensions(depth_texture);
-    let full_size = vec2<f32>(full_size_u);
+    // The cloud targets cover the camera's viewport; the depth texture covers the whole render
+    // target, so its texels are offset by the viewport origin.
+    let full_size_u = max(vec2<u32>(view.viewport.zw), vec2(1u));
+    let viewport_origin = vec2<i32>(view.viewport.xy);
     // Half-res pixel traced by this invocation this frame.
     let half_size = max(full_size_u / 2u, vec2(1u));
     let half_px = min(id.xy * 2u + CHECKER_OFFSETS[view.frame_count % 4u], half_size - 1u);
@@ -619,7 +621,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var depth = 1.0;
     for (var y = 0; y < ratio; y++) {
         for (var x = 0; x < ratio; x++) {
-            let p = min(base_px + vec2(x, y), vec2<i32>(full_size) - 1);
+            let p = viewport_origin + min(base_px + vec2(x, y), vec2<i32>(full_size_u) - 1);
             @if(MULTISAMPLED_DEPTH) {
                 // MSAA: the farthest sample of the pixel too (edges partly cover the sky).
                 for (var s = 0u; s < textureNumSamples(depth_texture); s++) {

@@ -77,11 +77,13 @@ struct HazeOutput {
 @if(SKY_HAZE_HALF_RES)
 @fragment
 fn haze(in: FullscreenVertexOutput) -> HazeOutput {
-    let full = vec2<i32>(textureDimensions(depth_texture));
+    // The haze targets cover the camera's viewport; the depth texture covers the whole render
+    // target, so its texels are offset by the viewport origin.
+    let full = max(vec2<i32>(view.viewport.zw), vec2(1));
     let base = vec2<i32>(floor(in.position.xy)) * 2;
     var depth = 1.0;
     for (var k = 0; k < 4; k++) {
-        let p = min(base + vec2(k & 1, k >> 1), full - 1);
+        let p = vec2<i32>(view.viewport.xy) + min(base + vec2(k & 1, k >> 1), full - 1);
         let d = textureLoad(depth_texture, p, 0);
         if (d <= depth) {
             depth = d;

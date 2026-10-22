@@ -696,6 +696,22 @@ fn setup_camera_fog(
         //     ..default()
         // },
     ));
+    // `ATMOSPHERE_VIEWPORT=x,y,w,h`: render the camera into that physical-pixel sub-rectangle of
+    // its target (split-screen / inset cameras).
+    if let Some(v) = std::env::var("ATMOSPHERE_VIEWPORT")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse::<u32>().ok()).collect::<Vec<_>>())
+        .filter(|v| v.len() == 4)
+    {
+        camera.insert(Camera {
+            viewport: Some(bevy::camera::Viewport {
+                physical_position: UVec2::new(v[0], v[1]),
+                physical_size: UVec2::new(v[2], v[3]),
+                ..default()
+            }),
+            ..default()
+        });
+    }
     // `ATMOSPHERE_NO_TAA`: no TAA (and so no jitter), to look at the clouds' and haze's own
     // temporal filters alone.
     if std::env::var("ATMOSPHERE_NO_TAA").is_err() {
