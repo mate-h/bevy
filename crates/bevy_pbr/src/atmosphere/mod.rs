@@ -1124,16 +1124,23 @@ impl AtmosphereWind {
         }
     }
 
-    /// An illustrative mid-latitude fair-weather profile (an input, like a sounding): light
-    /// surface wind, ~1 m/s per km of shear through the cumulus layer, and stronger shear
-    /// (~4 m/s per km) toward the upper-tropospheric jet where cirrus form.
+    /// A fair-weather cumulus profile (an input, like a sounding), with the structure of the
+    /// shallow-cumulus LES cases:
+    /// - a well-mixed subcloud layer, uniform wind up to 700 m (BOMEX: u = -8.75 m/s from the
+    ///   surface to 700 m; Siebesma et al. 2003, Table B1);
+    /// - 1.9 m/s per km of shear through the cumulus layer, to 4.5 km (BOMEX 1.8, -8.75 to
+    ///   -4.61 m/s from 700 to 3000 m; RICO 2.0, -9.9 to -1.9 m/s from 0 to 4 km; van Zanten et
+    ///   al. 2011, Table 2);
+    /// - stronger shear (~3.4 m/s per km) toward the upper-tropospheric jet where cirrus form.
+    ///
+    /// The cloud layer's shear sets the clouds' lean ([`VolumetricCloudLayer::wind_shear`]).
     pub fn fair_weather() -> Self {
         let dir = Vec3::new(3.0, 0.0, 1.0).normalize();
         Self {
             levels: vec![
                 (0.0, dir * 8.0),
-                (1500.0, dir * 15.8),
-                (4000.0, dir * 18.4),
+                (700.0, dir * 8.0),
+                (4500.0, dir * 15.2),
                 (8000.0, dir * 27.0),
                 (9500.0, dir * 33.3),
             ],
