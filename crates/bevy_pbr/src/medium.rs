@@ -1,5 +1,5 @@
 use bevy_color::ColorToComponents;
-use bevy_light::atmosphere::{ScatteringMedium, ScatteringTerm};
+use bevy_light::atmosphere::{PhaseFunction, ScatteringMedium, ScatteringTerm};
 
 use bevy_app::{App, Plugin};
 use bevy_asset::AssetId;
@@ -85,13 +85,24 @@ impl RenderAsset for GpuScatteringMedium {
                 .sum::<Vec4>()
         }));
 
+        // Scattering row RGB = Σ σ_s. Alpha = Σ g·⟨σ_s⟩ for Mie terms only (Rayleigh g≈0).
+        // Used by the transmittance LUT to store reducible Mie/haze OD so aerial-perspective
+        // similarity scaling (T_sim = T_bal · exp(τ_red)) can leave Rayleigh ballistic.
         density.extend((0..source_asset.falloff_resolution).map(|i| {
             let falloff = (i as f32 + 0.5) / source_asset.falloff_resolution as f32;
 
             source_asset
                 .terms
                 .iter()
-                .map(|term| term.scattering.extend(0.0) * term.falloff.sample(falloff))
+                .map(|term| {
+                    let f = term.falloff.sample(falloff);
+                    let mut v = (term.scattering * f).extend(0.0);
+                    if let PhaseFunction::Mie { asymmetry } = term.phase {
+                        let mean_s = (term.scattering.x + term.scattering.y + term.scattering.z) / 3.0;
+                        v.w = asymmetry * mean_s * f;
+                    }
+                    v
+                })
                 .sum::<Vec4>()
         }));
 
@@ -105,8 +116,8 @@ impl RenderAsset for GpuScatteringMedium {
 
         scattering.extend(
             (0..source_asset.falloff_resolution * source_asset.phase_resolution).map(|raw_i| {
-                let i = raw_i % source_asset.phase_resolution;
-                let j = raw_i / source_asset.phase_resolution;
+                let i = raw_i % source_asset.falloff_resolution;
+                let j = raw_i / source_asset.falloff_resolution;
                 let falloff = (i as f32 + 0.5) / source_asset.falloff_resolution as f32;
                 let phase = (j as f32 + 0.5) / source_asset.phase_resolution as f32;
 

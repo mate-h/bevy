@@ -35,7 +35,11 @@
 import package::{
     render::mesh_view_types::{POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE, RectLight},
     render::mesh_view_bindings as view_bindings,
-    atmosphere::functions::{calculate_visible_sun_ratio, clamp_to_surface},
+    atmosphere::functions::{
+        calculate_visible_sun_ratio, clamp_to_surface, build_light_basis,
+        snap_anchor_to_texel_grid, cloud_shadow_anchor_origin_at, cubic_bspline_weights,
+    },
+    atmosphere::clouds::cloud_shadow_xy_to_uv,
     atmosphere::bruneton_functions::transmittance_lut_r_mu_to_uv,
 };
 import bevy_render::maths::{PI, orthonormalize, quat_rotate};
@@ -926,9 +930,9 @@ color *= (*light).color.rgb * texture_sample;
 
 @if(ATMOSPHERE) {
     let P = (*input).P;
-    let atmosphere = view_bindings::atmosphere;
+    let atmosphere = view_bindings::atmosphere_data.atmosphere;
     let P_as = (
-        view_bindings::atmosphere.world_to_atmosphere * vec4(P, 1.0)
+        view_bindings::atmosphere_data.atmosphere.world_to_atmosphere * vec4(P, 1.0)
     ).xyz;
     let P_clamped = clamp_to_surface(atmosphere, P_as);
     let r = length(P_clamped);
@@ -940,7 +944,7 @@ color *= (*light).color.rgb * texture_sample;
     let sun_visibility = calculate_visible_sun_ratio(atmosphere, r, mu_light, (*light).sun_disk_angular_size);
 
     // Apply atmospheric effects
-    color *= transmittance * sun_visibility;
+    color *= transmittance * sun_visibility * sample_atmosphere_cloud_shadow(P_as, L);
 }
 
     return color;
@@ -1127,10 +1131,78 @@ fn rect_light(
 }
 
 
+/// Sun visibility through the atmosphere's clouds, from the cloud shadow map: the same anchor,
+/// snap and radial warp as its producer (`cloud_shadow_map.wesl`) and the atmosphere's consumers
+/// (`atmosphere::functions::sample_cloud_shadow_map`), and the thin (cirrus) layer's optical
+/// depth in alpha below that layer. The old linear UV and per-texel snapped camera anchor read
+/// texels ~20 km from the receiver's at the map's edge, and cirrus never shadowed meshes.
+/// Returns 1 when the view has no cloud layer (the extent is zeroed on the CPU), outside the
+/// map, and for lights the map was not traced for (it follows the first directional light;
+/// other lights' lookups would read its shadows in their own basis). There are no cloud
+/// bindings here for a march toward those lights.
+@if(ATMOSPHERE)
+fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
+    let settings = view_bindings::atmosphere_data.settings;
+    let extent = settings.cloud_shadow_map_extent;
+    if (extent <= 0.0 || view_bindings::lights.n_directional_lights == 0u
+        || dot(L, view_bindings::lights.directional_lights[0].direction_to_light) <= 0.99999) {
+        return 1.0;
+    }
+    let half_depth = extent * 2.0;
+    let trace_dir = normalize(-L);
+    let basis = build_light_basis(trace_dir);
+
+    let atmosphere = view_bindings::atmosphere_data.atmosphere;
+    let camera_as = clamp_to_surface(
+        atmosphere,
+        (atmosphere.world_to_atmosphere * vec4(view_bindings::view.world_position, 1.0)).xyz,
+    );
+    let anchor = snap_anchor_to_texel_grid(
+        cloud_shadow_anchor_origin_at(camera_as, settings.cloud_shadow_anchor_max_radius),
+        basis, extent, settings.cloud_shadow_map_size);
+
+    let rel = P_as - anchor;
+    let x = dot(rel, basis.x);
+    let y = dot(rel, basis.y);
+    if (abs(x) > extent || abs(y) > extent) {
+        return 1.0;
+    }
+    let d_sample = dot(rel, trace_dir) + half_depth;
+    if (d_sample <= 0.0 || d_sample >= 2.0 * half_depth) {
+        return 1.0;
+    }
+    let uv = cloud_shadow_xy_to_uv(vec2(x, y), extent);
+    let thin = f32(length(P_as) < settings.cloud_thin_shadow_max_radius);
+    // Cubic B-spline (4x4 texels) of the per-texel transmittance, as for the planet ground
+    // (`sample_cloud_shadow_ground`): cumulus optical depth is ~50, so a bilinear blend of the
+    // stored depths stays opaque until the last texel and drew the texel grid as staircase
+    // shadow edges.
+    let size = vec2<i32>(settings.cloud_shadow_map_size);
+    let st = uv * vec2<f32>(size) - 0.5;
+    let i0 = vec2<i32>(floor(st)) - 1;
+    let f = st - floor(st);
+    let wx = cubic_bspline_weights(f.x);
+    let wy = cubic_bspline_weights(f.y);
+    var t = 0.0;
+    for (var j = 0; j < 4; j++) {
+        var row = 0.0;
+        for (var i = 0; i < 4; i++) {
+            let c = clamp(i0 + vec2(i, j), vec2(0), size - 1);
+            let data = textureLoad(view_bindings::atmosphere_cloud_shadow_map, c, 0);
+            let front_depth = data.r * 1000.0;
+            let tau = min(data.g * max(0.0, d_sample - front_depth), data.b);
+            row += wx[i] * exp(-tau - thin * data.a);
+        }
+        t += wy[j] * row;
+    }
+    return t;
+}
+
 @if(ATMOSPHERE)
 fn sample_transmittance_lut(r: f32, mu: f32) -> vec3<f32> {
-    let uv = transmittance_lut_r_mu_to_uv(view_bindings::atmosphere, r, mu);
-    return textureSampleLevel(
+    let uv = transmittance_lut_r_mu_to_uv(view_bindings::atmosphere_data.atmosphere, r, mu);
+    // The LUT stores optical depth.
+    return exp(-textureSampleLevel(
         view_bindings::atmosphere_transmittance_texture,
-        view_bindings::linear_sampler, uv, 0.0).rgb;
+        view_bindings::linear_sampler, uv, 0.0).rgb);
 }

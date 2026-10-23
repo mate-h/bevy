@@ -18,7 +18,9 @@ use bevy::{
     color::palettes::css::WHITE,
     feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlugins},
     light::{
-        atmosphere::{Falloff, PhaseFunction, ScatteringMedium, ScatteringTerm},
+        atmosphere::{
+            Falloff, PhaseFunction, ScatteringMedium, ScatteringTerm, EARTH_ATMOSPHERE_HEIGHT,
+        },
         Atmosphere, AtmosphereEnvironmentMapLight,
     },
     pbr::{
@@ -149,6 +151,8 @@ fn camera() -> impl Scene {
         Transform::from_xyz(15.0, 10.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y)
         FreeCamera
         AtmosphereSettings {
+            // LUT resolution matching the screen's aspect ratio
+            aerial_view_lut_size: UVec3::new(160, 88, 64),
             // Reduce the default max distance in the aerial view LUT
             // to 16km to approximately fit the size of the city. This way the aerial perspective
             // gets more detail and has less banding artifacts compared to the 32km default.
@@ -221,30 +225,29 @@ fn spawn_atmosphere(
     mut commands: Commands,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
 ) {
-    let mut earth_medium = ScatteringMedium::default();
-
-    // Same 60 km atmosphere height as `ScatteringMedium::earth`
-    const ATMOSPHERE_REF_HEIGHT_KM: f32 = 60.0;
+    // 1024 falloff samples over the 100 km atmosphere are ~100 m apart, fine enough to
+    // resolve the haze layer below.
+    let mut earth_medium = ScatteringMedium::earth(1024, 256);
 
     // The scale height of haze is set to 100 meters providing a low-lying dense fog layer.
-    const HAZE_SCALE_HEIGHT_KM: f32 = 0.1;
+    const HAZE_SCALE_HEIGHT: f32 = 100.0;
 
     // Fog has high albedo and very low absorption resulting in a white color.
     const HAZE_SINGLE_SCATTER_ALBEDO: f32 = 0.99;
 
     // Distance at which contrast falls low enough to be indistinguishable from the sky.
     // known as Meteorological Optical Range
-    const HAZE_VISIBILITY_KM: f32 = 12.0;
+    const HAZE_VISIBILITY: f32 = 12_000.0;
 
-    // Koschmieder relation to calculate the extinction coefficient for the medium in m^-1 units.
-    let beta_ext = (3.912 / HAZE_VISIBILITY_KM) * 1e-3;
+    // Extinction coefficient at a 2% contrast threshold.
+    let beta_ext = FogFalloff::koschmieder(HAZE_VISIBILITY, 0.02);
 
     // Add the fog to the earth medium as an additional scattering term.
     earth_medium.terms.push(ScatteringTerm {
         absorption: Vec3::splat(beta_ext * (1.0 - HAZE_SINGLE_SCATTER_ALBEDO)),
         scattering: Vec3::splat(beta_ext * HAZE_SINGLE_SCATTER_ALBEDO),
         falloff: Falloff::Exponential {
-            scale: HAZE_SCALE_HEIGHT_KM / ATMOSPHERE_REF_HEIGHT_KM,
+            scale: HAZE_SCALE_HEIGHT / EARTH_ATMOSPHERE_HEIGHT,
         },
         // Fog is approximated as a mie scatterer with this asymmetry factor
         phase: PhaseFunction::Mie { asymmetry: 0.76 },
@@ -252,7 +255,7 @@ fn spawn_atmosphere(
     let earth_atmosphere = Atmosphere::earth(scattering_mediums.add(earth_medium));
 
     // This scale means that 1 city block in this scene will be roughly 100 meters relative to the atmosphere.
-    let scale = 1.0 / 20.0;
+    let scale = 1.0 / 200.0;
     commands.spawn((
         earth_atmosphere.clone(),
         Transform::from_scale(Vec3::splat(scale))
