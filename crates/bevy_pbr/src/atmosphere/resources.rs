@@ -2662,8 +2662,9 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   frame instead of the fixed phases, and accumulate optical depth (audit 1 validation: after
 ///   convergence half the mean error and 40 % of the edge error of the fixed phases, with
 ///   frame-to-frame noise of 0.02 in edge transmittance).
-/// - `ATM_DBG_STEP_DIV4`, `ATM_DBG_STEP_DIV16`: a 4x / 16x shorter cloud view step (with
-///   `ATM_DBG_NO_COARSE`: the step-size convergence of the view march, audit 24).
+/// - `ATM_DBG_STEP_DIV2`, `ATM_DBG_STEP_DIV4`, `ATM_DBG_STEP_DIV16`: a 2x / 4x / 16x shorter
+///   cloud view step (with `ATM_DBG_NO_COARSE`: the step-size convergence of the view march,
+///   audit 24).
 /// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the
 ///   tracer's bounce (r), flight segment (g) and sun-ray (b) budgets, and that continued past a
 ///   segment's null-collision budget (a, exact).

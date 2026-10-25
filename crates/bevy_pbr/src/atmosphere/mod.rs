@@ -545,6 +545,10 @@ pub struct AtmosphereSettings {
     /// Farthest distance the cloud march covers, in meters (set from
     /// [`VolumetricCloudSettings::max_distance`]).
     pub cloud_max_distance: f32,
+
+    /// Density samples per long in-cloud view step (set from
+    /// [`VolumetricCloudSettings::step_samples`]).
+    pub cloud_step_samples: u32,
 }
 
 impl Default for AtmosphereSettings {
@@ -578,6 +582,7 @@ impl Default for AtmosphereSettings {
             cloud_max_steps: VolumetricCloudSettings::MEDIUM.max_steps,
             cloud_light_taps: VolumetricCloudSettings::MEDIUM.light_taps,
             cloud_max_distance: VolumetricCloudSettings::MEDIUM.max_distance,
+            cloud_step_samples: VolumetricCloudSettings::MEDIUM.step_samples,
         }
     }
 }
@@ -617,6 +622,7 @@ pub struct GpuAtmosphereSettings {
     pub cloud_max_steps: u32,
     pub cloud_light_taps: u32,
     pub cloud_max_distance: f32,
+    pub cloud_step_samples: u32,
 }
 
 impl GpuAtmosphereSettings {
@@ -670,6 +676,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             cloud_max_steps: s.cloud_max_steps,
             cloud_light_taps: s.cloud_light_taps,
             cloud_max_distance: s.cloud_max_distance,
+            cloud_step_samples: s.cloud_step_samples.max(1),
         }
     }
 }
@@ -762,6 +769,15 @@ pub struct VolumetricCloudSettings {
     pub light_taps: u32,
     /// Farthest distance the cloud march covers, in meters.
     pub max_distance: f32,
+    /// Density samples, evenly spaced, per in-cloud view step longer than 100 m; 1 = one.
+    ///
+    /// One density sample per step makes clouds too transparent where the density varies
+    /// within the step (the mean of `exp(-sigma dt)` over the jitter exceeds `exp` of the mean
+    /// optical depth). Against a 16x finer march (hero view, sun 35 deg, Apple M5), the
+    /// cloudy-pixel transmittance error is +0.078 with 1 sample, +0.037 with 2 (+20 % march
+    /// time) and +0.018 with 4 (+57 %); half and quarter steps give +0.032 (+37 %) and +0.012
+    /// (+105 %). Lighting stays one evaluation per step.
+    pub step_samples: u32,
     /// Cloud shadow map update interleave (1 = full, 4 = 1/16 texels/frame).
     pub shadow_update_interleave: u32,
     /// Enable temporal accumulation on the cloud shadow map.
@@ -775,6 +791,7 @@ impl VolumetricCloudSettings {
         max_steps: 48,
         light_taps: 8,
         max_distance: 200_000.0,
+        step_samples: 1,
         shadow_update_interleave: 4,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.15,
@@ -783,6 +800,7 @@ impl VolumetricCloudSettings {
         max_steps: 96,
         light_taps: 12,
         max_distance: 350_000.0,
+        step_samples: 1,
         shadow_update_interleave: 4,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.1,
@@ -791,6 +809,7 @@ impl VolumetricCloudSettings {
         max_steps: 128,
         light_taps: 16,
         max_distance: 400_000.0,
+        step_samples: 2,
         shadow_update_interleave: 2,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.08,
@@ -799,6 +818,7 @@ impl VolumetricCloudSettings {
         max_steps: 160,
         light_taps: 20,
         max_distance: 500_000.0,
+        step_samples: 4,
         shadow_update_interleave: 1,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.05,
@@ -1419,6 +1439,7 @@ pub fn apply_volumetric_cloud_settings(
         atmosphere_settings.cloud_max_steps = cloud_settings.max_steps;
         atmosphere_settings.cloud_light_taps = cloud_settings.light_taps;
         atmosphere_settings.cloud_max_distance = cloud_settings.max_distance;
+        atmosphere_settings.cloud_step_samples = cloud_settings.step_samples;
     }
 }
 

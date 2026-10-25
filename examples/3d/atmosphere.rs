@@ -5,7 +5,7 @@
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
-//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`,
+//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
@@ -713,7 +713,8 @@ fn setup_camera_fog(
         // `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic` picks the preset,
         // `ATMOSPHERE_SHADOW_INTERLEAVE=1` traces the whole shadow map every frame instead of
         // time-slicing it, `ATMOSPHERE_SHADOW_TEMPORAL_ALPHA=<a>` sets the history blend
-        // (1 = no history).
+        // (1 = no history), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>` the density samples per long
+        // in-cloud view step.
         {
             let preset = match std::env::var("ATMOSPHERE_CLOUD_QUALITY").as_deref() {
                 Ok("low") => VolumetricCloudSettings::LOW,
@@ -730,6 +731,10 @@ fn setup_camera_fog(
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(preset.shadow_temporal_alpha),
+                step_samples: std::env::var("ATMOSPHERE_CLOUD_STEP_SAMPLES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(preset.step_samples),
                 ..preset
             }
         },

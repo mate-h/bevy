@@ -106,10 +106,15 @@ fn cloud_view_step(t: f32) -> f32 {
     let floor_m = max(cloud_layer.detail_noise_scale, 1.0) / 128.0;
     var step = min(far, max(CLOUD_STEP_REL * t, floor_m));
     // Step-size convergence (audit 24 validation).
+    @if(ATM_DBG_STEP_DIV2) { step *= 0.5; }
     @if(ATM_DBG_STEP_DIV4) { step *= 0.25; }
     @if(ATM_DBG_STEP_DIV16) { step *= 0.0625; }
     return step;
 }
+// In-cloud view steps longer than this take `settings.cloud_step_samples` density samples
+// (VolumetricCloudSettings::step_samples). Shorter steps are near the camera, where the
+// density changes little within one.
+const CLOUD_STEP_SUB_MIN_M: f32 = 100.0;
 const CLOUD_FINE_EMPTY_TO_COARSE: u32 = 10u;
 const CLOUD_COARSE_DENSITY_EPS: f32 = 0.0005;
 // Grazing rays enter a 1.5-4 km shell ~140-230 km away, so keep the horizon covered.
@@ -842,6 +847,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
             var density = 0.0;
             if (fine_mode) {
                 density = get_cloud_medium_density_lod(r_p, p, mip);
+                // Long steps: the step's density is the mean of evenly spaced samples across
+                // it, also when the first is empty, which keeps the step's optical depth
+                // unbiased (audit 24). exp of one jittered sample averages too transparent
+                // where the density varies within the step. Lighting stays one evaluation per
+                // step (sigma_s / sigma_t does not depend on density).
+                let sub_n = max(settings.cloud_step_samples, 1u);
+                if (sub_n > 1u && dt > CLOUD_STEP_SUB_MIN_M) {
+                    var density_sum = density;
+                    for (var k = 1u; k < sub_n; k++) {
+                        let pk = p + ray_dir * (dt * f32(k) / f32(sub_n));
+                        density_sum += get_cloud_medium_density_lod(length(pk), pk, mip);
+                    }
+                    density = density_sum / f32(sub_n);
+                }
                 if (density <= 0.0) {
                     view_od_in_cloud = 0.0;
                     fine_empty += 1u;
