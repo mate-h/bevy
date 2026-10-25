@@ -13,11 +13,14 @@
 //   at 1/8 and 1/64 of it (bubbles of tile/8 .. tile/2048), so the octaves continue down to a
 //   few metres.
 // - rows of the cloud profile texture after the cloud-type rows: one per shape-noise mip, the
-//   distribution F(v) of the shape noise (R), texel i at v = i / (width - 1); then the scheme row,
-//   texel i at cloud fraction p = (i / (width - 1))^2: R the threshold t that
-//   Y = g + r (b1 + s b2 + s^2 b3) exceeds with probability p (s = 8^-H the second and third
-//   taps; r the bubble weight), G the mean of Y - t over the cloud, B the mean of b, A its
-//   variance (the same in every texel).
+//   distribution F(v) of the shape noise (R), texel i at v = i / (width - 1), and in every texel
+//   the mean (G) and variance (B) of the bubbles b; then the scheme row, texel i at cloud fraction
+//   p = (i / (width - 1))^2: R the threshold t that Y = g + r (b1 + s b2 + s^2 b3) exceeds with
+//   probability p (s = 8^-H the second and third taps; r the bubble weight), G the depth c of the
+//   mixed shell in Y (CLOUD_EDGE_SHELL times the mean of Y - t over the cloud), B the liquid-water
+//   magnitude 1 / E[min(Y - t, c) / c] over the cloud, A 1.
+//   Liquid water is min(Y - t, c) / c times the magnitude: linear in the excess within the shell,
+//   flat in the core (`clouds.wesl` cloud_scheme_density).
 //   P(Y > t) and E[(Y - t)+] integrate the measured distribution of b1 against g + r (s b2 +
 //   s^2 b3), the latter Gaussian with the measured mean and variance (s r b2 + s^2 r b3 is a
 //   small, nearly Gaussian addition: s r = 0.16).
@@ -213,8 +216,9 @@ fn distributions(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let v = f32(i) / f32(width - 1u);
+    let mb = bubble_moments();
     textureStore(profile_lut, vec2<i32>(i32(i), i32(FIRST_DISTRIBUTION_ROW + m)),
-        vec4(cdf(SHAPE_BLOCK + m * BINS, v), 0.0, 0.0, 0.0));
+        vec4(cdf(SHAPE_BLOCK + m * BINS, v), mb.mean, mb.var_, 0.0));
 }
 
 fn phi(x: f32) -> f32 {
@@ -280,6 +284,13 @@ fn scheme_moments(t: f32, mean_d: f32, sigma_d: f32, total: f32) -> vec2<f32> {
     return out / total;
 }
 
+// Depth of the mixed shell, in units of the mean excess (must match clouds.wesl): liquid water
+// grows linearly with the excess over the outer part of a cloud and is flat in its core. Fitted to
+// the aircraft composite of 1624 cumulus penetrations (Wang, Geerts & French 2009, Fig. 5a:
+// liquid water flat in the interior, dropping within ~10 % of the radius of the edge), rms 0.05
+// at cloud fractions 0.05-0.2 (.clouds-handoff/noise_study/physical_detail/edge_fit.py).
+const CLOUD_EDGE_SHELL: f32 = 0.5;
+
 // One invocation per scheme texel.
 @compute @workgroup_size(64)
 fn scheme(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -308,5 +319,9 @@ fn scheme(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let t = 0.5 * (lo + hi);
     let mean_excess = max(scheme_moments(t, mean_d, sigma_d, mb.total).y / p, 1e-4);
-    textureStore(profile_lut, vec2<i32>(i32(i), i32(SCHEME_ROW)), vec4(t, mean_excess, mb.mean, mb.var_));
+    let c = CLOUD_EDGE_SHELL * mean_excess;
+    // E[min(Y - t, c)+] = E[(Y - t)+] - E[(Y - t - c)+].
+    let shell = (scheme_moments(t, mean_d, sigma_d, mb.total).y
+        - scheme_moments(t + c, mean_d, sigma_d, mb.total).y) / (c * p);
+    textureStore(profile_lut, vec2<i32>(i32(i), i32(SCHEME_ROW)), vec4(t, c, 1.0 / max(shell, 1e-3), 1.0));
 }

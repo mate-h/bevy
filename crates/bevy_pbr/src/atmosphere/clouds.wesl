@@ -334,11 +334,14 @@ fn normal_cdf(x: f32) -> f32 {
 /// texture mips give the footprint mean mu of Y and the variance sigma^2 the footprint leaves
 /// unresolved, and the expected excess over the footprint is the
 /// Gaussian closure of the scheme, E[(mu + sigma Z - t)+] = sigma phi(d) + (mu - t) Phi(d),
-/// d = (mu - t) / sigma. Near the camera sigma -> 0 and the excess is the resolved Y - t; far away
+/// d = (mu - t) / sigma, applied to the liquid water min(Y - t, c)+ / c: linear in the excess over
+/// a mixed shell of depth c, flat in the core, as aircraft composites of cumulus show (Wang,
+/// Geerts & French 2009: liquid water flat in the interior, dropping within ~10 % of the radius
+/// of the edge; `cloud_noise_quantiles.wesl` CLOUD_EDGE_SHELL). Near the camera sigma -> 0 and the excess is the resolved Y - t; far away
 /// the mean liquid water of the unresolved bubbles is kept (the footprint mean of the true
 /// excess within a few percent at 400 m footprints, against -15 % for thresholding the filtered
-/// field: .clouds-handoff noise study). Returns the excess over its in-cloud mean at cloud
-/// fraction p (in-cloud mean liquid water 1).
+/// field: .clouds-handoff noise study). Returns the liquid water over its in-cloud mean at cloud
+/// fraction p (in-cloud mean 1).
 fn cloud_scheme_density(world_pos: vec3<f32>, h: f32, p: f32, mip: f32) -> f32 {
     let cam_dist = (exp2(mip) - 1.0) * 4000.0;
     let footprint = cam_dist * CLOUD_PIXEL_FOOTPRINT;
@@ -347,13 +350,14 @@ fn cloud_scheme_density(world_pos: vec3<f32>, h: f32, p: f32, mip: f32) -> f32 {
     let r = cloud_bubble_weight();
     let s = pow(CLOUD_SCHEME_TAP, -CLOUD_SCHEME_H);
     let scheme = cloud_scheme(p);
+    let bubbles = cloud_bubble_moments();
     // The finer taps (bubbles below 1/64 of the tile) only matter near the cloud surface: where
     // even their largest contribution cannot reach the threshold the sample is clear, and deep
-    // inside a cloud (tens of optical depths) their variation is invisible, so both use their
-    // exact mean and variance (scheme row B, A) instead of the texture.
-    let fine_mean = r * (s + s * s) * scheme.z;
-    let fine_var = r * r * (s * s + s * s * s * s) * scheme.w;
-    let fine_max = r * (s + s * s) * (scheme.z + 7.0 * sqrt(scheme.w));
+    // in a cloud's core (beyond the mixed shell) the liquid water is flat, so both use their
+    // exact mean and variance instead of the texture.
+    let fine_mean = r * (s + s * s) * bubbles.x;
+    let fine_var = r * r * (s * s + s * s * s * s) * bubbles.y;
+    let fine_max = r * (s + s * s) * (bubbles.x + 7.0 * sqrt(bubbles.y));
     let mu0 = a.x + r * a.z;
     let sigma0 = sqrt(a.y + r * r * a.w);
     if (mu0 + fine_max < scheme.x - 3.0 * sigma0) {
@@ -361,8 +365,7 @@ fn cloud_scheme_density(world_pos: vec3<f32>, h: f32, p: f32, mip: f32) -> f32 {
     }
     var mu = mu0 + fine_mean;
     var var_ = sigma0 * sigma0 + fine_var;
-    var near_surface = mu0 - scheme.x < fine_max + 3.0 * sigma0;
-    if (near_surface) {
+    if (mu0 - scheme.x < scheme.y + fine_max + 3.0 * sigma0) {
         let b = cloud_scheme_tap(world_pos, h, period / CLOUD_SCHEME_TAP, 1u, footprint);
         let c = cloud_scheme_tap(world_pos, h, period / (CLOUD_SCHEME_TAP * CLOUD_SCHEME_TAP), 2u, footprint);
         mu = mu0 + r * (s * b.z + s * s * c.z);
@@ -370,18 +373,33 @@ fn cloud_scheme_density(world_pos: vec3<f32>, h: f32, p: f32, mip: f32) -> f32 {
     }
     let sigma = sqrt(var_);
     let dm = mu - scheme.x;
-    var excess = max(dm, 0.0);
-    if (sigma > 1e-3) {
-        // Beyond 3 sigma below the threshold the expected excess is < 4e-4 sigma: zero, so the
-        // march's empty test (and its return to coarse steps) still sees clear air.
-        let d = dm / sigma;
-        excess = select(0.0, sigma * normal_pdf(d) + dm * normal_cdf(d), d > -3.0);
-    }
-    return excess / max(scheme.y, 1e-4);
+    // Liquid water min(Y - t, c)+ / c (mixed shell of depth c, flat core), its footprint mean
+    // E[(Y - t)+] - E[(Y - t - c)+].
+    let shell = cloud_expected_excess(dm, sigma) - cloud_expected_excess(dm - scheme.y, sigma);
+    return shell / max(scheme.y, 1e-4) * scheme.z;
 }
 
-/// The cloud-scheme row at cloud fraction p (texel i at p = (i / (N - 1))^2): (threshold t,
-/// mean cloudy excess, mean and variance of the bubbles b), `cloud_noise_quantiles.wesl` scheme.
+/// E[(dm + sigma Z)+], Z standard normal: sigma phi(d) + dm Phi(d), d = dm / sigma (the resolved
+/// max(dm, 0) when sigma -> 0). Beyond 3 sigma below zero it is < 4e-4 sigma: zero, so the
+/// march's empty test (and its return to coarse steps) still sees clear air.
+fn cloud_expected_excess(dm: f32, sigma: f32) -> f32 {
+    if (sigma <= 1e-3) {
+        return max(dm, 0.0);
+    }
+    let d = dm / sigma;
+    return select(0.0, sigma * normal_pdf(d) + dm * normal_cdf(d), d > -3.0);
+}
+
+/// Mean and variance of the bubbles b (`cloud_noise_quantiles.wesl`, distribution rows G, B).
+fn cloud_bubble_moments() -> vec2<f32> {
+    let size = vec2<f32>(textureDimensions(cloud_profile_lut));
+    return textureSampleLevel(cloud_profile_lut, noise_sampler_3d,
+        vec2(0.5 / size.x, (CLOUD_PROFILE_TYPE_ROWS + 0.5) / size.y), 0.0).gb;
+}
+
+
+/// The cloud-scheme row at cloud fraction p (texel i at p = (i / (N - 1))^2): (threshold t, depth c
+/// of the mixed shell, liquid-water magnitude, 1), `cloud_noise_quantiles.wesl` scheme.
 fn cloud_scheme(p: f32) -> vec4<f32> {
     let size = vec2<f32>(textureDimensions(cloud_profile_lut));
     let u = (sqrt(saturate(p)) * (size.x - 1.0) + 0.5) / size.x;
