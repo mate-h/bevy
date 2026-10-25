@@ -164,6 +164,8 @@ impl FromWorld for PerlinWorleyNoisePipeline {
 #[derive(Resource)]
 pub struct NoiseMipDownsamplePipeline {
     pub pipeline: CachedComputePipelineId,
+    /// Mean-and-variance downsample of the physical cloud scheme's fluctuation texture.
+    pub moments: CachedComputePipelineId,
 }
 
 impl FromWorld for NoiseMipDownsamplePipeline {
@@ -174,9 +176,17 @@ impl FromWorld for NoiseMipDownsamplePipeline {
             label: Some("noise_mip_downsample_3d_pipeline".into()),
             layout: vec![layout.descriptor.clone()],
             shader: load_embedded_asset!(world, "noise_mip_downsample_3d.wesl"),
+            entry_point: Some("main".into()),
             ..default()
         });
-        Self { pipeline }
+        let moments = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("noise_mip_downsample_3d_moments_pipeline".into()),
+            layout: vec![layout.descriptor.clone()],
+            shader: load_embedded_asset!(world, "noise_mip_downsample_3d.wesl"),
+            entry_point: Some("moments".into()),
+            ..default()
+        });
+        Self { pipeline, moments }
     }
 }
 

@@ -222,6 +222,25 @@ pub struct FbmNoiseTexture {
     pub cirrus_mips: Vec<TextureView>,
     /// Vertical profile lookups (Rgba16Float, height x type; `cloud_profile.rs`).
     pub profile: CachedTexture,
+    /// Moisture fluctuation of the physical cloud scheme (`cloud_noise_quantiles.wesl` bake,
+    /// `clouds.wesl` cloud_scheme_density): Rgba16Float 128^3 on the shape-noise tile, R the
+    /// Gaussianized shape noise g, G its variance within the texel, B the thermal bubbles b
+    /// (three octaves), A its variance; 0 at mip 0 (the texels are the field), and in each mip
+    /// the variance over the block it averages: what a footprint of that size leaves unresolved.
+    pub scheme_noise: CachedTexture,
+    /// Single-mip views of [`FbmNoiseTexture::scheme_noise`] (bake and mip generation).
+    pub scheme_noise_mips: Vec<TextureView>,
+}
+
+/// Edge of the physical cloud scheme's fluctuation texture ([`FbmNoiseTexture::scheme_noise`]).
+pub const CLOUD_SCHEME_NOISE_SIZE: u32 = 128;
+
+/// Weight of the thermal bubbles against the shape noise in the physical cloud scheme: the first
+/// bubble octave (cells of 1/8 of the shape tile) continues the shape noise's spectrum (base
+/// frequency 4) as (1/2)^H, H = 2/3, times the layer's detail strength (0 = no bubbles). Must
+/// match `clouds.wesl` cloud_bubble_weight.
+pub fn cloud_bubble_weight(detail_strength: f32) -> f32 {
+    0.5f32.powf(2.0 / 3.0) * detail_strength.max(0.0)
 }
 
 /// Size of the cirrus generating-field texture.
@@ -306,6 +325,7 @@ pub fn init_fbm_noise_texture(
         format: TextureFormat::Rgba16Float,
         usage: TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_DST
+            | TextureUsages::COPY_SRC
             | TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
@@ -350,6 +370,32 @@ pub fn init_fbm_noise_texture(
     );
     let profile_view = profile_texture.create_view(&TextureViewDescriptor::default());
 
+    let scheme_mip_count = CLOUD_SCHEME_NOISE_SIZE.ilog2() + 1;
+    let scheme_noise = render_device.create_texture(&TextureDescriptor {
+        label: Some("cloud_scheme_noise_texture"),
+        size: Extent3d {
+            width: CLOUD_SCHEME_NOISE_SIZE,
+            height: CLOUD_SCHEME_NOISE_SIZE,
+            depth_or_array_layers: CLOUD_SCHEME_NOISE_SIZE,
+        },
+        mip_level_count: scheme_mip_count,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let scheme_noise_view = scheme_noise.create_view(&TextureViewDescriptor::default());
+    let scheme_noise_mips = (0..scheme_mip_count)
+        .map(|mip| {
+            scheme_noise.create_view(&TextureViewDescriptor {
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                ..TextureViewDescriptor::default()
+            })
+        })
+        .collect();
+
     commands.insert_resource(FbmNoiseTexture {
         texture: CachedTexture {
             texture,
@@ -365,6 +411,11 @@ pub fn init_fbm_noise_texture(
             texture: profile_texture,
             default_view: profile_view,
         },
+        scheme_noise: CachedTexture {
+            texture: scheme_noise,
+            default_view: scheme_noise_view,
+        },
+        scheme_noise_mips,
     });
 }
 
@@ -480,6 +531,8 @@ pub fn upload_cloud_profiles(
 pub struct CloudNoiseQuantilePipeline {
     layout: BindGroupLayoutDescriptor,
     histogram_marginals: CachedComputePipelineId,
+    prefix: CachedComputePipelineId,
+    bake: CachedComputePipelineId,
     distributions: CachedComputePipelineId,
     scheme: CachedComputePipelineId,
 }
@@ -488,7 +541,7 @@ pub struct CloudNoiseQuantilePipeline {
 #[derive(Clone, Copy, ShaderType, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct CloudNoiseQuantileParams {
-    detail_mip_offset: f32,
+    _pad0: f32,
     bubble_weight: f32,
     _pad1: f32,
     _pad2: f32,
@@ -506,6 +559,7 @@ impl FromWorld for CloudNoiseQuantilePipeline {
                     texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                     texture_3d(TextureSampleType::Float { filterable: false }),
                     uniform_buffer::<CloudNoiseQuantileParams>(false),
+                    texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                 ),
             ),
         );
@@ -522,6 +576,8 @@ impl FromWorld for CloudNoiseQuantilePipeline {
         };
         Self {
             histogram_marginals: pipeline("histogram_marginals"),
+            prefix: pipeline("prefix"),
+            bake: pipeline("bake"),
             distributions: pipeline("distributions"),
             scheme: pipeline("scheme"),
             layout,
@@ -529,10 +585,10 @@ impl FromWorld for CloudNoiseQuantilePipeline {
     }
 }
 
-/// Measures the noise distributions and tabulates the cloud scheme (`cloud_noise_quantiles.wesl`)
-/// once both noise textures exist, and again when the first cloud layer's noise scales change
-/// the bubble weight or the detail mip sampled alongside each shape mip (must match `clouds.wesl`
-/// cloud_bubble_weight, cloud_detail_mip_offset).
+/// Bakes the physical cloud scheme's fluctuation texture (g, g^2, b, b^2 with a box-filtered mip
+/// chain) and tabulates the scheme (`cloud_noise_quantiles.wesl`) once the shape noise exists,
+/// and again when the first cloud layer's bubble weight changes (must match `clouds.wesl`
+/// cloud_bubble_weight).
 pub fn compute_cloud_noise_quantiles(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -543,8 +599,10 @@ pub fn compute_cloud_noise_quantiles(
     detail: Option<Res<DetailNoiseTexture>>,
     generated: Res<PerlinWorleyNoiseGenerated>,
     detail_generated: Res<DetailNoiseGenerated>,
+    mip_pipeline: Res<super::perlin_worley_noise::NoiseMipDownsamplePipeline>,
+    mip_layout: Res<super::perlin_worley_noise::NoiseMipDownsampleBindGroupLayout>,
     layers: Query<&crate::GpuCloudLayers>,
-    mut last: Local<Option<[u32; 2]>>,
+    mut last: Local<Option<u32>>,
 ) {
     let (Some(profile), Some(noise), Some(detail)) = (profile, noise, detail) else {
         return;
@@ -555,31 +613,38 @@ pub fn compute_cloud_noise_quantiles(
     if generated.0 < noise.mip_level_count || !detail_generated.0 {
         return;
     }
-    let bubble_weight =
-        (layer.detail_noise_scale.max(1.0) / layer.shape_noise_scale.max(1.0)).powf(2.0 / 3.0);
-    let detail_mip_offset = (4000.0 * 2.2e-3 / (layer.detail_noise_scale.max(1.0) / 128.0))
-        .log2()
-        .max(0.0);
-    let key = [bubble_weight.to_bits(), detail_mip_offset.to_bits()];
+    let bubble_weight = cloud_bubble_weight(layer.detail_strength);
+    let key = bubble_weight.to_bits();
     if last.as_ref() == Some(&key) {
         return;
     }
-    let pipelines = [pipeline.histogram_marginals, pipeline.distributions, pipeline.scheme]
-        .map(|id| pipeline_cache.get_compute_pipeline(id));
-    let [Some(histogram_marginals), Some(distributions), Some(scheme)] = pipelines else {
+    let pipelines = [
+        pipeline.histogram_marginals,
+        pipeline.prefix,
+        pipeline.bake,
+        pipeline.distributions,
+        pipeline.scheme,
+    ]
+    .map(|id| pipeline_cache.get_compute_pipeline(id));
+    let [Some(histogram_marginals), Some(prefix), Some(bake), Some(distributions), Some(scheme)] =
+        pipelines
+    else {
         return;
     };
-    // 3 blocks (shape, low- and high-frequency billow) x 8 mips x 256 bins, zero-initialized.
+    let Some(mip_compute) = pipeline_cache.get_compute_pipeline(mip_pipeline.moments) else {
+        return;
+    };
+    // Bin blocks of `cloud_noise_quantiles.wesl` (4096 counters), zero-initialized.
     let bins = render_device.create_buffer(&BufferDescriptor {
         label: Some("cloud_noise_histogram"),
-        size: 3 * 256 * 4 * CLOUD_NOISE_QUANTILE_ROWS as u64,
+        size: 4096 * 4,
         usage: BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
     let params = render_device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("cloud_noise_quantile_params"),
         contents: bytemuck::bytes_of(&CloudNoiseQuantileParams {
-            detail_mip_offset,
+            _pad0: 0.0,
             bubble_weight,
             _pad1: 0.0,
             _pad2: 0.0,
@@ -595,6 +660,7 @@ pub fn compute_cloud_noise_quantiles(
             &profile.profile.default_view,
             &detail.texture.default_view,
             params.as_entire_binding(),
+            &profile.scheme_noise_mips[0],
         )),
     );
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
@@ -606,14 +672,40 @@ pub fn compute_cloud_noise_quantiles(
             timestamp_writes: None,
         });
         pass.set_bind_group(0, &bind_group, &[]);
-        let n = (noise.size.max(detail.size) + UVec3::splat(3)) / 4;
+        let n = (noise.size.max(UVec3::splat(CLOUD_SCHEME_NOISE_SIZE)) + UVec3::splat(3)) / 4;
         pass.set_pipeline(histogram_marginals);
         pass.dispatch_workgroups(n.x, n.y, n.z);
+        pass.set_pipeline(prefix);
+        pass.dispatch_workgroups(1, 1, 1);
+        let b = CLOUD_SCHEME_NOISE_SIZE.div_ceil(4);
+        pass.set_pipeline(bake);
+        pass.dispatch_workgroups(b, b, b);
         let row = CLOUD_PROFILE_HEIGHT_RES as u32;
         pass.set_pipeline(distributions);
         pass.dispatch_workgroups(row * CLOUD_NOISE_QUANTILE_ROWS / 64, 1, 1);
         pass.set_pipeline(scheme);
         pass.dispatch_workgroups(row / 64, 1, 1);
+    }
+    // Mips: footprint mean and variance of g and b.
+    let mut size = CLOUD_SCHEME_NOISE_SIZE;
+    for mip in 1..profile.scheme_noise_mips.len() {
+        size = (size / 2).max(1);
+        let mip_bind = render_device.create_bind_group(
+            "cloud_scheme_noise_mip",
+            &mip_layout.layout,
+            &BindGroupEntries::with_indices((
+                (13, &profile.scheme_noise_mips[mip - 1]),
+                (14, &profile.scheme_noise_mips[mip]),
+            )),
+        );
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("cloud_scheme_noise_mip"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(mip_compute);
+        pass.set_bind_group(0, &mip_bind, &[]);
+        let d = size.div_ceil(4);
+        pass.dispatch_workgroups(d, d, d);
     }
     render_queue.submit([encoder.finish()]);
     *last = Some(key);

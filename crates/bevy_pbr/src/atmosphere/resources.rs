@@ -128,7 +128,7 @@ fn render_sky_composite_cloud_entries() -> impl IntoIndexedBindGroupLayoutEntryB
 
 /// Placed at 20..=25, 33 so they don't collide with the shadow map entries (14..=17)
 /// or the clouds_reconstruct history/storage bindings (28..=32).
-fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<8> {
+fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<9> {
     (
         (20, uniform_buffer::<GpuCloudLayers>(true)), // cloud layer parameters
         // 2D noise texture for cloud coverage / weather
@@ -159,6 +159,8 @@ fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<8>
         ),
         // Vertical profile lookups, height x type (`cloud_profile.rs`).
         (34, texture_2d(TextureSampleType::Float { filterable: true })),
+        // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
+        (35, texture_3d(TextureSampleType::Float { filterable: true })),
     )
 }
 
@@ -348,6 +350,8 @@ impl AtmosphereBindGroupLayouts {
                     ),
                     // Vertical profile lookups (`cloud_profile.rs`).
                     (34, texture_2d(TextureSampleType::Float { filterable: true })),
+                    // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
+                    (35, texture_3d(TextureSampleType::Float { filterable: true })),
                     // Cloud SDF seeds (`cloud_field.wesl` init entry point).
                     (
                         40,
@@ -2178,6 +2182,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     (25, stbn_view.as_ref()),
                     (33, &detail_noise_texture.texture.default_view),
                     (34, &fbm_noise_texture.profile.default_view),
+                    (35, &fbm_noise_texture.scheme_noise.default_view),
                     (13, trace_storage),
                     (40, &textures.cloud_field_a.default_view),
                     (45, &textures.cloud_field_ext.default_view),
@@ -2330,6 +2335,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
+                        (35, &fbm_noise_texture.scheme_noise.default_view),
                         (26, &textures.clouds.default_view),
                         (27, &textures.clouds_depth.default_view),
                     )),
@@ -2354,6 +2360,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
+                        (35, &fbm_noise_texture.scheme_noise.default_view),
                         (50, &textures.haze_history_inscattering.default_view),
                         (51, &textures.haze_history_transmittance.default_view),
                         (52, haze_params),
@@ -2395,6 +2402,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
+                        (35, &fbm_noise_texture.scheme_noise.default_view),
                         (26, &textures.clouds_trace.default_view),
                         (27, &textures.clouds_trace_depth.default_view),
                         (44, &textures.cloud_field_sdf.default_view),
@@ -2490,6 +2498,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
+                        (35, &fbm_noise_texture.scheme_noise.default_view),
                     )),
                 )
             });
@@ -2524,6 +2533,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (25, stbn_view.as_ref()),
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
+                        (35, &fbm_noise_texture.scheme_noise.default_view),
                     )),
                 )
             });

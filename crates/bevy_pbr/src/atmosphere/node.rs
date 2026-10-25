@@ -565,6 +565,10 @@ pub fn render_sky(
             );
         }
         if let Some(wx) = wx {
+            let t = &wx.scheme_noise.texture;
+            d(command_encoder, "scheme_noise_mip0", t, 0, UVec3::new(t.width(), t.height(), t.depth_or_array_layers()), 8, "rgba16f");
+            let t = &wx.profile.texture;
+            d(command_encoder, "profile_lut", t, 0, s2(t), 8, "rgba16f");
             d(
                 command_encoder,
                 "weather",

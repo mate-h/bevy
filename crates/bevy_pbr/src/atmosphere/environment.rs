@@ -159,6 +159,8 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
                     texture_3d(TextureSampleType::Float { filterable: true }),
                 ), // detail
                 (34, texture_2d(TextureSampleType::Float { filterable: true })), // vertical profiles
+                // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
+                (35, texture_3d(TextureSampleType::Float { filterable: true })),
                 // output 2D array texture
                 (
                     13,
@@ -329,6 +331,7 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
                     (25, stbn_view.as_ref()),
                     (33, &detail_noise_texture.texture.default_view),
                     (34, &fbm_noise_texture.profile.default_view),
+                    (35, &fbm_noise_texture.scheme_noise.default_view),
                     // output
                     (13, &textures.environment),
                 )),
