@@ -32,6 +32,8 @@ struct GpuCloudLayers {
     evolution_time: f32,
     coverage: f32,
     shape_noise_scale: f32,
+    weather_window_origin: vec2<f32>,
+    droplet_number: f32,
     // Thin layers (ThinCloudLayer, mod.rs GpuCloudLayers), lowest mid level first.
     thin_count: u32,
     thin: array<GpuThinCloudLayer, 4>,
@@ -111,8 +113,18 @@ fn sample_weather(world_pos: vec3<f32>, weather_scale: f32) -> vec4<f32> {
     let xz = rot * world_pos.xz;
     let uv = xz / max(1.0, weather_scale);
     // R is the current coverage: the weather generator bakes the cloud life cycle into the map
-    // (fbm_noise_3d.wesl), so one sample serves every density lookup.
-    var w = textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0);
+    // (fbm_noise_3d.wesl), so one sample serves every density lookup. Inside the weather window
+    // around the camera (`weather_window.wesl`, texel j = map texel origin + j) the window is
+    // read, the tiled map outside it; the same bilinear weights, so they agree where no source
+    // has changed the window.
+    let local = uv * vec2<f32>(textureDimensions(noise_texture_2d)) - cloud_layer.weather_window_origin;
+    let window = f32(textureDimensions(weather_window_art).x);
+    var w: vec4<f32>;
+    if (all(local > vec2(1.0)) && all(local < vec2(window - 1.0))) {
+        w = textureSampleLevel(weather_window_art, noise_sampler_3d, local / window, 0.0);
+    } else {
+        w = textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0);
+    }
     // Mesoscale cloud fraction from the A channel at 4x the tile (64/32/16 km): subtracts from
     // the coverage, keeping it in cloudy regions and clearing gaps between them. Subtractive,
     // not renormalised (Nubis ValueErosion, (v - e) / (1 - e)): renormalising stretched the tip
@@ -287,6 +299,10 @@ fn normal_quantile(p: f32) -> f32 {
 /// A its variance, on the shape-noise tile; each mip holds the mean and the variance over the block
 /// it averages (0 at mip 0).
 @group(0) @binding(35) var cloud_scheme_noise: texture_3d<f32>;
+/// Weather window around the camera (`weather_window.wesl`): art channels (A) and physical
+/// channels (B: cloud-fraction scale, air mass, droplet number, base offset).
+@group(0) @binding(36) var weather_window_art: texture_2d<f32>;
+@group(0) @binding(37) var weather_window_physical: texture_2d<f32>;
 
 /// Hurst exponent of the moisture fluctuation: level sets of dimension 3 - H = 7/3, the measured
 /// dimension of cumulus surfaces (Siebesma & Jonker 2000). Must match `cloud_noise_quantiles.wesl`.

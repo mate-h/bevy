@@ -34,8 +34,11 @@ pub fn atmosphere_luts(
         Option<&DynamicUniformIndex<GpuCloudLayers>>,
         &super::ExtractedAtmosphere,
         &ExtractedView,
+        Option<&GpuCloudLayers>,
     )>,
     pipelines: Res<AtmosphereLutPipelines>,
+    layouts: Res<super::resources::AtmosphereBindGroupLayouts>,
+    weather: Option<Res<super::fbm_noise::FbmNoiseTexture>>,
     gpu_media: Res<bevy_render::render_asset::RenderAssets<crate::GpuScatteringMedium>>,
     mut per_view: bevy_ecs::system::ResMut<PerViewLutState>,
     pipeline_cache: Res<PipelineCache>,
@@ -53,6 +56,7 @@ pub fn atmosphere_luts(
         cloud_layer_uniforms_offset,
         extracted_atmosphere,
         extracted_view,
+        gpu_cloud_layers,
     ) = view.into_inner();
     // This system runs once per view: amortised state (the LUT cache, the cloud-field rebuild
     // stage) is per view, or two views would split one counter between them (audit 9).
@@ -97,7 +101,46 @@ pub fn atmosphere_luts(
     }
 
     let timing_device = ctx.render_device().clone();
+    // Weather window around this view's camera (`weather_window.wesl`), before every pass that
+    // samples the weather (the cloud-shadowed LUTs, shadow map, field, clouds, probes).
+    let window_bind_group = match (gpu_cloud_layers, weather.as_deref()) {
+        (Some(layers), Some(weather)) => {
+            // `weather_window.wesl` WeatherWindowParams: origin (2), droplet number, pad.
+            let o = layers.weather_window_origin;
+            let params = timing_device.create_buffer_with_data(
+                &bevy_render::render_resource::BufferInitDescriptor {
+                    label: Some("weather_window_params"),
+                    contents: bytemuck::cast_slice(&[o.x, o.y, layers.droplet_number, 0.0f32]),
+                    usage: bevy_render::render_resource::BufferUsages::UNIFORM,
+                },
+            );
+            Some(timing_device.create_bind_group(
+                "weather_window_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.weather_window),
+                &bevy_render::render_resource::BindGroupEntries::sequential((
+                    &weather.texture.default_view,
+                    &textures.weather_window_art.default_view,
+                    &textures.weather_window_physical.default_view,
+                    params.as_entire_binding(),
+                )),
+            ))
+        }
+        _ => None,
+    };
     let command_encoder = ctx.command_encoder();
+    if let (Some(bind_group), Some(pipeline)) = (
+        window_bind_group.as_ref(),
+        pipeline_cache.get_compute_pipeline(pipelines.weather_window),
+    ) {
+        let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("weather_window"),
+            timestamp_writes: super::gpu_timing::compute(&timing_device, "weather_window"),
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        let n = super::resources::WEATHER_WINDOW_SIZE.div_ceil(8);
+        pass.dispatch_workgroups(n, n, 1);
+    }
 
     // Pass 1: build all atmosphere LUTs in a single compute pass.
     {
@@ -533,6 +576,7 @@ pub fn render_sky(
             ("clouds_recon_prev", &textures.clouds.texture),
             ("ms_lut", &textures.multiscattering_lut.texture),
             ("sky_view_lut", &textures.sky_view_lut.texture),
+            ("weather_window_art", &textures.weather_window_art.texture),
         ] {
             d(command_encoder, name, t, 0, s2(t), 8, "rgba16f");
         }

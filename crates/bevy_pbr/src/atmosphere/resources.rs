@@ -39,6 +39,8 @@ use super::GpuAtmosphereSettings;
 
 /// Cloud SDF grid (must match `clouds.wesl` CLOUD_FIELD_RES_*).
 pub(crate) const CLOUD_FIELD_RES_XY: u32 = 128;
+/// Edge of the weather window around the camera, in weather-map texels (`weather_window.wesl`).
+pub const WEATHER_WINDOW_SIZE: u32 = 1024;
 pub(crate) const CLOUD_FIELD_RES_Z: u32 = 32;
 
 /// Shadow map bind group layout entries
@@ -128,7 +130,7 @@ fn render_sky_composite_cloud_entries() -> impl IntoIndexedBindGroupLayoutEntryB
 
 /// Placed at 20..=25, 33 so they don't collide with the shadow map entries (14..=17)
 /// or the clouds_reconstruct history/storage bindings (28..=32).
-fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<9> {
+fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<11> {
     (
         (20, uniform_buffer::<GpuCloudLayers>(true)), // cloud layer parameters
         // 2D noise texture for cloud coverage / weather
@@ -161,6 +163,9 @@ fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<9>
         (34, texture_2d(TextureSampleType::Float { filterable: true })),
         // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
         (35, texture_3d(TextureSampleType::Float { filterable: true })),
+        // Weather window around the camera: art (36) and physical (37) channels (`weather_window.wesl`).
+        (36, texture_2d(TextureSampleType::Float { filterable: true })),
+        (37, texture_2d(TextureSampleType::Float { filterable: true })),
     )
 }
 
@@ -185,6 +190,8 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_field_final: BindGroupLayoutDescriptor,
     /// Escape-probability pass (`cloud_field.wesl` escape).
     pub cloud_field_escape: BindGroupLayoutDescriptor,
+    /// Weather window compose pass (`weather_window.wesl`).
+    pub weather_window: BindGroupLayoutDescriptor,
 }
 
 #[derive(Resource)]
@@ -352,6 +359,9 @@ impl AtmosphereBindGroupLayouts {
                     (34, texture_2d(TextureSampleType::Float { filterable: true })),
                     // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
                     (35, texture_3d(TextureSampleType::Float { filterable: true })),
+                    // Weather window around the camera: art (36) and physical (37) channels (`weather_window.wesl`).
+                    (36, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (37, texture_2d(TextureSampleType::Float { filterable: true })),
                     // Cloud SDF seeds (`cloud_field.wesl` init entry point).
                     (
                         40,
@@ -564,6 +574,18 @@ impl AtmosphereBindGroupLayouts {
                             46,
                             texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                         ),
+                    ),
+                ),
+            ),
+            weather_window: BindGroupLayoutDescriptor::new(
+                "weather_window_bind_group_layout",
+                &BindGroupLayoutEntries::sequential(
+                    ShaderStages::COMPUTE,
+                    (
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                        texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                        texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                        uniform_buffer_sized(false, None),
                     ),
                 ),
             ),
@@ -890,6 +912,7 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_field_edt_y: CachedComputePipelineId,
     pub cloud_field_edt_z: CachedComputePipelineId,
     pub cloud_field_escape: CachedComputePipelineId,
+    pub weather_window: CachedComputePipelineId,
 }
 
 impl FromWorld for AtmosphereLutPipelines {
@@ -1055,6 +1078,13 @@ impl FromWorld for AtmosphereLutPipelines {
             cloud_field_edt_y: field("cloud_field_edt_y_pipeline", &layouts.cloud_field_edt, "edt_y"),
             cloud_field_edt_z: field("cloud_field_edt_z_pipeline", &layouts.cloud_field_final, "edt_z"),
             cloud_field_escape: field("cloud_field_escape_pipeline", &layouts.cloud_field_escape, "escape"),
+            weather_window: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("weather_window_pipeline".into()),
+                layout: vec![layouts.weather_window.clone()],
+                shader: load_embedded_asset!(world, "weather_window.wesl"),
+                entry_point: Some("compose".into()),
+                ..default()
+            }),
         }
     }
 }
@@ -1242,6 +1272,10 @@ pub struct AtmosphereTextures {
     pub cloud_field_sdf: CachedTexture,
     pub cloud_field_ext: CachedTexture,
     pub cloud_field_esc: CachedTexture,
+    /// Weather window around the camera (`weather_window.wesl`): A the art channels (the tiled
+    /// map's), B the physical channels. [`WEATHER_WINDOW_SIZE`]^2, recomposed every frame.
+    pub weather_window_art: CachedTexture,
+    pub weather_window_physical: CachedTexture,
 }
 
 pub(super) fn prepare_atmosphere_textures(
@@ -1378,6 +1412,29 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
+        let mut window = |label: &'static str| {
+            textures.get(
+                TextureDescriptor {
+                    label: Some(label),
+                    size: cloud_extent(Extent3d {
+                        width: WEATHER_WINDOW_SIZE,
+                        height: WEATHER_WINDOW_SIZE,
+                        depth_or_array_layers: 1,
+                    }),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba16Float,
+                    usage: TextureUsages::STORAGE_BINDING
+                        | TextureUsages::TEXTURE_BINDING
+                        | TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                },
+            )
+        };
+        let weather_window_art = window("weather_window_art");
+        let weather_window_physical = window("weather_window_physical");
+
         let cloud_shadow_map = textures.get(
             TextureDescriptor {
                 label: Some("cloud_shadow_map"),
@@ -1505,6 +1562,8 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_sdf,
                 cloud_field_ext,
                 cloud_field_esc,
+                weather_window_art,
+                weather_window_physical,
             }
         });
         seen.insert(view.retained_view_entity, textures);
@@ -2182,6 +2241,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     (33, &detail_noise_texture.texture.default_view),
                     (34, &fbm_noise_texture.profile.default_view),
                     (35, &fbm_noise_texture.scheme_noise.default_view),
+                    (36, &textures.weather_window_art.default_view),
+                    (37, &textures.weather_window_physical.default_view),
                     (13, trace_storage),
                     (40, &textures.cloud_field_a.default_view),
                     (45, &textures.cloud_field_ext.default_view),
@@ -2335,6 +2396,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
                         (35, &fbm_noise_texture.scheme_noise.default_view),
+                        (36, &textures.weather_window_art.default_view),
+                        (37, &textures.weather_window_physical.default_view),
                         (26, &textures.clouds.default_view),
                         (27, &textures.clouds_depth.default_view),
                     )),
@@ -2360,6 +2423,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
                         (35, &fbm_noise_texture.scheme_noise.default_view),
+                        (36, &textures.weather_window_art.default_view),
+                        (37, &textures.weather_window_physical.default_view),
                         (50, &textures.haze_history_inscattering.default_view),
                         (51, &textures.haze_history_transmittance.default_view),
                         (52, haze_params),
@@ -2402,6 +2467,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
                         (35, &fbm_noise_texture.scheme_noise.default_view),
+                        (36, &textures.weather_window_art.default_view),
+                        (37, &textures.weather_window_physical.default_view),
                         (26, &textures.clouds_trace.default_view),
                         (27, &textures.clouds_trace_depth.default_view),
                         (44, &textures.cloud_field_sdf.default_view),
@@ -2498,6 +2565,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
                         (35, &fbm_noise_texture.scheme_noise.default_view),
+                        (36, &textures.weather_window_art.default_view),
+                        (37, &textures.weather_window_physical.default_view),
                     )),
                 )
             });
@@ -2533,6 +2602,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (33, &detail_noise_texture.texture.default_view),
                         (34, &fbm_noise_texture.profile.default_view),
                         (35, &fbm_noise_texture.scheme_noise.default_view),
+                        (36, &textures.weather_window_art.default_view),
+                        (37, &textures.weather_window_physical.default_view),
                     )),
                 )
             });

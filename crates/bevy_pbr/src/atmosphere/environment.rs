@@ -59,6 +59,8 @@ pub struct AtmosphereProbeTextures {
     pub sky_view_lut: CachedTexture,
     pub aerial_view_lut: CachedTexture,
     pub cloud_shadow_map: CachedTexture,
+    pub weather_window_art: CachedTexture,
+    pub weather_window_physical: CachedTexture,
 }
 
 #[derive(Component)]
@@ -161,6 +163,9 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
                 (34, texture_2d(TextureSampleType::Float { filterable: true })), // vertical profiles
                 // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
                 (35, texture_3d(TextureSampleType::Float { filterable: true })),
+                // Weather window around the camera: art (36) and physical (37) channels (`weather_window.wesl`).
+                (36, texture_2d(TextureSampleType::Float { filterable: true })),
+                (37, texture_2d(TextureSampleType::Float { filterable: true })),
                 // output 2D array texture
                 (
                     13,
@@ -332,6 +337,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
                     (33, &detail_noise_texture.texture.default_view),
                     (34, &fbm_noise_texture.profile.default_view),
                     (35, &fbm_noise_texture.scheme_noise.default_view),
+                    (36, &textures.weather_window_art.default_view),
+                    (37, &textures.weather_window_physical.default_view),
                     // output
                     (13, &textures.environment),
                 )),
@@ -394,6 +401,8 @@ pub(super) fn prepare_probe_textures(
             sky_view_lut: view_textures.sky_view_lut.clone(),
             aerial_view_lut: view_textures.aerial_view_lut.clone(),
             cloud_shadow_map: view_textures.cloud_shadow_map.clone(),
+            weather_window_art: view_textures.weather_window_art.clone(),
+            weather_window_physical: view_textures.weather_window_physical.clone(),
         });
     }
 }

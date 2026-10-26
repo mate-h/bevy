@@ -146,6 +146,7 @@ impl Plugin for AtmospherePlugin {
         embedded_asset!(app, "environment.wesl");
         embedded_asset!(app, "fbm_noise_3d.wesl");
         embedded_asset!(app, "cloud_noise_quantiles.wesl");
+        embedded_asset!(app, "weather_window.wesl");
         embedded_asset!(app, "perlin_worley_noise_3d.wesl");
         embedded_asset!(app, "detail_noise_3d.wesl");
         embedded_asset!(app, "noise_mip_downsample_3d.wesl");
@@ -400,12 +401,17 @@ pub fn extract_atmosphere(
             world_to_atmosphere: atmosphere_to_world.inverse(),
             atmosphere_to_world,
         };
+        let extracted_world_to_atmosphere = extracted.world_to_atmosphere;
         commands.entity(render_entity).insert(extracted);
         let mut gpu_settings = GpuAtmosphereSettings::from(settings.clone());
         let has_layers = cloud_layer.is_some() || !thin_layers.is_empty();
         if has_layers {
-            let layers =
+            let mut layers =
                 GpuCloudLayers::new(cloud_layer, &thin_layers, wind, profiles, atmo.inner_radius);
+            layers.weather_window_origin = weather_window_origin(
+                extracted_world_to_atmosphere.transform_point3(cam_world),
+                &layers,
+            );
             gpu_settings.cloud_shadow_anchor_max_radius = layers.cloud_layer_end;
             // The thin layers' shadow (the map's alpha) applies below the lowest mid level.
             gpu_settings.cloud_thin_shadow_max_radius =
@@ -417,6 +423,17 @@ pub fn extract_atmosphere(
             commands.entity(render_entity).remove::<GpuCloudLayers>();
         }
     }
+}
+
+/// Weather-map texel at the weather window's texel 0 for a camera at `camera` (atmosphere space):
+/// the camera in the map's frame (advected by the layer's offset, rotated 30 degrees as
+/// `clouds.wesl` sample_weather), in texels of the 512^2 map, minus half the window, floored.
+fn weather_window_origin(camera: Vec3, layers: &GpuCloudLayers) -> Vec2 {
+    let q = Vec2::new(camera.x - layers.noise_offset.x, camera.z - layers.noise_offset.z);
+    let rotated = Vec2::new(0.866_025_4 * q.x + 0.5 * q.y, -0.5 * q.x + 0.866_025_4 * q.y);
+    let texels = fbm_noise::NoiseTextureSize::default().size.as_vec2();
+    let uv = rotated / layers.noise_scale.max(1.0);
+    (uv * texels).floor() - Vec2::splat((resources::WEATHER_WINDOW_SIZE / 2) as f32)
 }
 
 /// The render-world representation of an `Atmosphere`, but which
@@ -1336,6 +1353,13 @@ pub struct GpuCloudLayers {
     pub evolution_time: f32,
     pub coverage: f32,
     pub shape_noise_scale: f32,
+    /// Weather-map texel at the weather window's texel 0 (integer valued; `weather_window.wesl`),
+    /// set per view from the camera at extraction.
+    pub weather_window_origin: Vec2,
+    /// Default cloud droplet number concentration of the physical channels (cm^-3): the layer's
+    /// reference microphysics, LWC 1 g/m^3 at r_e 10 um, k N_d = 239 with k = 0.8 (Martin et al.
+    /// 1994). Not read by the clouds yet.
+    pub droplet_number: f32,
     /// Number of valid entries of [`GpuCloudLayers::thin`].
     pub thin_count: u32,
     /// Thin layers, lowest mid level first.
@@ -1420,6 +1444,8 @@ impl GpuCloudLayers {
             evolution_time: c.evolution_time,
             coverage: c.coverage.max(0.0),
             shape_noise_scale: c.shape_noise_scale.max(1.0),
+            weather_window_origin: Vec2::ZERO,
+            droplet_number: 299.0,
             thin_count: thin_count as u32,
             thin: thin_array,
         }
