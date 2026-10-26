@@ -793,6 +793,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // Optical depth along the view ray since it entered the current cloud (reset on empty
         // samples): the view-side half of the local escape estimate below.
         var view_od_in_cloud = 0.0;
+        // ATM_DBG_OUT_SUN_OD: (sun optical depth local, far-map transmittance, the cloud field's
+        // escape probability, density) at the first in-cloud sample.
+        var dbg_sun = vec4(-1.0);
         var depth_weight_sum = 0.0;
         var depth_sum = 0.0;
         var luminance = vec3(0.0);
@@ -946,6 +949,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 var n_taps = settings.cloud_light_taps;
                 var tap_growth = LIGHT_TAP_GROWTH;
                 var tap_lod = LIGHT_TAP_LOD;
+                // Validation: a dense uniform march toward the light (256 x 30 m at the sample's
+                // mip) to test the light taps' quadrature against the reference.
+                @if(ATM_DBG_LIGHT_BRUTE) {
+                    n_taps = 256u;
+                    tap_dt = 30.0;
+                    tap_growth = 1.0;
+                    tap_lod = 0.0;
+                }
                 for (var k = 0u; k < n_taps; k++) {
                     let pk = p + l * (tap_t + 0.5 * tap_dt);
                     let dk = get_cloud_medium_density_lod(length(pk), pk, mip + tap_lod * f32(k));
@@ -961,6 +972,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 var t_far = sample_cloud_shadow_map(p_beyond, l, false);
                 @if(ATM_DBG_NO_FAR_SHADOW) { t_far = 1.0; }
                 let t_local = exp(-light_optical_depth);
+                @if(ATM_DBG_OUT_SUN_OD) {
+                    if (dbg_sun.x < 0.0) { dbg_sun = vec4(light_optical_depth, t_far, esc_col.x, density); }
+                }
                 let t_cloud = t_far * t_local;
                 let cos_theta = dot(l, ray_dir);
                 // Sunlit ground below this sample (Lambert, albedo): sun irradiance through the
@@ -1053,6 +1067,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
             lum = t_ap * luminance + (1.0 - transmittance) * haze;
         }
         result = vec4(lum * view.exposure, transmittance);
+        @if(ATM_DBG_OUT_SUN_OD) { result = dbg_sun; }
         @if(ATM_DBG_OUT_H) {
             let ph = ray_origin + ray_dir * weighted_depth;
             let ch = cloud_density_context(length(ph), ph);
