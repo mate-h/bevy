@@ -237,11 +237,12 @@ fn slab_single_scatter(tau: f32, mu0: f32, mu: f32, same_side: bool) -> f32 {
 /// when above. Haze in front of the cirrus as for the cumulus: T_ap(0..t) L_ci + (1 - T_ci) L_ap,
 /// with L_ap(0..t) ~ the sky-view radiance of the full path (the in-scatter above 9 km is
 /// neglected: ~25 % of the Rayleigh depth, weighted by the cirrus opacity 1 - T_ci).
-fn composite_cirrus(c: vec4<f32>, depth_io: ptr<function, f32>, origin: vec3<f32>, dir: vec3<f32>,
-    r: f32, mu: f32, t_scene: f32, slice_jitter: f32) -> vec4<f32> {
+fn composite_cirrus(layer: u32, c: vec4<f32>, depth_io: ptr<function, f32>, origin: vec3<f32>,
+    dir: vec3<f32>, r: f32, mu: f32, t_scene: f32, slice_jitter: f32) -> vec4<f32> {
     // The layer's mid-level shell sets the compositing distance; the optical depth integrates
     // the whole thickness along the ray.
-    let r_ci = cloud_layer.cirrus_top - 0.5 * cloud_layer.cirrus_thickness;
+    let thin = cloud_layer.thin[layer];
+    let r_ci = thin.top - 0.5 * thin.thickness;
     let b = r * mu;
     let disc = b * b - (r * r - r_ci * r_ci);
     if (disc <= 0.0) {
@@ -257,7 +258,7 @@ fn composite_cirrus(c: vec4<f32>, depth_io: ptr<function, f32>, origin: vec3<f32
     let up_comp = dot(dir, up);
     let mu_v = max(abs(up_comp), 1e-3);
     // Pixel footprint on the shell (half-res pixel ~2.2 mrad, stretched by the slant).
-    let tau_slant = cirrus_slant_optical_depth(origin, dir, t_ci, select(-mu_v, mu_v, up_comp > 0.0), t_ci * 2.2e-3 / mu_v, CIRRUS_SLICES, slice_jitter);
+    let tau_slant = cirrus_slant_optical_depth(layer, origin, dir, t_ci, select(-mu_v, mu_v, up_comp > 0.0), t_ci * 2.2e-3 / mu_v, CIRRUS_SLICES, slice_jitter);
     if (tau_slant <= 0.0) {
         return c;
     }
@@ -273,7 +274,7 @@ fn composite_cirrus(c: vec4<f32>, depth_io: ptr<function, f32>, origin: vec3<f32
         let mu0 = dot(l, up);
         let t_atm = sample_transmittance_lut(r_ci, mu0) * f32(!ray_intersects_ground(r_ci, mu0));
         let k = slab_single_scatter(tau, max(abs(mu0), 1e-3), mu_v, (mu0 > 0.0) != below);
-        l_ci += (*light).color.rgb * t_atm * hg_phase(dot(l, dir), cloud_layer.cirrus_asymmetry) * k;
+        l_ci += (*light).color.rgb * t_atm * hg_phase(dot(l, dir), thin.asymmetry) * k;
         // Sunlit ground below (Lambertian), seen as flux-equivalent radiance from beneath.
         let mu_g = dot(l, normalize(p));
         ground_up += (*light).color.rgb * sample_transmittance_lut(atmosphere.inner_radius, mu_g)
@@ -1059,15 +1060,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         }
     }
 
-    // Cirrus slab (thin ice cloud above the cumulus layer).
-    if (cloud_layer.cirrus_optical_depth > 0.0) {
+    // Thin (ice) layers, lowest first: a shell above the camera goes behind what is composited
+    // (nearest first, the lowest), one below in front of it (farthest first, again the lowest).
+    if (cloud_layer.thin_count > 0u) {
         var t_scene = 1e30;
         if (depth > 0.0) {
             t_scene = ndc_to_camera_dist(vec3(uv_to_ndc(uv), depth));
         }
         // Slice-depth jitter: blue noise per pixel and frame (decorrelated from the ray start).
         let j = fract(interleaved_gradient_noise(vec2<f32>(half_px), view.frame_count % 64u) + 0.5);
-        result = composite_cirrus(result, &weighted_depth, ray_origin, ray_dir, r, mu, t_scene, j);
+        for (var layer = 0u; layer < min(cloud_layer.thin_count, 4u); layer++) {
+            result = composite_cirrus(layer, result, &weighted_depth, ray_origin, ray_dir, r, mu, t_scene, j);
+        }
     }
     }
     textureStore(out_clouds, id.xy, result);

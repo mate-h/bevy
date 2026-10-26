@@ -5,7 +5,7 @@
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
-//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
+//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
@@ -42,7 +42,7 @@ use bevy::{
     },
     pbr::{
         AtmosphereMode, AtmosphereSettings, AtmosphereWind, CloudTimeScale, CloudWeather,
-        CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
+        CloudLayerOf, CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
         DefaultOpaqueRendererMethod,
         VolumetricCloudSettings,
         ExtendedMaterial, MaterialExtension, ScreenSpaceReflections,
@@ -609,7 +609,17 @@ fn setup_camera_fog(
             },
             _ => AtmosphereWind::fair_weather(),
         },
-    ));
+    ))
+    // Further layers are entities related to the atmosphere (`CloudLayerOf`):
+    // `ATMOSPHERE_SECOND_THIN=1` adds a cirrostratus veil at 11 km above the cirrus.
+    .with_related_entities::<CloudLayerOf>(|layers| {
+        if std::env::var("ATMOSPHERE_SECOND_THIN").is_ok() {
+            layers.spawn(ThinCloudLayer {
+                top: 6_360_000.0 + 11_500.0,
+                ..ThinCloudLayer::cirrostratus()
+            });
+        }
+    });
 
     let mut camera = commands.spawn_empty();
     if let Some(image) = offscreen {

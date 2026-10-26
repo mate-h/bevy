@@ -30,21 +30,27 @@ struct GpuCloudLayers {
     updraft_speed: f32,
     lifetime: f32,
     evolution_time: f32,
-    // Cirrus (ThinCloudLayer, mod.rs GpuCloudLayers).
-    cirrus_offset: vec3<f32>,
-    cirrus_top: f32,
-    cirrus_wind_shear: vec3<f32>,
-    cirrus_thickness: f32,
-    cirrus_optical_depth: f32,
-    cirrus_threshold: f32,
-    cirrus_ln_iwc_std: f32,
-    cirrus_norm: f32,
-    cirrus_fall_speed: f32,
-    cirrus_fall_speed_spread: f32,
-    cirrus_outer_scale: f32,
-    cirrus_asymmetry: f32,
     coverage: f32,
     shape_noise_scale: f32,
+    // Thin layers (ThinCloudLayer, mod.rs GpuCloudLayers), lowest mid level first.
+    thin_count: u32,
+    thin: array<GpuThinCloudLayer, 4>,
+}
+
+/// One thin (ice) layer (mod.rs GpuThinCloudLayer).
+struct GpuThinCloudLayer {
+    offset: vec3<f32>,
+    top: f32,
+    wind_shear: vec3<f32>,
+    thickness: f32,
+    optical_depth: f32,
+    threshold: f32,
+    ln_iwc_std: f32,
+    norm: f32,
+    fall_speed: f32,
+    fall_speed_spread: f32,
+    outer_scale: f32,
+    asymmetry: f32,
 }
 
 @group(0) @binding(20) var<uniform> cloud_layer: GpuCloudLayers;
@@ -868,12 +874,13 @@ fn cloud_field_uvw(p: vec3<f32>, cell: vec2<f32>) -> vec3<f32> {
 /// Depth slices for rendering (the shadow map uses a quarter: its texel footprint smooths the streaks).
 const CIRRUS_SLICES: u32 = 8u;
 
-/// Generating field at `q` (m, in the layer's moving frame) smoothed to `width` (m): trilinear
-/// over the band-limited mips (the noise sampler selects mips nearest).
-fn cirrus_field_at(q: vec2<f32>, width: f32) -> f32 {
-    let texel = cloud_layer.cirrus_outer_scale / f32(textureDimensions(cirrus_field).x);
+/// Generating field at `q` (m, in the layer's moving frame) smoothed to `width` (m), on a tile of
+/// `outer_scale` (m): trilinear over the band-limited mips (the noise sampler selects mips nearest).
+/// Layers share the field, decorrelated by a per-layer offset of a fraction of the tile.
+fn cirrus_field_at(q: vec2<f32>, width: f32, outer_scale: f32, layer: u32) -> f32 {
+    let texel = outer_scale / f32(textureDimensions(cirrus_field).x);
     let lod = clamp(log2(max(width, texel) / texel), 0.0, f32(textureNumLevels(cirrus_field) - 1u));
-    let uv = q / cloud_layer.cirrus_outer_scale;
+    let uv = q / outer_scale + vec2(0.371, 0.613) * f32(layer);
     let a = textureSampleLevel(cirrus_field, noise_sampler_3d, uv, floor(lod)).r;
     let b = textureSampleLevel(cirrus_field, noise_sampler_3d, uv, ceil(lod)).r;
     return mix(a, b, fract(lod));
@@ -888,11 +895,12 @@ fn cirrus_field_at(q: vec2<f32>, width: f32) -> f32 {
 /// threshold; normalised to an in-cloud mean of 1 per level, so cloudy columns average the layer's
 /// optical depth at normal incidence. Slices are taken where the view ray crosses each depth
 /// (parallax across the layer's thickness); the result is the slant optical depth over mu.
-fn cirrus_slant_optical_depth(origin: vec3<f32>, dir: vec3<f32>, t_mid: f32, up_comp: f32,
-    footprint_m: f32, slices: u32, jitter: f32) -> f32 {
-    let h = cloud_layer.cirrus_thickness;
-    let w = cloud_layer.cirrus_fall_speed;
-    let shear = cloud_layer.cirrus_wind_shear.xz;
+fn cirrus_slant_optical_depth(layer: u32, origin: vec3<f32>, dir: vec3<f32>, t_mid: f32,
+    up_comp: f32, footprint_m: f32, slices: u32, jitter: f32) -> f32 {
+    let thin = cloud_layer.thin[layer];
+    let h = thin.thickness;
+    let w = thin.fall_speed;
+    let shear = thin.wind_shear.xz;
     var sum = 0.0;
     for (var k = 0u; k < slices; k++) {
         // Stratified, jittered depths: fixed slice depths drew each feature as discrete shifted
@@ -902,13 +910,13 @@ fn cirrus_slant_optical_depth(origin: vec3<f32>, dir: vec3<f32>, t_mid: f32, up_
         let t_k = t_mid + (0.5 * h - dz) / up_comp;
         let p_k = origin + dir * t_k;
         let x = -shear * (dz * dz / (2.0 * w));
-        let q = p_k.xz - cloud_layer.cirrus_offset.xz - x;
-        let spread = length(x) * cloud_layer.cirrus_fall_speed_spread;
-        let g = cirrus_field_at(q, max(footprint_m, spread));
+        let q = p_k.xz - thin.offset.xz - x;
+        let spread = length(x) * thin.fall_speed_spread;
+        let g = cirrus_field_at(q, max(footprint_m, spread), thin.outer_scale, layer);
         // Cloud boundary (Hogan & Kew's IWC threshold), antialiased: a hard step drew the
         // overlapping slices' edges as angular facets.
-        let cloudy = smoothstep(cloud_layer.cirrus_threshold - 0.15, cloud_layer.cirrus_threshold + 0.15, g);
-        sum += cloudy * cloud_layer.cirrus_norm * exp(cloud_layer.cirrus_ln_iwc_std * g);
+        let cloudy = smoothstep(thin.threshold - 0.15, thin.threshold + 0.15, g);
+        sum += cloudy * thin.norm * exp(thin.ln_iwc_std * g);
     }
-    return cloud_layer.cirrus_optical_depth * sum / f32(slices) / abs(up_comp);
+    return thin.optical_depth * sum / f32(slices) / abs(up_comp);
 }

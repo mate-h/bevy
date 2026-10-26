@@ -630,13 +630,12 @@ pub(super) fn prepare_clouds_temporal_params(
     let mut seen = HashMap::default();
     for (entity, view, textures, cloud_layer, temporal_jitter, camera) in &views {
         let offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
-        let cirrus_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.cirrus_offset);
-        let cirrus_min_radius = cloud_layer.map_or(0.0, |c| {
-            if c.cloud_density > 0.0 {
-                0.5 * (c.cloud_layer_end + c.cirrus_top - c.cirrus_thickness)
-            } else {
-                0.0
-            }
+        // Thin-layer pixels reproject with the lowest thin layer's motion.
+        let cirrus_offset =
+            cloud_layer.and_then(|c| c.lowest_thin()).map_or(Vec3::ZERO, |t| t.offset);
+        let cirrus_min_radius = cloud_layer.map_or(0.0, |c| match c.lowest_thin() {
+            Some(t) if c.cloud_density > 0.0 => 0.5 * (c.cloud_layer_end + t.mid_radius()),
+            _ => 0.0,
         });
         let exposure = camera.map_or(1.0, |c| c.exposure);
         let clip_from_world = match temporal_jitter {
@@ -1869,7 +1868,7 @@ fn cloud_shadow_temporal_params(
         && temporal_state.history_texture == Some(history_texture);
 
     let cloud_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
-    let cirrus_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.cirrus_offset);
+    let cirrus_offset = cloud_layer.and_then(|c| c.lowest_thin()).map_or(Vec3::ZERO, |t| t.offset);
     let (cloud_motion, cirrus_motion) = if history_valid {
         (
             cloud_offset - temporal_state.cloud_offset,
@@ -2808,7 +2807,7 @@ pub(super) fn prepare_cloud_reference_accumulators(
                 buffer
             }
         };
-        if cloud_layers.is_some_and(|c| c.cirrus_optical_depth > 0.0) {
+        if cloud_layers.is_some_and(|c| c.thin_count > 0) {
             bevy_log::warn_once!(
                 "CLOUD_REFERENCE traces the cumulus layer and air only: the thin cloud layer \
                  (cirrus) is not in the reference image; compare without it"

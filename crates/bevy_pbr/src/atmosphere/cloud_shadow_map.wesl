@@ -152,25 +152,32 @@ fn thin_shadow_point(origin: vec3<f32>, dir: vec3<f32>, half_depth: f32) -> vec3
 }
 
 fn thin_layer_shadow_od(p0: vec3<f32>, trace_dir: vec3<f32>, uv: vec2<f32>, xy: vec2<f32>, extent: f32, size: vec2<u32>) -> f32 {
-    var thin_on = cloud_layer.cirrus_optical_depth > 0.0;
+    var thin_on = cloud_layer.thin_count > 0u;
     @if(ATM_DBG_NO_THIN_SHADOW) { thin_on = false; }
     if (!thin_on) {
         return 0.0;
     }
     let l = -trace_dir;
-    let r_mid = cloud_layer.cirrus_top - 0.5 * cloud_layer.cirrus_thickness;
-    let b = dot(p0, l);
-    let disc = b * b - (dot(p0, p0) - r_mid * r_mid);
-    let s = -b + sqrt(max(disc, 0.0));
-    if (disc <= 0.0 || s <= 0.0 || length(p0) >= r_mid) {
-        return 0.0;
-    }
-    let up_comp = dot(l, (p0 + l * s) / r_mid);
     let texel_m = length(cloud_shadow_uv_to_xy(uv + 1.0 / vec2<f32>(size), extent) - xy);
+    // Each thin layer above p0 adds its similarity-reduced slant optical depth: transmittances
+    // of layers along one light ray multiply.
+    var od = 0.0;
+    for (var layer = 0u; layer < min(cloud_layer.thin_count, 4u); layer++) {
+        let thin = cloud_layer.thin[layer];
+        let r_mid = thin.top - 0.5 * thin.thickness;
+        let b = dot(p0, l);
+        let disc = b * b - (dot(p0, p0) - r_mid * r_mid);
+        let s = -b + sqrt(max(disc, 0.0));
+        if (disc <= 0.0 || s <= 0.0 || length(p0) >= r_mid) {
+            continue;
+        }
+        let up_comp = dot(l, (p0 + l * s) / r_mid);
+        od += (1.0 - thin.asymmetry)
+            * cirrus_slant_optical_depth(layer, p0, l, s, max(up_comp, 1e-3), texel_m, CIRRUS_SLICES / 4u, 0.5);
+    }
     // Scaled by the map strength like the cumulus channels (audit 28: strength 0 left the
     // cirrus shadow on).
-    return settings.cloud_shadow_map_strength * (1.0 - cloud_layer.cirrus_asymmetry)
-        * cirrus_slant_optical_depth(p0, l, s, max(up_comp, 1e-3), texel_m, CIRRUS_SLICES / 4u, 0.5);
+    return settings.cloud_shadow_map_strength * od;
 }
 
 @compute

@@ -311,8 +311,9 @@ impl Plugin for AtmospherePlugin {
 }
 
 /// For each camera with [`AtmosphereSettings`], picks the nearest [`Atmosphere`] by world-space
-/// distance to its origin, copies it as [`ExtractedAtmosphere`], combines its optional
-/// [`VolumetricCloudLayer`] and [`ThinCloudLayer`] into [`GpuCloudLayers`], and builds [`GpuAtmosphereSettings`].
+/// distance to its origin, copies it as [`ExtractedAtmosphere`], combines its cloud layers (layer
+/// components on the atmosphere entity and on its [`CloudLayers`]) into [`GpuCloudLayers`], and
+/// builds [`GpuAtmosphereSettings`].
 pub fn extract_atmosphere(
     mut commands: Commands,
     atmosphere_entities: Extract<
@@ -320,9 +321,14 @@ pub fn extract_atmosphere(
             Entity,
             &Atmosphere,
             &GlobalTransform,
+            Option<&AtmosphereWind>,
+            Option<&CloudLayers>,
+        )>,
+    >,
+    layer_entities: Extract<
+        Query<(
             Option<&VolumetricCloudLayer>,
             Option<&ThinCloudLayer>,
-            Option<&AtmosphereWind>,
             Option<&CloudProfiles>,
         )>,
     >,
@@ -351,7 +357,7 @@ pub fn extract_atmosphere(
         let cam_world = cam_global.translation();
         let selected = candidates
             .iter()
-            .min_by(|(ea, _, gt_a, _, _, _, _), (eb, _, gt_b, _, _, _, _)| {
+            .min_by(|(ea, _, gt_a, _, _), (eb, _, gt_b, _, _)| {
                 let da = cam_world.distance(gt_a.translation());
                 let db = cam_world.distance(gt_b.translation());
                 da.total_cmp(&db).then_with(|| ea.cmp(eb))
@@ -359,10 +365,28 @@ pub fn extract_atmosphere(
             .expect("checked non-empty above");
         let atmo = selected.1;
         let gt = selected.2;
-        let cloud_layer = selected.3;
-        let cirrus_layer = selected.4;
-        let wind = selected.5;
-        let profiles = selected.6;
+        let wind = selected.3;
+        // The atmosphere entity's own layer components first, then its related layers.
+        let mut volumetric: Option<(&VolumetricCloudLayer, Option<&CloudProfiles>)> = None;
+        let mut thin_layers: Vec<&ThinCloudLayer> = Vec::new();
+        let related = selected.4.into_iter().flat_map(|l| l.0.iter().copied());
+        for entity in core::iter::once(selected.0).chain(related) {
+            let Ok((vol, thin, profiles)) = layer_entities.get(entity) else {
+                continue;
+            };
+            if let Some(vol) = vol {
+                if volumetric.is_some() {
+                    bevy_log::warn_once!(
+                        "an atmosphere has several VolumetricCloudLayers; only the first is rendered"
+                    );
+                } else {
+                    volumetric = Some((vol, profiles));
+                }
+            }
+            thin_layers.extend(thin);
+        }
+        let cloud_layer = volumetric.map(|(v, _)| v);
+        let profiles = volumetric.and_then(|(_, p)| p);
         // Atmospheres are spherically symmetric, so ignore their orientation.
         let (scale, _, translation) = gt.to_scale_rotation_translation();
 
@@ -378,16 +402,18 @@ pub fn extract_atmosphere(
         };
         commands.entity(render_entity).insert(extracted);
         let mut gpu_settings = GpuAtmosphereSettings::from(settings.clone());
-        if cloud_layer.is_some() || cirrus_layer.is_some() {
+        let has_layers = cloud_layer.is_some() || !thin_layers.is_empty();
+        if has_layers {
             let layers =
-                GpuCloudLayers::new(cloud_layer, cirrus_layer, wind, profiles, atmo.inner_radius);
+                GpuCloudLayers::new(cloud_layer, &thin_layers, wind, profiles, atmo.inner_radius);
             gpu_settings.cloud_shadow_anchor_max_radius = layers.cloud_layer_end;
+            // The thin layers' shadow (the map's alpha) applies below the lowest mid level.
             gpu_settings.cloud_thin_shadow_max_radius =
-                layers.cirrus_top - 0.5 * layers.cirrus_thickness;
+                layers.lowest_thin().map_or(0.0, GpuThinCloudLayer::mid_radius);
             commands.entity(render_entity).insert(layers);
         }
         commands.entity(render_entity).insert(gpu_settings);
-        if cloud_layer.is_none() && cirrus_layer.is_none() {
+        if !has_layers {
             commands.entity(render_entity).remove::<GpuCloudLayers>();
         }
     }
@@ -837,7 +863,7 @@ impl Default for VolumetricCloudSettings {
 /// that select that atmosphere.
 #[derive(Clone, Component, Reflect)]
 #[reflect(Clone, Default)]
-#[require(CloudWeather, AtmosphereWind, CloudProfiles)]
+#[require(CloudWeather, CloudProfiles)]
 pub struct VolumetricCloudLayer {
     /// Altitude at which the cloud layer starts (from planet center)
     /// units: m
@@ -1011,7 +1037,6 @@ impl SyncComponent<RenderApp> for VolumetricCloudLayer {
 /// asymmetry of roughened ice crystals.
 #[derive(Clone, Component, Reflect)]
 #[reflect(Clone, Default)]
-#[require(AtmosphereWind)]
 pub struct ThinCloudLayer {
     /// Radius (from the planet center, like [`VolumetricCloudLayer::cloud_layer_start`]) of the generating
     /// level, the cirrus top. High clouds: 5-13 km in mid-latitudes (WMO International Cloud
@@ -1202,8 +1227,91 @@ impl AtmosphereWind {
     }
 }
 
-/// Render-world uniform of the cloud layers on a view's atmosphere: [`VolumetricCloudLayer`] (cumulus,
-/// optional) and [`ThinCloudLayer`] (optional). Field names match `clouds.wesl`.
+/// The atmosphere a cloud layer belongs to: put [`VolumetricCloudLayer`] or [`ThinCloudLayer`] on
+/// an entity with `CloudLayerOf(atmosphere)` to add a layer to that atmosphere (any number of thin
+/// layers; one volumetric layer is rendered, see [`GpuCloudLayers`]). Layer components on the
+/// atmosphere entity itself count as its layers too, so a single-layer scene needs no extra
+/// entities. Wind comes from the atmosphere's [`AtmosphereWind`] (per-layer `wind` /
+/// `wind_shear` override it).
+///
+/// ```ignore
+/// commands
+///     .spawn((Atmosphere::earthlike(medium), AtmosphereWind::fair_weather()))
+///     .with_related_entities::<CloudLayerOf>(|layers| {
+///         layers.spawn(VolumetricCloudLayer::cumulus());
+///         layers.spawn(ThinCloudLayer::cirrus());
+///         layers.spawn(ThinCloudLayer::cirrostratus());
+///     });
+/// ```
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[relationship(relationship_target = CloudLayers)]
+pub struct CloudLayerOf(#[entities] pub Entity);
+
+/// The cloud layers related to an atmosphere ([`CloudLayerOf`]); despawned with it.
+#[derive(Component, Default, Debug, PartialEq, Eq)]
+#[relationship_target(relationship = CloudLayerOf, linked_spawn)]
+pub struct CloudLayers(Vec<Entity>);
+
+/// Thin layers rendered per atmosphere (lowest first); further layers are ignored with a warning.
+pub const MAX_THIN_CLOUD_LAYERS: usize = 4;
+
+/// One thin (ice) layer of [`GpuCloudLayers`]: a [`ThinCloudLayer`] resolved against the wind
+/// profile. Field names match `clouds.wesl` GpuThinCloudLayer.
+#[derive(Clone, Copy, Default, ShaderType)]
+pub struct GpuThinCloudLayer {
+    pub offset: Vec3,
+    pub top: f32,
+    pub wind_shear: Vec3,
+    pub thickness: f32,
+    pub optical_depth: f32,
+    /// Generating-field (unit Gaussian) threshold below which a level is clear: the
+    /// (1 - coverage) quantile of N(0, 1).
+    pub threshold: f32,
+    pub ln_iwc_std: f32,
+    /// Normalisation of exp(sigma g) to an in-cloud mean of 1 above the threshold.
+    pub norm: f32,
+    pub fall_speed: f32,
+    pub fall_speed_spread: f32,
+    pub outer_scale: f32,
+    pub asymmetry: f32,
+}
+
+impl GpuThinCloudLayer {
+    pub fn new(ci: &ThinCloudLayer, wind: &AtmosphereWind, inner_radius: f32) -> Self {
+        let (_, shear) = ci.resolved_wind(wind, inner_radius);
+        // Log-normal extinction exp(sigma g), g ~ N(0, 1), cloudy where g > g_c with
+        // P(g > g_c) = coverage. In-cloud mean of exp(sigma g):
+        // E[exp(sigma g) | g > g_c] = exp(sigma^2 / 2) Q(g_c - sigma) / Q(g_c), Q = 1 - Phi.
+        let coverage = ci.coverage.clamp(1e-4, 1.0);
+        let threshold = if coverage >= 1.0 { -40.0 } else { normal_quantile(1.0 - coverage) };
+        let sigma = ci.ln_iwc_std.max(0.0);
+        let in_cloud_mean = (0.5 * sigma * sigma).exp() * normal_sf(threshold - sigma)
+            / normal_sf(threshold).max(1e-12);
+        Self {
+            offset: ci.offset,
+            top: ci.top,
+            wind_shear: shear,
+            thickness: ci.thickness.max(0.0),
+            optical_depth: ci.optical_depth.max(0.0),
+            threshold,
+            ln_iwc_std: sigma,
+            norm: 1.0 / in_cloud_mean.max(1e-12),
+            fall_speed: ci.fall_speed.max(1e-3),
+            fall_speed_spread: ci.fall_speed_spread.max(0.0),
+            outer_scale: ci.outer_scale.max(1.0),
+            asymmetry: ci.asymmetry.clamp(-0.99, 0.99),
+        }
+    }
+
+    /// Radius of the layer's mid level (its compositing shell).
+    pub fn mid_radius(&self) -> f32 {
+        self.top - 0.5 * self.thickness
+    }
+}
+
+/// Render-world uniform of the cloud layers on a view's atmosphere: one [`VolumetricCloudLayer`]
+/// (cumulus, optional) and up to [`MAX_THIN_CLOUD_LAYERS`] [`ThinCloudLayer`]s sorted by altitude.
+/// Field names match `clouds.wesl`.
 #[derive(Clone, Component, ShaderType)]
 pub struct GpuCloudLayers {
     pub cloud_layer_start: f32,
@@ -1226,29 +1334,23 @@ pub struct GpuCloudLayers {
     pub updraft_speed: f32,
     pub lifetime: f32,
     pub evolution_time: f32,
-    pub cirrus_offset: Vec3,
-    pub cirrus_top: f32,
-    pub cirrus_wind_shear: Vec3,
-    pub cirrus_thickness: f32,
-    pub cirrus_optical_depth: f32,
-    /// Generating-field (unit Gaussian) threshold below which a level is clear: the
-    /// (1 - coverage) quantile of N(0, 1).
-    pub cirrus_threshold: f32,
-    pub cirrus_ln_iwc_std: f32,
-    /// Normalisation of exp(sigma g) to an in-cloud mean of 1 above the threshold.
-    pub cirrus_norm: f32,
-    pub cirrus_fall_speed: f32,
-    pub cirrus_fall_speed_spread: f32,
-    pub cirrus_outer_scale: f32,
-    pub cirrus_asymmetry: f32,
     pub coverage: f32,
     pub shape_noise_scale: f32,
+    /// Number of valid entries of [`GpuCloudLayers::thin`].
+    pub thin_count: u32,
+    /// Thin layers, lowest mid level first.
+    pub thin: [GpuThinCloudLayer; MAX_THIN_CLOUD_LAYERS],
 }
 
 impl GpuCloudLayers {
+    /// The lowest thin layer (the temporal histories follow its motion).
+    pub fn lowest_thin(&self) -> Option<&GpuThinCloudLayer> {
+        (self.thin_count > 0).then(|| &self.thin[0])
+    }
+
     pub fn new(
         cumulus: Option<&VolumetricCloudLayer>,
-        cirrus: Option<&ThinCloudLayer>,
+        thin_layers: &[&ThinCloudLayer],
         wind: Option<&AtmosphereWind>,
         profiles: Option<&CloudProfiles>,
         inner_radius: f32,
@@ -1260,11 +1362,21 @@ impl GpuCloudLayers {
             ..VolumetricCloudLayer::default()
         };
         let c = cumulus.unwrap_or(&disabled_cumulus);
-        let disabled_cirrus = ThinCloudLayer {
-            optical_depth: 0.0,
-            ..ThinCloudLayer::default()
-        };
-        let ci = cirrus.unwrap_or(&disabled_cirrus);
+        let mut thin: Vec<GpuThinCloudLayer> = thin_layers
+            .iter()
+            .filter(|l| l.optical_depth > 0.0)
+            .map(|l| GpuThinCloudLayer::new(l, wind, inner_radius))
+            .collect();
+        thin.sort_by(|a, b| a.mid_radius().total_cmp(&b.mid_radius()));
+        if thin.len() > MAX_THIN_CLOUD_LAYERS {
+            bevy_log::warn_once!(
+                "an atmosphere has {} thin cloud layers; the lowest {MAX_THIN_CLOUD_LAYERS} are rendered",
+                thin.len()
+            );
+        }
+        let thin_count = thin.len().min(MAX_THIN_CLOUD_LAYERS);
+        let mut thin_array = [GpuThinCloudLayer::default(); MAX_THIN_CLOUD_LAYERS];
+        thin_array[..thin_count].copy_from_slice(&thin[..thin_count]);
         // Physical profiles carry their air masses' cloud bases and tops: the layer spans them.
         let physical = matches!(profiles, None | Some(CloudProfiles::Physical));
         let physical_layer;
@@ -1280,15 +1392,6 @@ impl GpuCloudLayers {
             c
         };
         let (c_wind, c_shear) = c.resolved_wind(wind, inner_radius);
-        let (_, ci_shear) = ci.resolved_wind(wind, inner_radius);
-        // Log-normal extinction exp(sigma g), g ~ N(0, 1), cloudy where g > g_c with
-        // P(g > g_c) = coverage. In-cloud mean of exp(sigma g):
-        // E[exp(sigma g) | g > g_c] = exp(sigma^2 / 2) Q(g_c - sigma) / Q(g_c), Q = 1 - Phi.
-        let coverage = ci.coverage.clamp(1e-4, 1.0);
-        let threshold = if coverage >= 1.0 { -40.0 } else { normal_quantile(1.0 - coverage) };
-        let sigma = ci.ln_iwc_std.max(0.0);
-        let in_cloud_mean = (0.5 * sigma * sigma).exp() * normal_sf(threshold - sigma)
-            / normal_sf(threshold).max(1e-12);
         // 0: physical lookups, 1: analytic envelope (in the shader), 2: Nubis's vertical profile.
         let (profile_mode, profile_bottom_exponent, profile_top_exponent) = match profiles {
             Some(CloudProfiles::Envelope { bottom, top }) => (1, *bottom, *top),
@@ -1315,20 +1418,10 @@ impl GpuCloudLayers {
             updraft_speed: c.updraft_speed,
             lifetime: c.lifetime,
             evolution_time: c.evolution_time,
-            cirrus_offset: ci.offset,
-            cirrus_top: ci.top,
-            cirrus_wind_shear: ci_shear,
-            cirrus_thickness: ci.thickness.max(0.0),
-            cirrus_optical_depth: ci.optical_depth.max(0.0),
-            cirrus_threshold: threshold,
-            cirrus_ln_iwc_std: sigma,
-            cirrus_norm: 1.0 / in_cloud_mean.max(1e-12),
-            cirrus_fall_speed: ci.fall_speed.max(1e-3),
-            cirrus_fall_speed_spread: ci.fall_speed_spread.max(0.0),
-            cirrus_outer_scale: ci.outer_scale.max(1.0),
-            cirrus_asymmetry: ci.asymmetry.clamp(-0.99, 0.99),
             coverage: c.coverage.max(0.0),
             shape_noise_scale: c.shape_noise_scale.max(1.0),
+            thin_count: thin_count as u32,
+            thin: thin_array,
         }
     }
 }
@@ -1394,21 +1487,32 @@ impl Default for CloudTimeScale {
 pub fn advance_cloud_wind(
     time: Res<Time>,
     scale: Option<Res<CloudTimeScale>>,
-    mut layers: Query<(&mut VolumetricCloudLayer, Option<&AtmosphereWind>, &Atmosphere)>,
-    mut cirrus_layers: Query<(&mut ThinCloudLayer, Option<&AtmosphereWind>, &Atmosphere)>,
+    mut layers: Query<(Entity, &mut VolumetricCloudLayer, Option<&CloudLayerOf>)>,
+    mut thin_layers: Query<(Entity, &mut ThinCloudLayer, Option<&CloudLayerOf>)>,
+    atmospheres: Query<(&Atmosphere, Option<&AtmosphereWind>)>,
 ) {
     let default_wind = AtmosphereWind::default();
     let dt = time.delta_secs() * scale.map_or(1.0, |s| s.0);
     if dt <= 0.0 {
         return;
     }
-    for (mut layer, wind, atmosphere) in &mut layers {
+    // A layer's atmosphere: the entity itself, or the one it is related to.
+    let atmosphere_of = |entity: Entity, of: Option<&CloudLayerOf>| {
+        atmospheres.get(of.map_or(entity, |o| o.0)).ok()
+    };
+    for (entity, mut layer, of) in &mut layers {
+        let Some((atmosphere, wind)) = atmosphere_of(entity, of) else {
+            continue;
+        };
         let (wind, _) = layer.resolved_wind(wind.unwrap_or(&default_wind), atmosphere.inner_radius);
         let step = Vec3::new(wind.x, layer.updraft_speed, wind.z) * dt;
         layer.noise_offset += step;
         layer.evolution_time += dt;
     }
-    for (mut cirrus, wind, atmosphere) in &mut cirrus_layers {
+    for (entity, mut cirrus, of) in &mut thin_layers {
+        let Some((atmosphere, wind)) = atmosphere_of(entity, of) else {
+            continue;
+        };
         let (wind, _) = cirrus.resolved_wind(wind.unwrap_or(&default_wind), atmosphere.inner_radius);
         let step = Vec3::new(wind.x, 0.0, wind.z) * dt;
         cirrus.offset += step;
