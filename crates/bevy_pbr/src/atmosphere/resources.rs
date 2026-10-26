@@ -2745,6 +2745,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_STEP_DIV2`, `ATM_DBG_STEP_DIV4`, `ATM_DBG_STEP_DIV16`: a 2x / 4x / 16x shorter
 ///   cloud view step (with `ATM_DBG_NO_COARSE`: the step-size convergence of the view march,
 ///   audit 24).
+/// - `ATM_DBG_MS_DIFFUSION`: add the delta-Eddington vertical-slab diffusion term to the multiple
+///   scattering in thick cloud (experiment: shaded sides right, lit sides still short).
 /// - `ATM_DBG_LIGHT_BRUTE`: a dense uniform light march (256 x 30 m) instead of the growing taps.
 /// - `ATM_DBG_OUT_SUN_OD`: write (local sun optical depth, far-map transmittance, the cloud field's
 ///   escape probability, density) at each pixel's first in-cloud sample instead of cloud colour.

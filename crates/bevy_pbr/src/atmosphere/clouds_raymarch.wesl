@@ -173,6 +173,35 @@ fn cloud_ambient_term(sky_rad: vec3<f32>, ground_rad: vec3<f32>, tau_up: f32, ta
     return mix(sky_rad, ground_rad, w);
 }
 
+/// Diffuse (multiply scattered) sunlight in a conservative cloud slab lit from above at cosine
+/// mu0, per unit sun irradiance: M = 4 pi J_diff / E at optical depth tau_up below the top of a
+/// slab of optical depth tau_up + tau_down (the shader's multiple-scattering source is
+/// E M / (4 pi) per unit sigma_s). Delta-Eddington (Joseph, Wiscombe & Weinman 1976): forward
+/// peak g^2 left in the direct beam, scaled depths tau' = (1 - g^2) tau, scaled asymmetry
+/// g' = g / (1 + g); with U = 4 pi J_diff, U'' = -3 E (1 + g') exp(-tau'/mu0) and diffuse flux
+/// F = -U'/3 + g' mu0 E exp(-tau'/mu0), so U = A + B tau' + c exp(-tau'/mu0),
+/// c = -3 (1 + g') mu0^2, with A, B from Marshak boundaries (no diffuse light entering: U/4 + F/2
+/// = 0 at the top, U/4 - F/2 = 0 at the bottom). Against a slab Monte Carlo with the droplet phase
+/// function (.clouds-handoff/validation/sky/ms_vertical_slab.py), max(this, the escape series):
+/// 1.06-1.23 x the MC (5-95 %: 0.84-1.39) at optical depths 20-60 and sun cosines 0.3-1, where the
+/// series alone gives 0.00-1.0 (~0 on the shaded side); thin slabs (2-5) stay under (0.4-0.8).
+fn cloud_diffuse_sun(tau_up: f32, tau_down: f32, mu0: f32) -> f32 {
+    let g = CLOUD_MIE_MEAN_COS;
+    let s = 1.0 - g * g;
+    let gs = g / (1.0 + g);
+    let tp = max(tau_up, 0.0) * s;
+    let t_total = (max(tau_up, 0.0) + max(tau_down, 0.0)) * s;
+    let c = -3.0 * (1.0 + gs) * mu0 * mu0;
+    let k = c / (3.0 * mu0) + gs * mu0;
+    let e_t = exp(-t_total / mu0);
+    let r1 = -(0.25 * c + 0.5 * k);
+    let r2 = -(0.25 * c - 0.5 * k) * e_t;
+    let det = 0.0625 * t_total + 1.0 / 12.0;
+    let a = (r1 * (0.25 * t_total + 1.0 / 6.0) + r2 / 6.0) / det;
+    let b = 0.25 * (r2 - r1) / det;
+    return max(a + b * tp + c * exp(-tp / mu0), 0.0);
+}
+
 /// Mean sun visibility of the ground a point at `p` sees below it: the ground radiance enters the
 /// ambient as a mean intensity (uniform in solid angle, i.e. uniform in mu = cos(nadir angle)),
 /// so it averages the ground over kilometres. Sampling only the point straight below projected
@@ -1015,7 +1044,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     @if(ATM_DBG_ESC_ZERO) { p_esc = 0.0; }
                     @if(ATM_DBG_ESC_FIELD_ONLY) { p_esc = esc_col.x; }
                     let f_ms = albedo * (1.0 - max(p_esc, 6.1035e-5));
-                    let ms_vol = exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun) * f_ms / (1.0 - f_ms);
+                    var ms_vol = exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun) * f_ms / (1.0 - f_ms);
+                    // Thick cloud: the escape series decays as exp(-(1 - g) tau_sun) and leaves
+                    // the shaded side dark (MC: ~0 below a reduced depth of a few), while the
+                    // diffuse light of a conservative medium falls off linearly through it. The
+                    // delta-Eddington diffusion solution of the vertical slab (the field's
+                    // columns to the layer top and bottom), lit by the sunlight that reaches the
+                    // column (the far shadow map), takes over where it is larger
+                    // (ATM_DBG_MS_DIFFUSION).
+                    // Off by default until the lit faces get their diffuse light too (the vertical
+                    // slab lights only the layer top: lit sides stay ~35 % short and the clouds
+                    // lose form; .clouds-handoff/notes/lighting_ms_deficit.md).
+                    var diffusion_on = false;
+                    @if(ATM_DBG_MS_DIFFUSION) { diffusion_on = mu_light > 0.0; }
+                    if (diffusion_on) {
+                        ms_vol = max(ms_vol, t_far * cloud_diffuse_sun(esc_col.y, esc_col.z, max(mu_light, 0.05)));
+                    }
                     direct += ms_vol * (0.25 / PI);
                 }
                 direct_sum += (*light).color.rgb * t_atm * direct;
