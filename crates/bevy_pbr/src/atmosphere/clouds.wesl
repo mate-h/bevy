@@ -105,6 +105,34 @@ fn cloud_shadow_xy_to_uv(xy: vec2<f32>, extent: f32) -> vec2<f32> {
     return 0.5 * (xy / extent) * (rho / max(r, 1e-6)) + 0.5;
 }
 
+/// Weather-map uv to weather-window texel coordinates (`weather_window.wesl`).
+fn weather_window_local(uv: vec2<f32>) -> vec2<f32> {
+    return uv * vec2<f32>(textureDimensions(noise_texture_2d)) - cloud_layer.weather_window_origin;
+}
+
+/// Physical weather channels at a sample position (the same frame as `sample_weather`): the
+/// window's B inside it, the defaults outside (cloud-fraction scale 1, air mass = the map's type,
+/// the default droplet number, no base offset).
+fn sample_weather_physical(world_pos: vec3<f32>, weather_scale: f32, map_type: f32) -> vec4<f32> {
+    let rot = mat2x2<f32>(0.8660254, -0.5, 0.5, 0.8660254);
+    let uv = (rot * world_pos.xz) / max(1.0, weather_scale);
+    let local = weather_window_local(uv);
+    let window = f32(textureDimensions(weather_window_physical).x);
+    if (all(local > vec2(1.0)) && all(local < vec2(window - 1.0))) {
+        return textureSampleLevel(weather_window_physical, noise_sampler_3d, local / window, 0.0);
+    }
+    return vec4(1.0, map_type, cloud_layer.droplet_number, 0.0);
+}
+
+/// Extinction of the droplets relative to the layer's reference microphysics at the same liquid
+/// water: sigma = 3 Q LWC / (4 rho_w r_e), r_e^3 = 3 LWC / (4 pi rho_w k N_d), so at fixed LWC
+/// sigma ∝ (k N_d)^(1/3) (Twomey: more droplets, more opaque clouds; k ~ 0.8 maritime, 0.67
+/// continental, Martin, Johnson & Spice 1994). Relative to the layer's reference droplet number
+/// (its LWC and r_e), with k cancelling within one air mass.
+fn cloud_droplet_extinction_factor(droplet_number: f32) -> f32 {
+    return pow(max(droplet_number, 1.0) / max(cloud_layer.droplet_number, 1.0), 1.0 / 3.0);
+}
+
 fn sample_weather(world_pos: vec3<f32>, weather_scale: f32) -> vec4<f32> {
     let rot = mat2x2<f32>(
         0.8660254, -0.5,
@@ -117,7 +145,7 @@ fn sample_weather(world_pos: vec3<f32>, weather_scale: f32) -> vec4<f32> {
     // around the camera (`weather_window.wesl`, texel j = map texel origin + j) the window is
     // read, the tiled map outside it; the same bilinear weights, so they agree where no source
     // has changed the window.
-    let local = uv * vec2<f32>(textureDimensions(noise_texture_2d)) - cloud_layer.weather_window_origin;
+    let local = weather_window_local(uv);
     let window = f32(textureDimensions(weather_window_art).x);
     var w: vec4<f32>;
     if (all(local > vec2(1.0)) && all(local < vec2(window - 1.0))) {
@@ -226,9 +254,25 @@ fn cloud_profile_base_m(cloud_type: f32) -> f32 {
 
 /// Cloud type (weather G) at a position, as `sample_weather` reads it.
 fn cloud_weather_type(world_pos: vec3<f32>) -> f32 {
-    let rot = mat2x2<f32>(0.8660254, -0.5, 0.5, 0.8660254);
-    let uv = (rot * world_pos.xz) / max(1.0, cloud_layer.noise_scale);
-    return clamp(textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0).g, 0.0, 1.0);
+    return cloud_column_weather(world_pos).y;
+}
+
+/// The weather of a column at a sample position, as every density function reads it:
+/// (coverage, cloud type, density scale, droplet extinction factor). With the physical profiles
+/// the physical channels (weather window B) scale the cloud fraction, set the air mass (the
+/// profile row) and the droplet number; the others read the art channels only.
+fn cloud_column_weather(sample_pos: vec3<f32>) -> vec4<f32> {
+    let weather = sample_weather(sample_pos, cloud_layer.noise_scale);
+    var coverage = clamp(weather.r, 0.0, 1.0);
+    var cloud_type = clamp(weather.g, 0.0, 1.0);
+    var droplets = 1.0;
+    if (cloud_layer.profile_mode == 0u) {
+        let physical = sample_weather_physical(sample_pos, cloud_layer.noise_scale, cloud_type);
+        coverage = saturate(coverage * physical.r);
+        cloud_type = saturate(physical.g);
+        droplets = cloud_droplet_extinction_factor(physical.b);
+    }
+    return vec4(coverage, cloud_type, clamp(weather.b, 0.0, 1.0), droplets);
 }
 
 /// Vertical profile of a column: (dimensional profile, in-cloud liquid water / the layer's).
@@ -442,11 +486,9 @@ fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
     // Must match the fine density's sample position: the coarse density is the empty-space
     // predicate (ray march, SDF seeds).
     let sample_pos = cloud_sample_pos(world_pos, r);
-    let weather = sample_weather(sample_pos, cloud_layer.noise_scale);
-    var coverage = clamp(weather.r, 0.0, 1.0);
-    let cloud_type = clamp(weather.g, 0.0, 1.0);
-    let density_scale = pow(clamp(weather.b, 0.0, 1.0), 4.0);
-    let profile = cloud_vertical_profile(h, coverage, cloud_type);
+    let column = cloud_column_weather(sample_pos);
+    let density_scale = pow(column.z, 4.0);
+    let profile = cloud_vertical_profile(h, column.x, column.y);
     // Lookups: cloud is possible wherever the cloud fraction is positive (the scheme's excess has
     // no small upper bound; the coarse density only tests for possible cloud).
     let bound = select(0.0, select(profile.x, 1.0, cloud_layer.profile_mode == 0u), profile.x > 0.0);
@@ -493,11 +535,13 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     let h = clamp(height_in_layer / max(1.0, layer_thickness), 0.0, 1.0);
     let sample_pos = cloud_sample_pos(world_pos, r);
 
-    let weather = sample_weather(sample_pos, cloud_layer.noise_scale);
-    let coverage = clamp(weather.r, 0.0, 1.0);
-    // Nubis detail type (0 wispy, 1 billowy) and density scale: authored weather fields.
-    let detail_type = clamp(weather.g, 0.0, 1.0);
-    let density_scale = clamp(weather.b, 0.0, 1.0);
+    // Nubis detail type (0 wispy, 1 billowy) and density scale: authored weather fields; with
+    // the physical profiles the air mass and droplet number of the physical channels.
+    let column = cloud_column_weather(sample_pos);
+    let coverage = column.x;
+    let detail_type = column.y;
+    let density_scale = column.z;
+    let droplets = column.w;
     // Nubis Evolved (2022) sky model: dimensional_profile = vertical_profile * coverage.
     let vertical = cloud_vertical_profile(h, coverage, detail_type);
     let base_profile = vertical.x;
@@ -506,10 +550,10 @@ fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
     }
     // Physical lookups: the statistical cloud scheme at the sample's footprint, its detail the
     // scheme's own thermal bubbles (`cloud_scheme_density`); liquid water from the lookups, the
-    // weather's density scale as for the coarse bound.
+    // weather's density scale as for the coarse bound, the droplets' extinction per liquid water.
     if (cloud_layer.profile_mode == 0u) {
         return cloud_scheme_density(sample_pos, h, base_profile, mip) * pow(density_scale, 4.0)
-            * vertical.y;
+            * vertical.y * droplets;
     }
 
     // Large-scale shape from the 2022 noise (low-frequency Perlin-Worley eroded by Worley fBm,

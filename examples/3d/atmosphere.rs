@@ -6,7 +6,7 @@
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer),
-//!   `ATMOSPHERE_INFLUENCE=hole` (a world-anchored clear region), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
+//!   `ATMOSPHERE_INFLUENCE=hole|coast` (a world-anchored clear region; a maritime/continental coast), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
@@ -625,6 +625,21 @@ fn setup_camera_fog(
 
     // World-anchored weather edits (`CloudInfluence`): `ATMOSPHERE_INFLUENCE=hole` clears a hole
     // 6 km across, 6 km ahead of the default camera (the weather drifts, the hole stays).
+    // `ATMOSPHERE_INFLUENCE=coast`: a coastline 8 km ahead, maritime air (few, large droplets:
+    // N_d 80 cm^-3, more translucent clouds) before it, continental (N_d 800) beyond.
+    if std::env::var("ATMOSPHERE_INFLUENCE").as_deref() == Ok("coast") {
+        for (x, droplet_number) in [(-42_000.0, 80.0), (58_000.0, 800.0)] {
+            commands.spawn((
+                Transform::from_xyz(x, 0.0, 0.0),
+                CloudInfluence {
+                    shape: CloudInfluenceShape::Rectangle(Vec2::splat(50_000.0)),
+                    feather: 1_500.0,
+                    values: CloudInfluenceValues { droplet_number: Some(droplet_number), ..default() },
+                    ..default()
+                },
+            ));
+        }
+    }
     if std::env::var("ATMOSPHERE_INFLUENCE").as_deref() == Ok("hole") {
         commands.spawn((
             Transform::from_xyz(6_000.0, 0.0, 0.0),
