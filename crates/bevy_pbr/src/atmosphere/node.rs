@@ -39,6 +39,7 @@ pub fn atmosphere_luts(
     pipelines: Res<AtmosphereLutPipelines>,
     layouts: Res<super::resources::AtmosphereBindGroupLayouts>,
     weather: Option<Res<super::fbm_noise::FbmNoiseTexture>>,
+    influences: Option<Res<super::weather::ExtractedCloudInfluences>>,
     gpu_media: Res<bevy_render::render_asset::RenderAssets<crate::GpuScatteringMedium>>,
     mut per_view: bevy_ecs::system::ResMut<PerViewLutState>,
     pipeline_cache: Res<PipelineCache>,
@@ -105,12 +106,18 @@ pub fn atmosphere_luts(
     // samples the weather (the cloud-shadowed LUTs, shadow map, field, clouds, probes).
     let window_bind_group = match (gpu_cloud_layers, weather.as_deref()) {
         (Some(layers), Some(weather)) => {
-            // `weather_window.wesl` WeatherWindowParams: origin (2), droplet number, pad.
-            let o = layers.weather_window_origin;
+            let words = super::weather::weather_window_params(
+                layers.weather_window_origin,
+                layers.droplet_number,
+                layers.noise_scale.max(1.0),
+                layers.noise_offset,
+                &extracted_atmosphere.world_to_atmosphere,
+                influences.as_deref().unwrap_or(&Default::default()),
+            );
             let params = timing_device.create_buffer_with_data(
                 &bevy_render::render_resource::BufferInitDescriptor {
                     label: Some("weather_window_params"),
-                    contents: bytemuck::cast_slice(&[o.x, o.y, layers.droplet_number, 0.0f32]),
+                    contents: bytemuck::cast_slice(&words),
                     usage: bevy_render::render_resource::BufferUsages::UNIFORM,
                 },
             );

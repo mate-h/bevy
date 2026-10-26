@@ -5,7 +5,8 @@
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
-//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
+//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer),
+//!   `ATMOSPHERE_INFLUENCE=hole` (a world-anchored clear region), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
@@ -42,7 +43,8 @@ use bevy::{
     },
     pbr::{
         AtmosphereMode, AtmosphereSettings, AtmosphereWind, CloudTimeScale, CloudWeather,
-        CloudLayerOf, CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
+        CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues, CloudLayerOf,
+        CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
         DefaultOpaqueRendererMethod,
         VolumetricCloudSettings,
         ExtendedMaterial, MaterialExtension, ScreenSpaceReflections,
@@ -620,6 +622,21 @@ fn setup_camera_fog(
             });
         }
     });
+
+    // World-anchored weather edits (`CloudInfluence`): `ATMOSPHERE_INFLUENCE=hole` clears a hole
+    // 6 km across, 6 km ahead of the default camera (the weather drifts, the hole stays).
+    if std::env::var("ATMOSPHERE_INFLUENCE").as_deref() == Ok("hole") {
+        commands.spawn((
+            Transform::from_xyz(6_000.0, 0.0, 0.0),
+            CloudInfluence {
+                shape: CloudInfluenceShape::Ellipse(Vec2::splat(3_000.0)),
+                feather: 800.0,
+                blend: CloudBlend::Subtract,
+                values: CloudInfluenceValues { coverage: Some(1.0), ..default() },
+                ..default()
+            },
+        ));
+    }
 
     let mut camera = commands.spawn_empty();
     if let Some(image) = offscreen {

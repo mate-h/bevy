@@ -48,6 +48,7 @@ mod node;
 pub mod perlin_worley_noise;
 pub mod detail_noise;
 pub mod resources;
+pub mod weather;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::{embedded_asset, AssetId, Handle};
@@ -98,6 +99,7 @@ pub use cloud_profile::{
     physical_profile_bounds, CloudProfiles, CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_RANGE_M,
     CLOUD_PROFILE_TYPE_RES,
 };
+pub use weather::{CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues};
 use node::{atmosphere_luts, render_sky};
 use perlin_worley_noise::{
     generate_perlin_worley_noise_once, init_perlin_worley_noise_params_buffer,
@@ -170,7 +172,9 @@ impl Plugin for AtmospherePlugin {
         .add_systems(Update, (advance_cloud_wind, apply_volumetric_cloud_settings));
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.add_systems(ExtractSchedule, extract_atmosphere);
+            render_app
+                .init_resource::<weather::ExtractedCloudInfluences>()
+                .add_systems(ExtractSchedule, (extract_atmosphere, weather::extract_cloud_influences));
         }
     }
 
