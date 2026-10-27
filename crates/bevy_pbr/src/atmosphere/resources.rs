@@ -1325,7 +1325,7 @@ impl FromWorld for AtmosphereLutPipelines {
             ]
             .map(|entry| {
                 pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                    label: Some(entry.into()),
+                    label: Some(format!("cloud_{entry}_pipeline").into()),
                     layout: vec![layouts.cloud_field_diffusion.clone()],
                     shader: load_embedded_asset!(world, "cloud_field.wesl"),
                     shader_defs: [atm_dbg_defs(), vec!["CLOUDS_ENABLED".into()]].concat(),
@@ -1804,7 +1804,7 @@ pub(super) fn prepare_atmosphere_textures(
             .and_then(|camera| camera.physical_viewport_size)
             .filter(|_| has_clouds)
             .unwrap_or(UVec2::ONE);
-        let clouds_size = (full_size / 2).max(UVec2::ONE);
+        let clouds_size = cloud_render_size(full_size, lut_settings.cloud_max_render_size);
         let trace_size = (clouds_size + UVec2::ONE) / 2;
         let clouds_texture =
             |label: &'static str, format: TextureFormat, size: UVec2, copy: TextureUsages| {
@@ -3323,4 +3323,23 @@ pub(super) fn prepare_cloud_reference_accumulators(
         seen.insert(view.retained_view_entity, (key, buffer));
     }
     *accumulators = seen;
+}
+
+/// Size of the cloud and haze buffers for a viewport: half of it, scaled down (same aspect) to
+/// fit within `max` (`VolumetricCloudSettings::max_render_size`, compared by pixel count so
+/// portrait and landscape views get the same budget).
+pub fn cloud_render_size(full: UVec2, max: UVec2) -> UVec2 {
+    let half = (full / 2).max(UVec2::ONE);
+    let budget = (max.x as f64) * (max.y as f64);
+    let pixels = (half.x as f64) * (half.y as f64);
+    if pixels <= budget {
+        return half;
+    }
+    // Even, so the checkerboard trace is exactly half of it (`clouds_raymarch.wesl` recovers
+    // the size as min(viewport / 2, 2 x trace)).
+    let s = (budget / pixels).sqrt();
+    UVec2::new(
+        (((half.x as f64 * s).floor() as u32) & !1).max(2),
+        (((half.y as f64 * s).floor() as u32) & !1).max(2),
+    )
 }

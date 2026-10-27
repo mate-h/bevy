@@ -782,6 +782,14 @@ fn setup_camera_fog(
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(preset.step_samples),
+                // `ATMOSPHERE_CLOUD_MAX_RENDER=w,h`: the cloud/haze buffer size cap.
+                max_render_size: std::env::var("ATMOSPHERE_CLOUD_MAX_RENDER")
+                    .ok()
+                    .and_then(|v| {
+                        let (w, h) = v.split_once(',')?;
+                        Some(UVec2::new(w.trim().parse().ok()?, h.trim().parse().ok()?))
+                    })
+                    .unwrap_or(preset.max_render_size),
                 ..preset
             }
         },

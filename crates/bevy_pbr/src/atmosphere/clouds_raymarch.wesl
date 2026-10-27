@@ -763,18 +763,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
     // target, so its texels are offset by the viewport origin.
     let full_size_u = max(vec2<u32>(view.viewport.zw), vec2(1u));
     let viewport_origin = vec2<i32>(view.viewport.xy);
-    // Half-res pixel traced by this invocation this frame.
-    let half_size = max(full_size_u / 2u, vec2(1u));
+    // Cloud-buffer pixel traced by this invocation this frame. The buffer is half the viewport,
+    // or smaller (`VolumetricCloudSettings::max_render_size`; then even-sized, so the trace is
+    // exactly half of it): its size is the smaller of the two.
+    let half_size = max(min(full_size_u / 2u, trace_size * 2u), vec2(1u));
     let half_px = min(id.xy * 2u + CHECKER_OFFSETS[view.frame_count % 4u], half_size - 1u);
     let uv = (vec2<f32>(half_px) + 0.5) / vec2<f32>(half_size);
 
     // Conservative scene depth over the low-res footprint: the farthest of the covered texels
     // (reverse-Z: smallest depth), so thin occluders don't punch holes into the reconstruction.
-    let ratio = 2;
-    let base_px = vec2<i32>(half_px) * ratio;
+    // The footprint is the full-res pixels the texel overlaps (2 x 2 at half resolution, up to
+    // ~4 x 4 under the size cap).
+    let scale = vec2<f32>(full_size_u) / vec2<f32>(half_size);
+    let base_px = vec2<i32>(floor(vec2<f32>(half_px) * scale));
+    let footprint = vec2<i32>(ceil(vec2<f32>(half_px + 1u) * scale)) - base_px;
     var depth = 1.0;
-    for (var y = 0; y < ratio; y++) {
-        for (var x = 0; x < ratio; x++) {
+    for (var y = 0; y < footprint.y; y++) {
+        for (var x = 0; x < footprint.x; x++) {
             let p = viewport_origin + min(base_px + vec2(x, y), vec2<i32>(full_size_u) - 1);
             @if(MULTISAMPLED_DEPTH) {
                 // MSAA: the farthest sample of the pixel too (edges partly cover the sky).

@@ -80,13 +80,21 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
     // The haze targets cover the camera's viewport; the depth texture covers the whole render
     // target, so its texels are offset by the viewport origin.
     let full = max(vec2<i32>(view.viewport.zw), vec2(1));
-    let base = vec2<i32>(floor(in.position.xy)) * 2;
+    // The haze targets are half the viewport or smaller (the cloud buffers' size cap,
+    // `VolumetricCloudSettings::max_render_size`); the history bound here has this target's size.
+    let dims = vec2<f32>(max(textureDimensions(haze_inscattering), vec2(1u)));
+    let scale = vec2<f32>(full) / dims;
+    let texel = floor(in.position.xy);
+    let base = vec2<i32>(floor(texel * scale));
+    let footprint = vec2<i32>(ceil((texel + 1.0) * scale)) - base;
     var depth = 1.0;
-    for (var k = 0; k < 4; k++) {
-        let p = vec2<i32>(view.viewport.xy) + min(base + vec2(k & 1, k >> 1), full - 1);
-        let d = textureLoad(depth_texture, p, 0);
-        if (d <= depth) {
-            depth = d;
+    for (var y = 0; y < footprint.y; y++) {
+        for (var x = 0; x < footprint.x; x++) {
+            let p = vec2<i32>(view.viewport.xy) + min(base + vec2(x, y), full - 1);
+            let d = textureLoad(depth_texture, p, 0);
+            if (d <= depth) {
+                depth = d;
+            }
         }
     }
     // The ray goes through this texel's centre (2h + 1 full-res pixels), where the history and
@@ -94,7 +102,7 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
     // through the farthest pixel itself put the sample a quarter texel off the centre (bottom
     // right when all four depths tie, e.g. sky): every frame's reprojection then read its history
     // shifted by that quarter texel, a recursive one-directional blur even with a still camera.
-    let uv = in.position.xy * 2.0 / vec2<f32>(full);
+    let uv = in.position.xy / dims;
     let samples = settings.sky_max_samples * HAZE_SAMPLE_SCALE;
     // The march's `uv` only drives its jitter noise (uv x full-res viewport = noise pixel). At
     // half resolution that read every other texel of the blue-noise tile, which loses its

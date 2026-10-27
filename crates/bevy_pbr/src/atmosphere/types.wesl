@@ -47,6 +47,7 @@ struct AtmosphereSettings {
     cloud_light_taps: u32,
     cloud_max_distance: f32,
     cloud_step_samples: u32,
+    cloud_max_render_size: vec2<u32>,
 }
 
 /// "Atmosphere space" uses local up for the zenith so the horizon-detail

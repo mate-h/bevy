@@ -596,6 +596,10 @@ pub struct AtmosphereSettings {
     /// Density samples per long in-cloud view step (set from
     /// [`VolumetricCloudSettings::step_samples`]).
     pub cloud_step_samples: u32,
+
+    /// Largest internal size of the cloud and haze buffers, in pixels (set from
+    /// [`VolumetricCloudSettings::max_render_size`]).
+    pub cloud_max_render_size: UVec2,
 }
 
 impl Default for AtmosphereSettings {
@@ -630,6 +634,7 @@ impl Default for AtmosphereSettings {
             cloud_light_taps: VolumetricCloudSettings::MEDIUM.light_taps,
             cloud_max_distance: VolumetricCloudSettings::MEDIUM.max_distance,
             cloud_step_samples: VolumetricCloudSettings::MEDIUM.step_samples,
+            cloud_max_render_size: VolumetricCloudSettings::MEDIUM.max_render_size,
         }
     }
 }
@@ -670,6 +675,7 @@ pub struct GpuAtmosphereSettings {
     pub cloud_light_taps: u32,
     pub cloud_max_distance: f32,
     pub cloud_step_samples: u32,
+    pub cloud_max_render_size: UVec2,
 }
 
 impl GpuAtmosphereSettings {
@@ -724,6 +730,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             cloud_light_taps: s.cloud_light_taps,
             cloud_max_distance: s.cloud_max_distance,
             cloud_step_samples: s.cloud_step_samples.max(1),
+            cloud_max_render_size: s.cloud_max_render_size.max(UVec2::ONE),
         }
     }
 }
@@ -829,6 +836,12 @@ pub struct VolumetricCloudSettings {
     pub shadow_update_interleave: u32,
     /// Enable temporal accumulation on the cloud shadow map.
     pub shadow_temporal: bool,
+    /// Largest internal size of the cloud and haze buffers, in pixels. They are half the
+    /// viewport up to this size (same aspect ratio) and upscaled beyond it, so their cost stops
+    /// growing with the window: at half resolution a 2560x1440 view cost 3x a 1280x720 one
+    /// (clouds 25 vs 8 ms, haze 17 vs 5 ms, Apple M5), and the lower frame rate meant more
+    /// camera motion per frame and more visible temporal flicker.
+    pub max_render_size: UVec2,
     /// Temporal blend alpha for the cloud shadow map when temporal is enabled.
     pub shadow_temporal_alpha: f32,
 }
@@ -842,6 +855,7 @@ impl VolumetricCloudSettings {
         shadow_update_interleave: 4,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.15,
+        max_render_size: UVec2::new(640, 360),
     };
     pub const MEDIUM: Self = Self {
         max_steps: 96,
@@ -851,6 +865,7 @@ impl VolumetricCloudSettings {
         shadow_update_interleave: 4,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.1,
+        max_render_size: UVec2::new(960, 540),
     };
     pub const HIGH: Self = Self {
         max_steps: 128,
@@ -860,6 +875,7 @@ impl VolumetricCloudSettings {
         shadow_update_interleave: 2,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.08,
+        max_render_size: UVec2::new(1280, 720),
     };
     pub const CINEMATIC: Self = Self {
         max_steps: 160,
@@ -869,6 +885,7 @@ impl VolumetricCloudSettings {
         shadow_update_interleave: 1,
         shadow_temporal: true,
         shadow_temporal_alpha: 0.05,
+        max_render_size: UVec2::new(1280, 720),
     };
 }
 
@@ -1574,6 +1591,7 @@ pub fn apply_volumetric_cloud_settings(
         atmosphere_settings.cloud_light_taps = cloud_settings.light_taps;
         atmosphere_settings.cloud_max_distance = cloud_settings.max_distance;
         atmosphere_settings.cloud_step_samples = cloud_settings.step_samples;
+        atmosphere_settings.cloud_max_render_size = cloud_settings.max_render_size;
     }
 }
 
