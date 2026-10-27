@@ -13,6 +13,9 @@
 //! dump's samples per pixel follow: (dump frame - start - 120) / 4 (each half-res pixel is
 //! traced every 4th frame, after 120 settling frames).
 //!
+//! `CLOUD_DUMP_ONLY=clouds_recon,clouds_trace` writes only the textures whose names start with
+//! one of the listed prefixes (long multi-frame dumps of the full set fill the disk).
+//!
 //! [`FrameCount`]: bevy_diagnostic::FrameCount
 
 use bevy_math::UVec3;
@@ -106,6 +109,11 @@ pub fn dump(
     bytes_per_texel: u32,
     ext: &str,
 ) {
+    if let Ok(only) = std::env::var("CLOUD_DUMP_ONLY")
+        && !only.split(',').any(|p| !p.is_empty() && name.starts_with(p.trim()))
+    {
+        return;
+    }
     let row = (size.x * bytes_per_texel).div_ceil(256) * 256;
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some("cloud_debug_dump"),

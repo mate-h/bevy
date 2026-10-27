@@ -4,7 +4,7 @@
 //! - Scene: `ATMOSPHERE_VIEW=hero|sun|up|under|backlit`, `ATMOSPHERE_CAM`, `ATMOSPHERE_SUN_ELEV_DEG`,
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
-//!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`,
+//!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`, `ATMOSPHERE_WINDOW=w,h`,
 //!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer),
 //!   `ATMOSPHERE_INFLUENCE=hole|coast` (a world-anchored clear region; a maritime/continental coast), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
@@ -123,9 +123,12 @@ fn main() {
                     } else {
                         bevy::window::PresentMode::AutoVsync
                     },
-                    // Fixed 1280x720 physical pixels so dumps match across displays (retina = 2x).
-                    resolution: bevy::window::WindowResolution::new(1280, 720)
-                        .with_scale_factor_override(1.0),
+                    // Fixed 1280x720 physical pixels so dumps match across displays (retina = 2x);
+                    // `ATMOSPHERE_WINDOW=w,h` for another size.
+                    resolution: {
+                        let (w, h) = window_size();
+                        bevy::window::WindowResolution::new(w, h).with_scale_factor_override(1.0)
+                    },
                     ..default()
                 }),
                 ..default()
@@ -508,13 +511,15 @@ fn setup_camera_fog(
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
 ) {
-    // `ATMOSPHERE_BACKGROUND=1`: render the camera into an offscreen 1280x720 image instead of the
-    // window. macOS stops redraws/drawables for occluded windows, so a window-backed run freezes
-    // when it is behind other windows; the window itself stays hidden and unfocused.
+    // `ATMOSPHERE_BACKGROUND=1`: render the camera into an offscreen image of the window's size
+    // instead of the window. macOS stops redraws/drawables for occluded windows, so a
+    // window-backed run freezes when it is behind other windows; the window itself stays hidden
+    // and unfocused.
+    let (target_w, target_h) = window_size();
     let offscreen = std::env::var("ATMOSPHERE_BACKGROUND").is_ok().then(|| {
         images.add(Image::new_target_texture(
-            1280,
-            720,
+            target_w,
+            target_h,
             bevy::render::render_resource::TextureFormat::Rgba8Unorm,
             Some(bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb),
         ))
@@ -813,7 +818,7 @@ fn setup_camera_fog(
         camera.insert(AtmosphereEnvironmentMapLight::default());
     }
     // `ATMOSPHERE_SECOND_CAMERA=x,y,z,tx,ty,tz`: a second camera with the same settings, into an
-    // offscreen 1280x720 image (the window's size: equal-sized views), to test per-view cloud
+    // offscreen image of the window's size (equal-sized views), to test per-view cloud
     // state. `ATMOSPHERE_SECOND_SCREENSHOT=<path>` saves its image with the main screenshot.
     let main_camera = camera.id();
     if let Some(v) = std::env::var("ATMOSPHERE_SECOND_CAMERA")
@@ -822,8 +827,8 @@ fn setup_camera_fog(
         .filter(|v| v.len() == 6)
     {
         let image = images.add(Image::new_target_texture(
-            1280,
-            720,
+            target_w,
+            target_h,
             bevy::render::render_resource::TextureFormat::Rgba8Unorm,
             Some(bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb),
         ));
@@ -1112,3 +1117,15 @@ fn sun_drag(
 /// Offscreen render target used by `ATMOSPHERE_BACKGROUND=1` runs.
 #[derive(Resource)]
 struct OffscreenTarget(Option<Handle<Image>>);
+
+/// Window (and offscreen target) size in physical pixels: 1280x720 so dumps match across displays,
+/// or `ATMOSPHERE_WINDOW=w,h`.
+fn window_size() -> (u32, u32) {
+    std::env::var("ATMOSPHERE_WINDOW")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once(',')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .unwrap_or((1280, 720))
+}
