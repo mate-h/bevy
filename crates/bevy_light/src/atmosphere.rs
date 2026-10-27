@@ -71,7 +71,7 @@ fn set_default_transform(mut world: DeferredWorld<'_>, HookContext { entity, .. 
 
 /// Height of [`Atmosphere::earth`], i.e. the distance between its inner and outer radius.
 ///
-/// units: meters
+/// units: m
 pub const EARTH_ATMOSPHERE_HEIGHT: f32 = 100_000.0;
 
 impl Atmosphere {
