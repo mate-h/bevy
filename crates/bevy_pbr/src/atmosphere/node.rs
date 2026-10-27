@@ -149,14 +149,20 @@ pub fn atmosphere_luts(
         pass.dispatch_workgroups(n, n, 1);
     }
 
-    // Pass 1: build all atmosphere LUTs in a single compute pass.
-    {
-        let mut luts_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("atmosphere_luts"),
-            timestamp_writes: super::gpu_timing::compute(&timing_device, "atmosphere_luts"),
-        });
-        let pass_span = diagnostics.pass_span(&mut luts_pass, "atmosphere_luts");
+    // A compute pass whose encoder label, GPU timing entry (`gpu_timing.rs`) and name in traces
+    // are all `$label`.
+    macro_rules! labelled_compute_pass {
+        ($label:expr) => {
+            command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some($label),
+                timestamp_writes: super::gpu_timing::compute(&timing_device, $label),
+            })
+        };
+    }
 
+    // Pass 1: the atmosphere LUTs, one compute pass each, so each has its own encoder label,
+    // GPU timing and diagnostics span in traces (Metal System Trace times encoders, not dispatches).
+    {
         // Transmittance + multiscattering LUTs depend only on the atmosphere/medium and LUT
         // settings, not on the view or sun: rebuild them only when those inputs (or the LUT
         // textures) change. The medium enters by its prepared GPU textures, not its handle: an
@@ -201,7 +207,8 @@ pub fn atmosphere_luts(
         state.lut_key = Some(lut_key);
 
         if lut_static_dirty {
-            // Transmittance LUT
+            let mut luts_pass = labelled_compute_pass!("atmosphere_transmittance_lut");
+            let pass_span = diagnostics.pass_span(&mut luts_pass, "atmosphere_transmittance_lut");
             luts_pass.set_pipeline(transmittance_lut_pipeline);
             luts_pass.set_bind_group(
                 0,
@@ -212,8 +219,11 @@ pub fn atmosphere_luts(
                 ],
             );
             dispatch_2d(&mut luts_pass, settings.transmittance_lut_size);
+            pass_span.end(&mut luts_pass);
+            drop(luts_pass);
 
-            // Multiscattering LUT
+            let mut luts_pass = labelled_compute_pass!("atmosphere_multiscattering_lut");
+            let pass_span = diagnostics.pass_span(&mut luts_pass, "atmosphere_multiscattering_lut");
             luts_pass.set_pipeline(multiscattering_lut_pipeline);
             luts_pass.set_bind_group(
                 0,
@@ -228,6 +238,7 @@ pub fn atmosphere_luts(
                 settings.multiscattering_lut_size.y,
                 1,
             );
+            pass_span.end(&mut luts_pass);
         }
 
         // Sky View / Aerial View LUTs. With a VolumetricCloudLayer, the cloud-shadowed variants (the cloud
@@ -244,6 +255,8 @@ pub fn atmosphere_luts(
             }
             _ => None,
         };
+        let mut luts_pass = labelled_compute_pass!("atmosphere_sky_view_lut");
+        let pass_span = diagnostics.pass_span(&mut luts_pass, "atmosphere_sky_view_lut");
         if let Some((cloud_off, sbg, _, sp, _)) = cloud_luts {
             luts_pass.set_pipeline(sp);
             luts_pass.set_bind_group(
@@ -273,6 +286,8 @@ pub fn atmosphere_luts(
             );
         }
         dispatch_2d(&mut luts_pass, settings.sky_view_lut_size);
+        pass_span.end(&mut luts_pass);
+        drop(luts_pass);
 
         // The aerial-perspective LUT is only read by render_sky's lookup-texture path; in
         // raymarched mode every pixel's haze is marched (render_sky / its haze prepass, and the
@@ -281,6 +296,8 @@ pub fn atmosphere_luts(
             || std::env::var_os("ATMOSPHERE_DBG")
                 .is_some_and(|v| v.to_string_lossy().contains("ATM_DBG_HAZE_AP_LUT"));
         if need_ap_lut {
+            let mut luts_pass = labelled_compute_pass!("atmosphere_aerial_view_lut");
+            let pass_span = diagnostics.pass_span(&mut luts_pass, "atmosphere_aerial_view_lut");
             if let Some((cloud_off, _, abg, _, ap)) = cloud_luts {
                 luts_pass.set_pipeline(ap);
                 luts_pass.set_bind_group(
@@ -308,8 +325,8 @@ pub fn atmosphere_luts(
                 );
             }
             dispatch_2d(&mut luts_pass, settings.aerial_view_lut_size.xy());
+            pass_span.end(&mut luts_pass);
         }
-        pass_span.end(&mut luts_pass);
     }
 
     // Pass 2: cloud shadow map tracing (Unreal-style front depth + extinction stats).
@@ -399,19 +416,15 @@ pub fn atmosphere_luts(
                 if !full_build && i != stage && !(i == 4 && stage == 3) {
                     continue;
                 }
-                let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("cloud_field"),
-                    timestamp_writes: super::gpu_timing::compute(
-                        &timing_device,
-                        [
-                            "cloud_field",
-                            "cloud_field_edt_x",
-                            "cloud_field_edt_y",
-                            "cloud_field_edt_z",
-                            "cloud_field_escape",
-                        ][i],
-                    ),
-                });
+                let mut pass = labelled_compute_pass!(
+                    [
+                        "cloud_field_init",
+                        "cloud_field_edt_x",
+                        "cloud_field_edt_y",
+                        "cloud_field_edt_z",
+                        "cloud_field_escape",
+                    ][i]
+                );
                 pass.set_pipeline(pipeline);
                 if i == 0 {
                     pass.set_bind_group(
@@ -449,16 +462,7 @@ pub fn atmosphere_luts(
                 .map(|id| pipeline_cache.get_compute_pipeline(id));
             if let (
                 Some(bg),
-                [
-                    Some(source),
-                    Some(red),
-                    Some(black),
-                    Some(publish),
-                    Some(reset),
-                    Some(source_slice),
-                    Some(shift),
-                    Some(shift_commit),
-                ],
+                [Some(source), Some(red), Some(black), Some(publish), Some(reset), Some(source_slice), Some(shift), Some(shift_commit)],
             ) = (bind_groups.cloud_field_diffusion.as_ref(), diffusion)
             {
                 let g = UVec3::new(
@@ -473,42 +477,53 @@ pub fn atmosphere_luts(
                     lights_uniforms_offset.offset,
                     cloud_layer_uniforms_offset.index(),
                 ];
-                // One pass: wgpu orders the dispatches (storage read-write between them).
-                let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("cloud_diffusion"),
-                    timestamp_writes: super::gpu_timing::compute(&timing_device, "cloud_diffusion"),
-                });
-                pass.set_bind_group(0, bg, &offsets);
+                // The steps run in order (wgpu: storage read-write between dispatches). One pass
+                // by default, each step a debug group (named in GPU captures); with
+                // ATMOSPHERE_PROFILE_PASSES one labelled pass per step, so Metal System Trace
+                // shows each. Same frame rate either way (2560x1440, Apple M5), but the split
+                // steps' encoder durations include overlap with other work (2.0-2.5 ms in all,
+                // against 0.32 ms for the one pass): read them as an upper bound.
+                type Dispatch<'a> = (&'a bevy_render::render_resource::ComputePipeline, UVec3);
+                let mut steps: Vec<(&'static str, Vec<Dispatch>)> = Vec::new();
                 // SOR colours index half the cells in x, the source slice an eighth of the cells.
-                let mut dispatch = |p: &bevy_render::render_resource::ComputePipeline,
-                                    gx: u32,
-                                    gy: u32,
-                                    gz: u32| {
-                    pass.set_pipeline(p);
-                    pass.dispatch_workgroups(gx, gy, gz);
-                };
+                let half_x = UVec3::new(g.x.div_ceil(2), g.y, g.z);
                 if full_build {
-                    dispatch(reset, g.x, g.y, g.z);
-                    dispatch(source, g.x, g.y, g.z);
+                    steps.push(("cloud_diffusion_reset", vec![(reset, g)]));
+                    steps.push(("cloud_diffusion_source", vec![(source, g)]));
                 } else {
                     // The extinction was rebuilt (stage 0), maybe at a new grid cell: move the
                     // solution and source with it before this frame's iteration.
                     if stage == 0 {
-                        dispatch(shift, g.x, g.y, g.z);
-                        dispatch(shift_commit, g.x, g.y, g.z);
+                        steps.push(("cloud_diffusion_shift", vec![(shift, g), (shift_commit, g)]));
                     }
-                    dispatch(
-                        source_slice,
-                        g.x.div_ceil(2),
-                        g.y.div_ceil(2),
-                        g.z.div_ceil(2),
-                    );
+                    steps.push((
+                        "cloud_diffusion_source_slice",
+                        vec![(source_slice, (g + UVec3::ONE) / 2)],
+                    ));
                 }
-                for _ in 0..if full_build { 32 } else { 1 } {
-                    dispatch(red, g.x.div_ceil(2), g.y, g.z);
-                    dispatch(black, g.x.div_ceil(2), g.y, g.z);
+                let sor = [(red, half_x), (black, half_x)];
+                let iterations = if full_build { 32 } else { 1 };
+                steps.push(("cloud_diffusion_sor", sor.repeat(iterations)));
+                steps.push(("cloud_diffusion_publish", vec![(publish, g)]));
+                let run = |pass: &mut ComputePass, dispatches: &[Dispatch]| {
+                    pass.set_bind_group(0, bg, &offsets);
+                    for (p, n) in dispatches {
+                        pass.set_pipeline(p);
+                        pass.dispatch_workgroups(n.x, n.y, n.z);
+                    }
+                };
+                if profile_passes() {
+                    for (label, dispatches) in &steps {
+                        run(&mut labelled_compute_pass!(label), dispatches);
+                    }
+                } else {
+                    let mut pass = labelled_compute_pass!("cloud_diffusion");
+                    for (label, dispatches) in &steps {
+                        pass.push_debug_group(label);
+                        run(&mut pass, dispatches);
+                        pass.pop_debug_group();
+                    }
                 }
-                dispatch(publish, g.x, g.y, g.z);
             }
         }
     }
@@ -566,13 +581,16 @@ pub fn atmosphere_luts(
             dispatch_2d_temporal(&mut temporal_pass, settings.cloud_shadow_map_size);
         }
 
-        // Copy cloud_shadow_map to history for next frame.
+        // Copy cloud_shadow_map to history for next frame. Copies run in an unlabelled blit
+        // encoder ("Blit Command N" in Metal traces); the debug group names it in GPU captures.
         let copy_size = settings.cloud_shadow_map_size.to_extents();
+        command_encoder.push_debug_group("cloud_shadow_map_history_copy");
         command_encoder.copy_texture_to_texture(
             textures.cloud_shadow_map.texture.as_image_copy(),
             textures.cloud_shadow_map_history.texture.as_image_copy(),
             copy_size,
         );
+        command_encoder.pop_debug_group();
     }
 }
 
@@ -980,4 +998,11 @@ impl PerViewLutState {
         entry.0 = tick;
         &mut entry.1
     }
+}
+
+/// `ATMOSPHERE_PROFILE_PASSES=1`: split multi-step compute work into one labelled pass per step,
+/// so Metal System Trace (which times encoders) shows each step. Slower than the default.
+fn profile_passes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ATMOSPHERE_PROFILE_PASSES").is_some())
 }

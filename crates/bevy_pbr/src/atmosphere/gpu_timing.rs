@@ -6,6 +6,11 @@
 //! writes timestamps *inside* passes/encoders instead, which needs dispatch/blit-boundary
 //! sampling that Apple GPUs lack, so it reports CPU spans only there.
 //! Times assume a 1 ns timestamp period (wgpu reports 1.0 on Apple Silicon/AMD).
+//!
+//! Render-pass times are not trustworthy on Apple GPUs (tile-based): the pass boundaries include
+//! other work that overlaps them. At 2560x1440, `render_sky` read 34 ms here and 0.85 ms in a
+//! Metal System Trace, `render_sky_haze` 32.5 vs 16.8 ms; compute passes agree within ~15 %.
+//! For render passes use a trace (`.clouds-handoff/notes/profiling.md`).
 
 use bevy_render::{
     render_resource::{
@@ -19,7 +24,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-const MAX_PASSES: u32 = 16;
+// Passes timed per frame (each LUT, field stage and diffusion step has its own pass: ~20).
+const MAX_PASSES: u32 = 32;
 
 struct State {
     query_set: QuerySet,
@@ -64,6 +70,7 @@ fn slot(device: &RenderDevice, name: &'static str) -> Option<(&'static QuerySet,
     let mut s = state(device)?.lock().unwrap();
     let i = s.names.len() as u32;
     if i >= MAX_PASSES {
+        bevy_log::warn_once!("gpu_timing: more than {MAX_PASSES} passes in a frame, {name} and later are not timed");
         return None;
     }
     s.names.push(name);
