@@ -823,9 +823,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         var jitter: f32;
         if (all(stbn_dims > vec2(1u))) {
             let layer = i32(view.frame_count % u32(textureNumLayers(stbn_texture)));
-            jitter = textureLoad(stbn_texture, vec2<i32>(half_px) % vec2<i32>(stbn_dims), layer, 0).r;
+            // Indexed by the trace texel (dense), not the half-res pixel (both noises): the
+            // checkerboard's half_px samples at a stride of 2 with a per-frame offset, which
+            // loses the blue-noise spectrum (IGN: its diagonal structure aliases) and left
+            // diagonal hatching in near-camera fog when flying through clouds, which the
+            // reconstruction then took frames to average out.
+            jitter = textureLoad(stbn_texture, vec2<i32>(id.xy) % vec2<i32>(stbn_dims), layer, 0).r;
         } else {
-            jitter = interleaved_gradient_noise(vec2<f32>(half_px), view.frame_count % 64u);
+            jitter = interleaved_gradient_noise(vec2<f32>(id.xy), view.frame_count % 64u);
         }
 
         let sigma_s_unit = get_cloud_scattering_coeff();
