@@ -230,6 +230,7 @@ fn ground_sun_visibility(p: vec3<f32>, l: vec3<f32>) -> f32 {
     let t1 = normalize(cross(up, select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(up.x) > 0.9)));
     let t2 = cross(up, t1);
     var vis = 0.0;
+    var n_off_map = 0.0;
     let frame = cloud_shadow_frame(l);
     for (var i = 0u; i < 2u; i++) {
         let mu = (f32(i) + 0.5) / 2.0;
@@ -240,12 +241,19 @@ fn ground_sun_visibility(p: vec3<f32>, l: vec3<f32>) -> f32 {
             // Shadow map, optical depth only (the ground is below every cloud), one bilinear tap.
             let uv = cloud_shadow_ground_uv(frame, p_g);
             if (uv.x < 0.0) {
-                vis += cloud_far_transmittance(p_g, l, true);
+                n_off_map += 1.0;
             } else {
                 let d = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv, 0.0);
                 vis += cloud_shadow_optical_depth(d.rgb) * exp(-d.a);
             }
         }
+    }
+    // Ground points off the map (clouds near its 64 km edge) share one far-field march from the
+    // ground below p. Marching per point inlined a full density loop into these 16 taps, inside
+    // the light loop inside the view march: the cloud pass spilled 160 bytes of registers
+    // (Metal compiler, Apple M5), 0 without the ambient path.
+    if (n_off_map > 0.0) {
+        vis += n_off_map * cloud_far_transmittance(up * r_g, l, true);
     }
     return vis / 16.0;
 }
@@ -980,7 +988,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
             let up = p / r_p;
             let dens_ctx = cloud_density_context(r_p, p);
             let esc_col = cloud_escape_and_column(p);
-            var ground_rad = sky_irr * atmosphere.ground_albedo;
 
             var direct_sum = vec3(0.0);
             for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
@@ -1035,15 +1042,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 }
                 let t_cloud = t_far * t_local;
                 let cos_theta = dot(l, ray_dir);
-                // Sunlit ground below this sample (Lambert, albedo): sun irradiance through the
-                // atmosphere times the mean cloud-shadow visibility of the ground it sees.
-                if (light_i == 0u) {
-                    let r_g = atmosphere.inner_radius;
-                    let mu_g = dot(l, up);
-                    let e_sun = (*light).color.rgb * sample_transmittance_lut(r_g, mu_g) * max(mu_g, 0.0)
-                        * ground_sun_visibility(p, l);
-                    ground_rad = atmosphere.ground_albedo * (e_sun / PI + sky_irr);
-                }
                 // Nubis Cubed structure (Schneider, Advances 2023, "Direct = Transmittance * Phase +
                 // Multiple Scattering * Secondary Phase") with physically derived terms. Multiple
                 // scattering (orders >= 2), isotropic: E_sun * exp(-(1 - g) tau_sun) * F_ms / 4pi.
@@ -1098,6 +1096,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     direct += ms_vol * (0.25 / PI);
                 }
                 direct_sum += (*light).color.rgb * t_atm * direct;
+            }
+            // Sunlit ground below this sample (Lambert, albedo): the first directional light's
+            // irradiance through the atmosphere times the mean cloud-shadow visibility of the
+            // ground it sees. After the light loop, not in it: its 16 shadow taps kept their state
+            // live through the multiple-scattering work (register spills, Apple M5).
+            var ground_rad = sky_irr * atmosphere.ground_albedo;
+            if (lights.n_directional_lights > 0u) {
+                let light0 = &lights.directional_lights[0];
+                let l0 = (*light0).direction_to_light;
+                let mu_g = dot(l0, up);
+                let e_sun = (*light0).color.rgb * sample_transmittance_lut(atmosphere.inner_radius, mu_g)
+                    * max(mu_g, 0.0) * ground_sun_visibility(p, l0);
+                ground_rad = atmosphere.ground_albedo * (e_sun / PI + sky_irr);
             }
             var ambient = cloud_ambient_term(sky_irr, ground_rad, esc_col.y, esc_col.z);
             // Validation term toggles (CLOUD_TERMS=s1|sun|amb, see resources.rs).

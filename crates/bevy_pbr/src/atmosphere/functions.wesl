@@ -494,9 +494,6 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     if (extent <= 0.0 || half_depth <= 0.0) {
         return 1.0;
     }
-    if (!cloud_shadow_is_mapped_light(direction_to_light)) {
-        return cloud_far_transmittance(world_pos, direction_to_light, use_optical_depth_only);
-    }
 
     // IMPORTANT: use the same trace direction as the compute pass:
     // light -> surface (opposite of Bevy's `direction_to_light` which is surface -> light).
@@ -511,19 +508,28 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     // Map world point to the orthographic light volume.
     let x = dot(rel, basis.x);
     let y = dot(rel, basis.y);
-    if (abs(x) > extent || abs(y) > extent) {
-        return cloud_far_transmittance(world_pos, direction_to_light, use_optical_depth_only);
-    }
-
     // Depth from near plane along light direction.
     // Near plane is located at `anchor - light_dir * half_depth`.
     let d_sample = dot(rel, trace_dir) + half_depth;
     let max_t = 2.0 * half_depth;
-    if (d_sample <= 0.0 || d_sample >= max_t) {
-        return cloud_far_transmittance(world_pos, direction_to_light, use_optical_depth_only);
+    let on_map = cloud_shadow_is_mapped_light(direction_to_light)
+        && abs(x) <= extent && abs(y) <= extent
+        && d_sample > 0.0 && d_sample < max_t;
+    if (on_map) {
+        return cloud_shadow_map_lookup(world_pos, vec2(x, y), d_sample, use_optical_depth_only);
     }
+    // Off the map, or a light it was not traced for: the far-field march, from one call site.
+    // An early return per case inlined the march's density loop three times into every caller
+    // (register spills in the cloud pass, whose light loop calls this per sample).
+    return cloud_far_transmittance(world_pos, direction_to_light, use_optical_depth_only);
+}
 
-    let uv = cloud_shadow_xy_to_uv(vec2(x, y), extent);
+/// The cloud shadow map's transmittance at a point on the map: `xy` in the light frame,
+/// `d_sample` its depth from the map's near plane (`sample_cloud_shadow_map`).
+@if(CLOUDS_ENABLED)
+fn cloud_shadow_map_lookup(world_pos: vec3<f32>, xy: vec2<f32>, d_sample: f32, use_optical_depth_only: bool) -> f32 {
+    let extent = settings.cloud_shadow_map_extent;
+    let uv = cloud_shadow_xy_to_uv(xy, extent);
     // Thin layers (alpha) shadow only points below them.
     let thin = cloud_thin_shadow_weight(world_pos);
 
