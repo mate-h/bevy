@@ -449,7 +449,16 @@ pub fn atmosphere_luts(
                 .map(|id| pipeline_cache.get_compute_pipeline(id));
             if let (
                 Some(bg),
-                [Some(source), Some(red), Some(black), Some(publish), Some(reset), Some(source_slice)],
+                [
+                    Some(source),
+                    Some(red),
+                    Some(black),
+                    Some(publish),
+                    Some(reset),
+                    Some(source_slice),
+                    Some(shift),
+                    Some(shift_commit),
+                ],
             ) = (bind_groups.cloud_field_diffusion.as_ref(), diffusion)
             {
                 let g = UVec3::new(
@@ -482,6 +491,12 @@ pub fn atmosphere_luts(
                     dispatch(reset, g.x, g.y, g.z);
                     dispatch(source, g.x, g.y, g.z);
                 } else {
+                    // The extinction was rebuilt (stage 0), maybe at a new grid cell: move the
+                    // solution and source with it before this frame's iteration.
+                    if stage == 0 {
+                        dispatch(shift, g.x, g.y, g.z);
+                        dispatch(shift_commit, g.x, g.y, g.z);
+                    }
                     dispatch(
                         source_slice,
                         g.x.div_ceil(2),

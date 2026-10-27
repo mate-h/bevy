@@ -735,6 +735,20 @@ impl AtmosphereBindGroupLayouts {
                                 StorageTextureAccess::WriteOnly,
                             ),
                         ),
+                        (
+                            58,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                        (
+                            60,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
                     ),
                 ),
             ),
@@ -1104,7 +1118,7 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_field_escape: CachedComputePipelineId,
     pub weather_window: CachedComputePipelineId,
     /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
-    pub cloud_field_diffusion: [CachedComputePipelineId; 6],
+    pub cloud_field_diffusion: [CachedComputePipelineId; 8],
 }
 
 impl FromWorld for AtmosphereLutPipelines {
@@ -1306,6 +1320,8 @@ impl FromWorld for AtmosphereLutPipelines {
                 "diffusion_publish",
                 "diffusion_reset",
                 "diffusion_source_slice",
+                "diffusion_shift",
+                "diffusion_shift_commit",
             ]
             .map(|entry| {
                 pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -1525,6 +1541,10 @@ pub struct AtmosphereTextures {
     pub cloud_field_diff_src: CachedTexture,
     pub cloud_field_diff_u: CachedTexture,
     pub cloud_field_diff: CachedTexture,
+    /// The diffusion solution and source moved with the grid (`cloud_field.wesl` diffusion_shift).
+    pub cloud_field_diff_tmp: CachedTexture,
+    /// The diffusion solve's build cell and pending shift (4 x 1 x 1).
+    pub cloud_field_diff_state: CachedTexture,
 }
 
 pub(super) fn prepare_atmosphere_textures(
@@ -1690,6 +1710,34 @@ pub(super) fn prepare_atmosphere_textures(
             TextureUsages::STORAGE_BINDING
                 | TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_SRC,
+        );
+        let mut diff_aux = |label: &'static str, size: Extent3d| {
+            textures.get(TextureDescriptor {
+                label: Some(label),
+                size: cloud_extent(size),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                format: TextureFormat::R32Float,
+                usage: TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let cloud_field_diff_tmp = diff_aux(
+            "cloud_field_diff_tmp",
+            Extent3d {
+                width: CLOUD_FIELD_RES_XY,
+                height: CLOUD_FIELD_RES_XY,
+                depth_or_array_layers: 2 * CLOUD_FIELD_RES_Z,
+            },
+        );
+        let cloud_field_diff_state = diff_aux(
+            "cloud_field_diff_state",
+            Extent3d {
+                width: 4,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let mut window = |label: &'static str| {
             textures.get(TextureDescriptor {
@@ -1866,6 +1914,8 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_diff_src,
                 cloud_field_diff_u,
                 cloud_field_diff,
+                cloud_field_diff_tmp,
+                cloud_field_diff_state,
             }
         });
         seen.insert(view.retained_view_entity, textures);
@@ -2884,6 +2934,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (55, &textures.cloud_field_diff_src.default_view),
                         (56, &textures.cloud_field_diff_u.default_view),
                         (57, &textures.cloud_field_diff.default_view),
+                        (58, &textures.cloud_field_diff_tmp.default_view),
+                        (60, &textures.cloud_field_diff_state.default_view),
                     )),
                 )
             });

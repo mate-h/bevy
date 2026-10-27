@@ -248,6 +248,10 @@ fn edt_z(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: 
 @group(0) @binding(55) var diff_src: texture_storage_3d<r32float, read_write>;
 @group(0) @binding(56) var diff_u: texture_storage_3d<r32float, read_write>;
 @group(0) @binding(57) var out_field_diff: texture_storage_3d<rgba16float, write>;
+// The solution and source moved with the grid (z < RES_Z: U, above: the source).
+@group(0) @binding(58) var diff_tmp: texture_storage_3d<r32float, read_write>;
+// (0, 1): the build cell the solution and source are indexed by; (2, 3): the pending shift.
+@group(0) @binding(60) var diff_state: texture_storage_3d<r32float, read_write>;
 
 const DIFF_SIGMA_MIN: f32 = 1e-4;
 const DIFF_OMEGA: f32 = 1.85;
@@ -410,7 +414,11 @@ fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
     // outer tens of metres of a cloud, within a cell of clear air, and trilinear filtering
     // against a stored 0 halved the diffuse light at every surface. Cells far from cloud (the
     // field's distance, more than two cells) skip the neighbourhood.
-    let far = textureLoad(cloud_field_sdf, id, 0).r > 2.0 * cloud_field_voxel_m();
+    // The SDF may still be indexed by the previous build cell (it switches at edt_z, three
+    // frames after the extinction): read it at this cell's position in its own grid.
+    let sdf_cell = textureLoad(cloud_field_sdf, vec3(0), 0).ba;
+    let qs = vec3<i32>(id) + vec3(vec2<i32>(e.ba - sdf_cell), 0);
+    let far = field_in_range(qs) && textureLoad(cloud_field_sdf, qs, 0).r > 2.0 * cloud_field_voxel_m();
     if (e.r <= DIFF_SIGMA_MIN && far) {
         u = 0.0;
     } else if (e.r <= DIFF_SIGMA_MIN) {
@@ -436,4 +444,62 @@ fn diffusion_reset(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     textureStore(diff_u, id, vec4(0.0));
+    if (all(id == vec3(0u))) {
+        let cell = textureLoad(in_field_ext, id, 0).ba;
+        textureStore(diff_state, vec3(0, 0, 0), vec4(cell.x));
+        textureStore(diff_state, vec3(1, 0, 0), vec4(cell.y));
+        textureStore(diff_state, vec3(2, 0, 0), vec4(0.0));
+        textureStore(diff_state, vec3(3, 0, 0), vec4(0.0));
+    }
+}
+
+// The grid follows the camera in whole blocks (cloud_field_cell): when the extinction is rebuilt
+// at a new cell, the warm-started solution and the source move with it (they are indexed by
+// cell), else the light sat two cells off the clouds and blinked until the SOR re-converged
+// (every ~375 m of flight). Two passes, so no invocation reads the state another writes:
+// shift copies into diff_tmp and records the offset, commit copies back and records the cell.
+fn diffusion_shift_offset() -> vec2<i32> {
+    return vec2<i32>(vec2(textureLoad(diff_state, vec3(2, 0, 0)).r, textureLoad(diff_state, vec3(3, 0, 0)).r));
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn diffusion_shift(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
+        return;
+    }
+    let cell = textureLoad(in_field_ext, vec3(0), 0).ba;
+    let old = vec2(textureLoad(diff_state, vec3(0, 0, 0)).r, textureLoad(diff_state, vec3(1, 0, 0)).r);
+    let o = vec2<i32>(round(cell - old));
+    if (all(id == vec3(0u))) {
+        textureStore(diff_state, vec3(2, 0, 0), vec4(f32(o.x)));
+        textureStore(diff_state, vec3(3, 0, 0), vec4(f32(o.y)));
+    }
+    if (all(o == vec2(0))) {
+        return;
+    }
+    // Cell id of the new grid is cell id + o of the old one (cloud_field_origin_from_cell).
+    let q = vec3<i32>(id) + vec3(o, 0);
+    let inside = field_in_range(q);
+    let u = select(0.0, textureLoad(diff_u, q).r, inside);
+    let src = select(0.0, textureLoad(diff_src, q).r, inside);
+    textureStore(diff_tmp, vec3<i32>(id), vec4(u));
+    textureStore(diff_tmp, vec3<i32>(id) + vec3(0, 0, i32(CLOUD_FIELD_RES_Z)), vec4(src));
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn diffusion_shift_commit(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
+        return;
+    }
+    let o = diffusion_shift_offset();
+    if (all(o == vec2(0))) {
+        return;
+    }
+    textureStore(diff_u, id, textureLoad(diff_tmp, vec3<i32>(id)));
+    textureStore(diff_src, id, textureLoad(diff_tmp, vec3<i32>(id) + vec3(0, 0, i32(CLOUD_FIELD_RES_Z))));
+    if (all(id == vec3(0u))) {
+        let cell = textureLoad(in_field_ext, vec3(0), 0).ba;
+        textureStore(diff_state, vec3(0, 0, 0), vec4(cell.x));
+        textureStore(diff_state, vec3(1, 0, 0), vec4(cell.y));
+    }
 }
