@@ -18,7 +18,7 @@ use super::{
         AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTextures,
         AtmosphereTransformsOffset, RenderSkyHazePipelineId, RenderSkyPipelineId,
     },
-    GpuCloudLayers, GpuAtmosphereSettings,
+    GpuAtmosphereSettings, GpuCloudLayers,
 };
 
 pub fn atmosphere_luts(
@@ -196,8 +196,8 @@ pub fn atmosphere_luts(
             textures.multiscattering_lut.texture.id().hash(&mut h);
             h.finish()
         };
-        let lut_static_dirty = state.lut_key != Some(lut_key)
-            || std::env::var_os("ATMOSPHERE_LUT_ALWAYS").is_some();
+        let lut_static_dirty =
+            state.lut_key != Some(lut_key) || std::env::var_os("ATMOSPHERE_LUT_ALWAYS").is_some();
         state.lut_key = Some(lut_key);
 
         if lut_static_dirty {
@@ -239,7 +239,9 @@ pub fn atmosphere_luts(
             pipeline_cache.get_compute_pipeline(pipelines.sky_view_lut_clouds),
             pipeline_cache.get_compute_pipeline(pipelines.aerial_view_lut_clouds),
         ) {
-            (Some(o), Some(sbg), Some(abg), Some(sp), Some(ap)) => Some((o.index(), sbg, abg, sp, ap)),
+            (Some(o), Some(sbg), Some(abg), Some(sp), Some(ap)) => {
+                Some((o.index(), sbg, abg, sp, ap))
+            }
             _ => None,
         };
         if let Some((cloud_off, sbg, _, sp, _)) = cloud_luts {
@@ -276,7 +278,8 @@ pub fn atmosphere_luts(
         // raymarched mode every pixel's haze is marched (render_sky / its haze prepass, and the
         // cloud pass in front of clouds), so building the 32^3 cloud-shadowed LUT was wasted.
         let need_ap_lut = settings.rendering_method != 1
-            || std::env::var_os("ATMOSPHERE_DBG").is_some_and(|v| v.to_string_lossy().contains("ATM_DBG_HAZE_AP_LUT"));
+            || std::env::var_os("ATMOSPHERE_DBG")
+                .is_some_and(|v| v.to_string_lossy().contains("ATM_DBG_HAZE_AP_LUT"));
         if need_ap_lut {
             if let Some((cloud_off, _, abg, _, ap)) = cloud_luts {
                 luts_pass.set_pipeline(ap);
@@ -367,7 +370,10 @@ pub fn atmosphere_luts(
             pipelines.cloud_field_edt_z,
             pipelines.cloud_field_escape,
         ];
-        let resolved: Option<Vec<_>> = ids.iter().map(|id| pipeline_cache.get_compute_pipeline(*id)).collect();
+        let resolved: Option<Vec<_>> = ids
+            .iter()
+            .map(|id| pipeline_cache.get_compute_pipeline(*id))
+            .collect();
         if let Some(resolved) = resolved {
             let groups = UVec3::new(
                 super::resources::CLOUD_FIELD_RES_XY.div_ceil(8),
@@ -382,7 +388,11 @@ pub fn atmosphere_luts(
             let full_build = state.field_texture != Some(field_id);
             state.field_texture = Some(field_id);
             let stage = (state.field_frame % 8) as usize;
-            state.field_frame = if full_build { 0 } else { state.field_frame.wrapping_add(1) };
+            state.field_frame = if full_build {
+                0
+            } else {
+                state.field_frame.wrapping_add(1)
+            };
             for (i, pipeline) in resolved.into_iter().enumerate() {
                 // escape (4) runs right after edt_z (3) in the same frame: both switch to the new
                 // build cell together (clouds_raymarch reads the escape volume with the SDF's cell).
@@ -393,7 +403,13 @@ pub fn atmosphere_luts(
                     label: Some("cloud_field"),
                     timestamp_writes: super::gpu_timing::compute(
                         &timing_device,
-                        ["cloud_field", "cloud_field_edt_x", "cloud_field_edt_y", "cloud_field_edt_z", "cloud_field_escape"][i],
+                        [
+                            "cloud_field",
+                            "cloud_field_edt_x",
+                            "cloud_field_edt_y",
+                            "cloud_field_edt_z",
+                            "cloud_field_escape",
+                        ][i],
                     ),
                 });
                 pass.set_pipeline(pipeline);
@@ -541,8 +557,8 @@ pub fn render_sky(
     else {
         return;
     }; //TODO: warning
-    // Like a pipeline that is not ready: no sky until this view's cloud field is built, rather
-    // than clouds lit from an unbuilt field (zero escape probability, f_ms/(1 - f_ms) ~ 3e6).
+       // Like a pipeline that is not ready: no sky until this view's cloud field is built, rather
+       // than clouds lit from an unbuilt field (zero escape probability, f_ms/(1 - f_ms) ~ 3e6).
     if cloud_layer_uniforms_offset.is_some()
         && !lut_state.field_built(
             extracted_view.retained_view_entity,
@@ -590,7 +606,15 @@ pub fn render_sky(
         // The view's raw atmosphere probe cube (6 layers), before the environment-map filter.
         if let Some(env) = env_map {
             let t = &env.environment_map.texture;
-            d(command_encoder, "env_raw", t, 0, UVec3::new(t.width(), t.height(), 6), 8, "rgba16f");
+            d(
+                command_encoder,
+                "env_raw",
+                t,
+                0,
+                UVec3::new(t.width(), t.height(), 6),
+                8,
+                "rgba16f",
+            );
         }
         let (pw, det, wx) = &noise_dump;
         if let Some(pw) = pw {
@@ -617,7 +641,15 @@ pub fn render_sky(
         }
         if let Some(wx) = wx {
             let t = &wx.scheme_noise.texture;
-            d(command_encoder, "scheme_noise_mip0", t, 0, UVec3::new(t.width(), t.height(), t.depth_or_array_layers()), 8, "rgba16f");
+            d(
+                command_encoder,
+                "scheme_noise_mip0",
+                t,
+                0,
+                UVec3::new(t.width(), t.height(), t.depth_or_array_layers()),
+                8,
+                "rgba16f",
+            );
             let t = &wx.profile.texture;
             d(command_encoder, "profile_lut", t, 0, s2(t), 8, "rgba16f");
             d(
@@ -634,17 +666,21 @@ pub fn render_sky(
 
     // What this frame writes of the cloud and haze histories (`CloudHistoryWrites`).
     let mut clouds_written = None;
-    let mut haze_written = haze_pipeline_id.is_none().then(|| textures.haze_inscattering.texture.id());
+    let mut haze_written = haze_pipeline_id
+        .is_none()
+        .then(|| textures.haze_inscattering.texture.id());
 
     // Dedicated low-res cloud raymarch (design.md §1.2). Its output is composited by render_sky.
     if let (Some(cloud_layer_offset), Some(bind_group), Some(pipeline)) = (
         cloud_layer_uniforms_offset.as_ref(),
         atmosphere_bind_groups.clouds_raymarch.as_ref(),
-        pipeline_cache.get_compute_pipeline(if atmosphere_bind_groups.clouds_raymarch_multisampled {
-            pipelines.clouds_raymarch_msaa
-        } else {
-            pipelines.clouds_raymarch
-        }),
+        pipeline_cache.get_compute_pipeline(
+            if atmosphere_bind_groups.clouds_raymarch_multisampled {
+                pipelines.clouds_raymarch_msaa
+            } else {
+                pipelines.clouds_raymarch
+            },
+        ),
     ) {
         let mut clouds_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("clouds_raymarch"),
@@ -745,7 +781,12 @@ pub fn render_sky(
         drop(haze_pass);
         haze_written = Some(textures.haze_inscattering.texture.id());
     }
-    history_writes.record(extracted_view.retained_view_entity, frame_count.0, clouds_written, haze_written);
+    history_writes.record(
+        extracted_view.retained_view_entity,
+        frame_count.0,
+        clouds_written,
+        haze_written,
+    );
 
     let mut render_sky_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
         label: Some("render_sky"),
@@ -847,7 +888,11 @@ impl PerViewLutState {
     /// Whether `view` has completed a full build of the cloud field into `field`. A field that
     /// was never built (its pipelines or bind groups were not ready yet) holds zeroed metadata
     /// and escape probabilities, which the cloud trace would read as a valid field (audit 20).
-    pub fn field_built(&self, view: RetainedViewEntity, field: bevy_render::render_resource::TextureId) -> bool {
+    pub fn field_built(
+        &self,
+        view: RetainedViewEntity,
+        field: bevy_render::render_resource::TextureId,
+    ) -> bool {
         self.views
             .get(&view)
             .is_some_and(|(_, state)| state.field_texture == Some(field))

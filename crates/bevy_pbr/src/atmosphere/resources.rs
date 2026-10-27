@@ -1,13 +1,10 @@
 use crate::{
-    detail_noise::DetailNoiseTexture, fbm_noise::FbmNoiseTexture, perlin_worley_noise::PerlinWorleyNoiseTexture, Bluenoise,
-    GpuCloudLayers, ExtractedAtmosphere, ExtractedDirectionalLight, GpuLights, GpuScatteringMedium,
-    LightMeta, LinearSampler, ScatteringMediumSampler, ShadowSamplers, ViewShadowBindings,
+    detail_noise::DetailNoiseTexture, fbm_noise::FbmNoiseTexture,
+    perlin_worley_noise::PerlinWorleyNoiseTexture, Bluenoise, ExtractedAtmosphere,
+    ExtractedDirectionalLight, GpuCloudLayers, GpuLights, GpuScatteringMedium, LightMeta,
+    LinearSampler, ScatteringMediumSampler, ShadowSamplers, ViewShadowBindings,
 };
 use bevy_asset::{load_embedded_asset, AssetId, Handle};
-use bevy_platform::collections::HashMap;
-use bevy_render::camera::ExtractedCamera;
-use bevy_render::render_resource::UniformBuffer;
-use bevy_render::view::RetainedViewEntity;
 use bevy_camera::{Camera, Camera3d};
 use bevy_core_pipeline::FullscreenShader;
 use bevy_derive::Deref;
@@ -24,6 +21,10 @@ use bevy_ecs::{
 use bevy_image::ToExtents;
 use bevy_light::atmosphere::ScatteringMedium;
 use bevy_math::{Affine3A, Mat4, UVec2, Vec2, Vec3, Vec3A};
+use bevy_platform::collections::HashMap;
+use bevy_render::camera::ExtractedCamera;
+use bevy_render::render_resource::UniformBuffer;
+use bevy_render::view::RetainedViewEntity;
 use bevy_render::{
     extract_component::ComponentUniforms,
     render_asset::RenderAssets,
@@ -103,8 +104,14 @@ fn directional_shadow_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBu
 /// transmittance, 27: transmittance-weighted cloud depth).
 fn cloud_pass_output_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<2> {
     (
-        (26, texture_2d(TextureSampleType::Float { filterable: true })),
-        (27, texture_2d(TextureSampleType::Float { filterable: false })),
+        (
+            26,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
+        (
+            27,
+            texture_2d(TextureSampleType::Float { filterable: false }),
+        ),
     )
 }
 
@@ -112,8 +119,14 @@ fn cloud_pass_output_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArr
 /// prepass reads the previous frame's as its history), and their reprojection parameters.
 fn haze_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<3> {
     (
-        (50, texture_2d(TextureSampleType::Float { filterable: true })),
-        (51, texture_2d(TextureSampleType::Float { filterable: true })),
+        (
+            50,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
+        (
+            51,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
         (52, uniform_buffer::<CloudsTemporalParams>(false)),
     )
 }
@@ -124,7 +137,10 @@ fn render_sky_composite_cloud_entries() -> impl IntoIndexedBindGroupLayoutEntryB
     (
         (20, uniform_buffer::<GpuCloudLayers>(true)),
         (22, sampler(SamplerBindingType::Filtering)),
-        (23, texture_2d(TextureSampleType::Float { filterable: true })),
+        (
+            23,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
     )
 }
 
@@ -160,12 +176,24 @@ fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<11
             texture_3d(TextureSampleType::Float { filterable: true }),
         ),
         // Vertical profile lookups, height x type (`cloud_profile.rs`).
-        (34, texture_2d(TextureSampleType::Float { filterable: true })),
+        (
+            34,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
         // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
-        (35, texture_3d(TextureSampleType::Float { filterable: true })),
+        (
+            35,
+            texture_3d(TextureSampleType::Float { filterable: true }),
+        ),
         // Weather window around the camera: art (36) and physical (37) channels (`weather_window.wesl`).
-        (36, texture_2d(TextureSampleType::Float { filterable: true })),
-        (37, texture_2d(TextureSampleType::Float { filterable: true })),
+        (
+            36,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
+        (
+            37,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
     )
 }
 
@@ -260,62 +288,74 @@ impl AtmosphereBindGroupLayouts {
             ),
         );
 
-        let sky_view_lut_entries = || DynamicBindGroupLayoutEntries::new_with_indices(
-            ShaderStages::COMPUTE,
-            (
-                (0, uniform_buffer::<GpuAtmosphere>(true)),
-                (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                (2, uniform_buffer::<AtmosphereTransform>(true)),
-                (3, uniform_buffer::<ViewUniform>(true)),
-                (4, uniform_buffer::<GpuLights>(true)),
-                // scattering medium luts and sampler
-                (5, texture_2d(TextureSampleType::default())),
-                (6, texture_2d(TextureSampleType::default())),
-                (7, sampler(SamplerBindingType::Filtering)),
-                // atmosphere luts and sampler
-                (8, texture_2d(TextureSampleType::default())), // transmittance
-                (9, texture_2d(TextureSampleType::default())), // multiscattering
-                (12, sampler(SamplerBindingType::Filtering)),
-                // sky view lut storage texture
+        let sky_view_lut_entries = || {
+            DynamicBindGroupLayoutEntries::new_with_indices(
+                ShaderStages::COMPUTE,
                 (
-                    13,
-                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                    (0, uniform_buffer::<GpuAtmosphere>(true)),
+                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
+                    (3, uniform_buffer::<ViewUniform>(true)),
+                    (4, uniform_buffer::<GpuLights>(true)),
+                    // scattering medium luts and sampler
+                    (5, texture_2d(TextureSampleType::default())),
+                    (6, texture_2d(TextureSampleType::default())),
+                    (7, sampler(SamplerBindingType::Filtering)),
+                    // atmosphere luts and sampler
+                    (8, texture_2d(TextureSampleType::default())), // transmittance
+                    (9, texture_2d(TextureSampleType::default())), // multiscattering
+                    (12, sampler(SamplerBindingType::Filtering)),
+                    // sky view lut storage texture
+                    (
+                        13,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
                 ),
-            ),
-        )
-        .extend_with_indices(shadow_map_layout_entries());
+            )
+            .extend_with_indices(shadow_map_layout_entries())
+        };
         // Cloud-shadowed variants (Hillaire 2020 / UE5: the volumetric cloud shadow map darkens
         // the sky-view and aerial-perspective LUT in-scattering).
         let sky_view_lut_clouds = BindGroupLayoutDescriptor::new(
             "sky_view_lut_clouds_bind_group_layout",
             &sky_view_lut_entries().extend_with_indices(cloud_layout_entries()),
         );
-        let sky_view_lut =
-            BindGroupLayoutDescriptor::new("sky_view_lut_bind_group_layout", &sky_view_lut_entries());
+        let sky_view_lut = BindGroupLayoutDescriptor::new(
+            "sky_view_lut_bind_group_layout",
+            &sky_view_lut_entries(),
+        );
 
-        let aerial_view_lut_entries = || DynamicBindGroupLayoutEntries::new_with_indices(
-            ShaderStages::COMPUTE,
-            (
-                (0, uniform_buffer::<GpuAtmosphere>(true)),
-                (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                (3, uniform_buffer::<ViewUniform>(true)),
-                (4, uniform_buffer::<GpuLights>(true)),
-                // scattering medium luts and sampler
-                (5, texture_2d(TextureSampleType::default())),
-                (6, texture_2d(TextureSampleType::default())),
-                (7, sampler(SamplerBindingType::Filtering)),
-                // atmosphere luts and sampler
-                (8, texture_2d(TextureSampleType::default())), // transmittance
-                (9, texture_2d(TextureSampleType::default())), // multiscattering
-                (12, sampler(SamplerBindingType::Filtering)),
-                // aerial view lut storage texture
+        let aerial_view_lut_entries = || {
+            DynamicBindGroupLayoutEntries::new_with_indices(
+                ShaderStages::COMPUTE,
                 (
-                    13,
-                    texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                    (0, uniform_buffer::<GpuAtmosphere>(true)),
+                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (3, uniform_buffer::<ViewUniform>(true)),
+                    (4, uniform_buffer::<GpuLights>(true)),
+                    // scattering medium luts and sampler
+                    (5, texture_2d(TextureSampleType::default())),
+                    (6, texture_2d(TextureSampleType::default())),
+                    (7, sampler(SamplerBindingType::Filtering)),
+                    // atmosphere luts and sampler
+                    (8, texture_2d(TextureSampleType::default())), // transmittance
+                    (9, texture_2d(TextureSampleType::default())), // multiscattering
+                    (12, sampler(SamplerBindingType::Filtering)),
+                    // aerial view lut storage texture
+                    (
+                        13,
+                        texture_storage_3d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
                 ),
-            ),
-        )
-        .extend_with_indices(shadow_map_layout_entries());
+            )
+            .extend_with_indices(shadow_map_layout_entries())
+        };
         let aerial_view_lut_clouds = BindGroupLayoutDescriptor::new(
             "aerial_view_lut_clouds_bind_group_layout",
             &aerial_view_lut_entries().extend_with_indices(cloud_layout_entries()),
@@ -356,12 +396,24 @@ impl AtmosphereBindGroupLayouts {
                         texture_3d(TextureSampleType::Float { filterable: true }),
                     ),
                     // Vertical profile lookups (`cloud_profile.rs`).
-                    (34, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (
+                        34,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
                     // Physical cloud scheme fluctuation (g, g^2, b, b^2), shape tile + mips (`fbm_noise.rs`).
-                    (35, texture_3d(TextureSampleType::Float { filterable: true })),
+                    (
+                        35,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
                     // Weather window around the camera: art (36) and physical (37) channels (`weather_window.wesl`).
-                    (36, texture_2d(TextureSampleType::Float { filterable: true })),
-                    (37, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (
+                        36,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (
+                        37,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
                     // Cloud SDF seeds (`cloud_field.wesl` init entry point).
                     (
                         40,
@@ -379,7 +431,10 @@ impl AtmosphereBindGroupLayouts {
                         ),
                     ),
                     // Cirrus generating field (thin-layer shadow in the map's alpha).
-                    (49, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (
+                        49,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
                     (
                         13,
                         texture_storage_2d(
@@ -448,45 +503,62 @@ impl AtmosphereBindGroupLayouts {
         // Dedicated low-res cloud raymarch (`clouds_raymarch.wesl`).
         // Same bindings as `render_sky` (clouds variant, non-MSAA depth, no shadow maps) plus the
         // storage outputs at 26 (rgba16f luminance/transmittance) and 27 (r32f weighted depth).
-        let clouds_raymarch_layout = |label: &'static str, depth: BindGroupLayoutEntryBuilder| BindGroupLayoutDescriptor::new(
-            label,
-            &DynamicBindGroupLayoutEntries::new_with_indices(
-                ShaderStages::COMPUTE,
-                (
-                    (0, uniform_buffer::<GpuAtmosphere>(true)),
-                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                    (2, uniform_buffer::<AtmosphereTransform>(true)),
-                    (3, uniform_buffer::<ViewUniform>(true)),
-                    (4, uniform_buffer::<GpuLights>(true)),
-                    (5, texture_2d(TextureSampleType::default())),
-                    (6, texture_2d(TextureSampleType::default())),
-                    (7, sampler(SamplerBindingType::Filtering)),
-                    (8, texture_2d(TextureSampleType::default())),
-                    (9, texture_2d(TextureSampleType::default())),
-                    (10, texture_2d(TextureSampleType::default())),
-                    (11, texture_3d(TextureSampleType::default())),
-                    (12, sampler(SamplerBindingType::Filtering)),
-                    (13, depth),
-                ),
+        let clouds_raymarch_layout = |label: &'static str, depth: BindGroupLayoutEntryBuilder| {
+            BindGroupLayoutDescriptor::new(
+                label,
+                &DynamicBindGroupLayoutEntries::new_with_indices(
+                    ShaderStages::COMPUTE,
+                    (
+                        (0, uniform_buffer::<GpuAtmosphere>(true)),
+                        (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                        (2, uniform_buffer::<AtmosphereTransform>(true)),
+                        (3, uniform_buffer::<ViewUniform>(true)),
+                        (4, uniform_buffer::<GpuLights>(true)),
+                        (5, texture_2d(TextureSampleType::default())),
+                        (6, texture_2d(TextureSampleType::default())),
+                        (7, sampler(SamplerBindingType::Filtering)),
+                        (8, texture_2d(TextureSampleType::default())),
+                        (9, texture_2d(TextureSampleType::default())),
+                        (10, texture_2d(TextureSampleType::default())),
+                        (11, texture_3d(TextureSampleType::default())),
+                        (12, sampler(SamplerBindingType::Filtering)),
+                        (13, depth),
+                    ),
+                )
+                .extend_with_indices(cloud_layout_entries())
+                .extend_with_indices((
+                    (
+                        26,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                    (
+                        27,
+                        texture_storage_2d(
+                            TextureFormat::R32Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                    // Cloud signed-distance field (`cloud_field.wesl`).
+                    (
+                        44,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    // Escape probability of multiply scattered light (`cloud_field.wesl` escape).
+                    (
+                        48,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    // Cirrus generating field (`fbm_noise_3d.wesl` cirrus).
+                    (
+                        49,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
+                )),
             )
-            .extend_with_indices(cloud_layout_entries())
-            .extend_with_indices((
-                (
-                    26,
-                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
-                ),
-                (
-                    27,
-                    texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
-                ),
-                // Cloud signed-distance field (`cloud_field.wesl`).
-                (44, texture_3d(TextureSampleType::Float { filterable: true })),
-                // Escape probability of multiply scattered light (`cloud_field.wesl` escape).
-                (48, texture_3d(TextureSampleType::Float { filterable: true })),
-                // Cirrus generating field (`fbm_noise_3d.wesl` cirrus).
-                (49, texture_2d(TextureSampleType::Float { filterable: true })),
-            )),
-        );
+        };
         let clouds_raymarch = clouds_raymarch_layout(
             "clouds_raymarch_bind_group_layout",
             texture_2d(TextureSampleType::Depth),
@@ -506,18 +578,36 @@ impl AtmosphereBindGroupLayouts {
                     (0, uniform_buffer::<GpuAtmosphere>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
                     (12, sampler(SamplerBindingType::Filtering)),
-                    (26, texture_2d(TextureSampleType::Float { filterable: true })),
-                    (27, texture_2d(TextureSampleType::Float { filterable: false })),
-                    (28, texture_2d(TextureSampleType::Float { filterable: true })),
-                    (29, texture_2d(TextureSampleType::Float { filterable: false })),
+                    (
+                        26,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (
+                        27,
+                        texture_2d(TextureSampleType::Float { filterable: false }),
+                    ),
+                    (
+                        28,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (
+                        29,
+                        texture_2d(TextureSampleType::Float { filterable: false }),
+                    ),
                     (30, uniform_buffer::<CloudsTemporalParams>(false)),
                     (
                         31,
-                        texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
                     ),
                     (
                         32,
-                        texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
+                        texture_storage_2d(
+                            TextureFormat::R32Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
                     ),
                     // CLOUD_REFERENCE progressive accumulator (f32 sums + sample counts).
                     (33, storage_buffer_sized(false, None)),
@@ -543,10 +633,16 @@ impl AtmosphereBindGroupLayouts {
                 &BindGroupLayoutEntries::with_indices(
                     ShaderStages::COMPUTE,
                     (
-                        (41, texture_3d(TextureSampleType::Float { filterable: false })),
+                        (
+                            41,
+                            texture_3d(TextureSampleType::Float { filterable: false }),
+                        ),
                         (
                             42,
-                            texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
                         ),
                     ),
                 ),
@@ -556,10 +652,16 @@ impl AtmosphereBindGroupLayouts {
                 &BindGroupLayoutEntries::with_indices(
                     ShaderStages::COMPUTE,
                     (
-                        (41, texture_3d(TextureSampleType::Float { filterable: false })),
+                        (
+                            41,
+                            texture_3d(TextureSampleType::Float { filterable: false }),
+                        ),
                         (
                             43,
-                            texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
                         ),
                     ),
                 ),
@@ -569,10 +671,16 @@ impl AtmosphereBindGroupLayouts {
                 &BindGroupLayoutEntries::with_indices(
                     ShaderStages::COMPUTE,
                     (
-                        (47, texture_3d(TextureSampleType::Float { filterable: false })),
+                        (
+                            47,
+                            texture_3d(TextureSampleType::Float { filterable: false }),
+                        ),
                         (
                             46,
-                            texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
                         ),
                     ),
                 ),
@@ -583,8 +691,14 @@ impl AtmosphereBindGroupLayouts {
                     ShaderStages::COMPUTE,
                     (
                         texture_2d(TextureSampleType::Float { filterable: true }),
-                        texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
-                        texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
                         uniform_buffer_sized(false, None),
                     ),
                 ),
@@ -653,8 +767,9 @@ pub(super) fn prepare_clouds_temporal_params(
     for (entity, view, textures, cloud_layer, temporal_jitter, camera) in &views {
         let offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
         // Thin-layer pixels reproject with the lowest thin layer's motion.
-        let cirrus_offset =
-            cloud_layer.and_then(|c| c.lowest_thin()).map_or(Vec3::ZERO, |t| t.offset);
+        let cirrus_offset = cloud_layer
+            .and_then(|c| c.lowest_thin())
+            .map_or(Vec3::ZERO, |t| t.offset);
         let cirrus_min_radius = cloud_layer.map_or(0.0, |c| match c.lowest_thin() {
             Some(t) if c.cloud_density > 0.0 => 0.5 * (c.cloud_layer_end + t.mid_radius()),
             _ => 0.0,
@@ -663,7 +778,10 @@ pub(super) fn prepare_clouds_temporal_params(
         let clip_from_world = match temporal_jitter {
             Some(jitter) => {
                 let mut clip_from_view = view.clip_from_view;
-                jitter.jitter_projection(&mut clip_from_view, UVec2::new(view.viewport.z, view.viewport.w).as_vec2());
+                jitter.jitter_projection(
+                    &mut clip_from_view,
+                    UVec2::new(view.viewport.z, view.viewport.w).as_vec2(),
+                );
                 clip_from_view * view.world_from_view.to_matrix().inverse()
             }
             None => view.clip_from_world.unwrap_or_else(|| {
@@ -681,9 +799,13 @@ pub(super) fn prepare_clouds_temporal_params(
         );
         let (prev_clip_from_world, history_valid, prev_offset, prev_cirrus_offset, prev_exposure) =
             match previous.get(&view.retained_view_entity) {
-                Some(prev) if history_written => {
-                    (prev.clip_from_world, 1, prev.offset, prev.cirrus_offset, prev.exposure)
-                }
+                Some(prev) if history_written => (
+                    prev.clip_from_world,
+                    1,
+                    prev.offset,
+                    prev.cirrus_offset,
+                    prev.exposure,
+                ),
                 _ => (clip_from_world, 0, offset, cirrus_offset, exposure),
             };
         let motion = offset - prev_offset;
@@ -726,17 +848,32 @@ pub struct PreviousCloudFrame {
 /// frame's histories. Prepared targets are not necessarily written: `render_sky` skips views
 /// whose pipelines or cloud field are not ready (audit 5, 20).
 #[derive(Resource, Default)]
-pub struct CloudHistoryWrites(HashMap<RetainedViewEntity, (u32, Option<TextureId>, Option<TextureId>)>);
+pub struct CloudHistoryWrites(
+    HashMap<RetainedViewEntity, (u32, Option<TextureId>, Option<TextureId>)>,
+);
 
 impl CloudHistoryWrites {
     /// Records this frame's writes of a view: the cloud target if the reconstruction ran, the
     /// haze target if the haze prepass ran (or the view has none, so nothing reads its history).
-    pub fn record(&mut self, view: RetainedViewEntity, frame: u32, clouds: Option<TextureId>, haze: Option<TextureId>) {
-        self.0.retain(|_, (written, ..)| frame.wrapping_sub(*written) <= 1);
+    pub fn record(
+        &mut self,
+        view: RetainedViewEntity,
+        frame: u32,
+        clouds: Option<TextureId>,
+        haze: Option<TextureId>,
+    ) {
+        self.0
+            .retain(|_, (written, ..)| frame.wrapping_sub(*written) <= 1);
         self.0.insert(view, (frame, clouds, haze));
     }
 
-    fn wrote_last_frame(&self, view: RetainedViewEntity, frame: u32, clouds: TextureId, haze: TextureId) -> bool {
+    fn wrote_last_frame(
+        &self,
+        view: RetainedViewEntity,
+        frame: u32,
+        clouds: TextureId,
+        haze: TextureId,
+    ) -> bool {
         self.0.get(&view).is_some_and(|&(written, c, h)| {
             written == frame.wrapping_sub(1) && c == Some(clouds) && h == Some(haze)
         })
@@ -933,7 +1070,7 @@ impl FromWorld for AtmosphereLutPipelines {
                 label: Some("multi_scattering_lut_pipeline".into()),
                 layout: vec![layouts.multiscattering_lut.clone()],
                 shader: load_embedded_asset!(world, "multiscattering_lut.wesl"),
-            shader_defs: atm_dbg_defs(),
+                shader_defs: atm_dbg_defs(),
                 ..default()
             });
 
@@ -962,20 +1099,27 @@ impl FromWorld for AtmosphereLutPipelines {
                 "ATMOSPHERE_LUT_CLOUD_SHADOW".into(),
             ]
         };
-        let sky_view_lut_clouds = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("sky_view_lut_clouds_pipeline".into()),
-            layout: vec![layouts.sky_view_lut_clouds.clone()],
-            shader: load_embedded_asset!(world, "sky_view_lut.wesl"),
-            shader_defs: [atm_dbg_defs(), vec!["SKY_VIEW_LUT_PASS".into()], lut_cloud_defs()].concat(),
-            ..default()
-        });
-        let aerial_view_lut_clouds = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("aerial_view_lut_clouds_pipeline".into()),
-            layout: vec![layouts.aerial_view_lut_clouds.clone()],
-            shader: load_embedded_asset!(world, "aerial_view_lut.wesl"),
-            shader_defs: [atm_dbg_defs(), lut_cloud_defs()].concat(),
-            ..default()
-        });
+        let sky_view_lut_clouds =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("sky_view_lut_clouds_pipeline".into()),
+                layout: vec![layouts.sky_view_lut_clouds.clone()],
+                shader: load_embedded_asset!(world, "sky_view_lut.wesl"),
+                shader_defs: [
+                    atm_dbg_defs(),
+                    vec!["SKY_VIEW_LUT_PASS".into()],
+                    lut_cloud_defs(),
+                ]
+                .concat(),
+                ..default()
+            });
+        let aerial_view_lut_clouds =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("aerial_view_lut_clouds_pipeline".into()),
+                layout: vec![layouts.aerial_view_lut_clouds.clone()],
+                shader: load_embedded_asset!(world, "aerial_view_lut.wesl"),
+                shader_defs: [atm_dbg_defs(), lut_cloud_defs()].concat(),
+                ..default()
+            });
 
         let cloud_shadow_map = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_shadow_map_pipeline".into()),
@@ -1019,46 +1163,47 @@ impl FromWorld for AtmosphereLutPipelines {
             .collect(),
             ..default()
         });
-        let clouds_raymarch_msaa = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("clouds_raymarch_msaa_pipeline".into()),
-            layout: vec![layouts.clouds_raymarch_msaa.clone()],
-            shader: load_embedded_asset!(world, "clouds_raymarch.wesl"),
-            shader_defs: vec![
-                "CLOUDS_ENABLED".into(),
-                "CLOUD_SHADOW_SIMPLE_SAMPLING".into(),
-                "ATMOSPHERE_NO_SHADOW_MAPS".into(),
-                "CLOUD_FIELD_BOUND".into(),
-                "MULTISAMPLED_DEPTH".into(),
-            ]
-            .into_iter()
-            .chain(cloud_reference_def())
-            .chain(cloud_term_defs())
-            .chain(atm_dbg_defs())
-            .collect(),
-            ..default()
-        });
-
-        let clouds_reconstruct =
+        let clouds_raymarch_msaa =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("clouds_reconstruct_pipeline".into()),
-                layout: vec![layouts.clouds_reconstruct.clone()],
-                shader: load_embedded_asset!(world, "clouds_reconstruct.wesl"),
-                shader_defs: vec!["ATMOSPHERE_NO_SHADOW_MAPS".into()]
-                    .into_iter()
-                    .chain(cloud_reference_def())
-                    .collect(),
+                label: Some("clouds_raymarch_msaa_pipeline".into()),
+                layout: vec![layouts.clouds_raymarch_msaa.clone()],
+                shader: load_embedded_asset!(world, "clouds_raymarch.wesl"),
+                shader_defs: vec![
+                    "CLOUDS_ENABLED".into(),
+                    "CLOUD_SHADOW_SIMPLE_SAMPLING".into(),
+                    "ATMOSPHERE_NO_SHADOW_MAPS".into(),
+                    "CLOUD_FIELD_BOUND".into(),
+                    "MULTISAMPLED_DEPTH".into(),
+                ]
+                .into_iter()
+                .chain(cloud_reference_def())
+                .chain(cloud_term_defs())
+                .chain(atm_dbg_defs())
+                .collect(),
                 ..default()
             });
 
-        let field = |label: &'static str, layout: &BindGroupLayoutDescriptor, entry: &'static str| {
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some(label.into()),
-                layout: vec![layout.clone()],
-                shader: load_embedded_asset!(world, "cloud_field.wesl"),
-                entry_point: Some(entry.into()),
-                ..default()
-            })
-        };
+        let clouds_reconstruct = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("clouds_reconstruct_pipeline".into()),
+            layout: vec![layouts.clouds_reconstruct.clone()],
+            shader: load_embedded_asset!(world, "clouds_reconstruct.wesl"),
+            shader_defs: vec!["ATMOSPHERE_NO_SHADOW_MAPS".into()]
+                .into_iter()
+                .chain(cloud_reference_def())
+                .collect(),
+            ..default()
+        });
+
+        let field =
+            |label: &'static str, layout: &BindGroupLayoutDescriptor, entry: &'static str| {
+                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some(label.into()),
+                    layout: vec![layout.clone()],
+                    shader: load_embedded_asset!(world, "cloud_field.wesl"),
+                    entry_point: Some(entry.into()),
+                    ..default()
+                })
+            };
 
         Self {
             transmittance_lut,
@@ -1073,11 +1218,31 @@ impl FromWorld for AtmosphereLutPipelines {
             clouds_raymarch,
             clouds_raymarch_msaa,
             clouds_reconstruct,
-            cloud_field_init: field("cloud_field_init_pipeline", &layouts.cloud_shadow_map, "init"),
-            cloud_field_edt_x: field("cloud_field_edt_x_pipeline", &layouts.cloud_field_edt, "edt_x"),
-            cloud_field_edt_y: field("cloud_field_edt_y_pipeline", &layouts.cloud_field_edt, "edt_y"),
-            cloud_field_edt_z: field("cloud_field_edt_z_pipeline", &layouts.cloud_field_final, "edt_z"),
-            cloud_field_escape: field("cloud_field_escape_pipeline", &layouts.cloud_field_escape, "escape"),
+            cloud_field_init: field(
+                "cloud_field_init_pipeline",
+                &layouts.cloud_shadow_map,
+                "init",
+            ),
+            cloud_field_edt_x: field(
+                "cloud_field_edt_x_pipeline",
+                &layouts.cloud_field_edt,
+                "edt_x",
+            ),
+            cloud_field_edt_y: field(
+                "cloud_field_edt_y_pipeline",
+                &layouts.cloud_field_edt,
+                "edt_y",
+            ),
+            cloud_field_edt_z: field(
+                "cloud_field_edt_z_pipeline",
+                &layouts.cloud_field_final,
+                "edt_z",
+            ),
+            cloud_field_escape: field(
+                "cloud_field_escape_pipeline",
+                &layouts.cloud_field_escape,
+                "escape",
+            ),
             weather_window: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("weather_window_pipeline".into()),
                 layout: vec![layouts.weather_window.clone()],
@@ -1197,7 +1362,10 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
 }
 
 pub(super) fn queue_render_sky_pipelines(
-    views: Query<(Entity, &Msaa, Option<&GpuCloudLayers>), (With<Camera>, With<ExtractedAtmosphere>)>,
+    views: Query<
+        (Entity, &Msaa, Option<&GpuCloudLayers>),
+        (With<Camera>, With<ExtractedAtmosphere>),
+    >,
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<RenderSkyBindGroupLayouts>,
     mut specializer: ResMut<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>,
@@ -1229,7 +1397,9 @@ pub(super) fn queue_render_sky_pipelines(
                     haze_prepass: true,
                 },
             );
-            commands.entity(entity).insert(RenderSkyHazePipelineId(haze));
+            commands
+                .entity(entity)
+                .insert(RenderSkyHazePipelineId(haze));
         } else {
             commands.entity(entity).remove::<RenderSkyHazePipelineId>();
         }
@@ -1320,125 +1490,102 @@ pub(super) fn prepare_atmosphere_textures(
             }
         };
         let cloud_shadow_map_extent = cloud_extent(lut_settings.cloud_shadow_map_size.to_extents());
-        let transmittance_lut = textures.get(
-            TextureDescriptor {
-                label: Some("transmittance_lut"),
-                size: lut_settings.transmittance_lut_size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        );
+        let transmittance_lut = textures.get(TextureDescriptor {
+            label: Some("transmittance_lut"),
+            size: lut_settings.transmittance_lut_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
 
-        let multiscattering_lut = textures.get(
-            TextureDescriptor {
-                label: Some("multiscattering_lut"),
-                size: lut_settings.multiscattering_lut_size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        );
+        let multiscattering_lut = textures.get(TextureDescriptor {
+            label: Some("multiscattering_lut"),
+            size: lut_settings.multiscattering_lut_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
 
-        let sky_view_lut = textures.get(
-            TextureDescriptor {
-                label: Some("sky_view_lut"),
-                size: lut_settings.sky_view_lut_size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        );
+        let sky_view_lut = textures.get(TextureDescriptor {
+            label: Some("sky_view_lut"),
+            size: lut_settings.sky_view_lut_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
 
-        let aerial_view_lut = textures.get(
-            TextureDescriptor {
-                label: Some("aerial_view_lut"),
-                size: lut_settings.aerial_view_lut_size.to_extents(),
+        let aerial_view_lut = textures.get(TextureDescriptor {
+            label: Some("aerial_view_lut"),
+            size: lut_settings.aerial_view_lut_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D3,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let mut field_tex = |label: &'static str, format: TextureFormat| {
+            textures.get(TextureDescriptor {
+                label: Some(label),
+                size: cloud_extent(Extent3d {
+                    width: CLOUD_FIELD_RES_XY,
+                    height: CLOUD_FIELD_RES_XY,
+                    depth_or_array_layers: CLOUD_FIELD_RES_Z,
+                }),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D3,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
+                format,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
-            },
-        );
-
-        let mut field_tex = |label: &'static str, format: TextureFormat| {
-            textures.get(
-                TextureDescriptor {
-                    label: Some(label),
-                    size: cloud_extent(Extent3d {
-                        width: CLOUD_FIELD_RES_XY,
-                        height: CLOUD_FIELD_RES_XY,
-                        depth_or_array_layers: CLOUD_FIELD_RES_Z,
-                    }),
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: TextureDimension::D3,
-                    format,
-                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-            )
+            })
         };
         let cloud_field_a = field_tex("cloud_field_a", TextureFormat::Rgba16Float);
         let cloud_field_b = field_tex("cloud_field_b", TextureFormat::Rgba16Float);
         let cloud_field_sdf = field_tex("cloud_field_sdf", TextureFormat::Rgba16Float);
         let cloud_field_ext = field_tex("cloud_field_ext", TextureFormat::Rgba16Float);
         // Escape probability at half the horizontal resolution (`cloud_field.wesl` escape).
-        let cloud_field_esc = textures.get(
-            TextureDescriptor {
-                label: Some("cloud_field_esc"),
-                size: cloud_extent(Extent3d {
-                    width: CLOUD_FIELD_RES_XY / 2,
-                    height: CLOUD_FIELD_RES_XY / 2,
-                    depth_or_array_layers: CLOUD_FIELD_RES_Z,
-                }),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D3,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
+        let cloud_field_esc = textures.get(TextureDescriptor {
+            label: Some("cloud_field_esc"),
+            size: cloud_extent(Extent3d {
+                width: CLOUD_FIELD_RES_XY / 2,
+                height: CLOUD_FIELD_RES_XY / 2,
+                depth_or_array_layers: CLOUD_FIELD_RES_Z,
+            }),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D3,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
 
         let mut window = |label: &'static str| {
-            textures.get(
-                TextureDescriptor {
-                    label: Some(label),
-                    size: cloud_extent(Extent3d {
-                        width: WEATHER_WINDOW_SIZE,
-                        height: WEATHER_WINDOW_SIZE,
-                        depth_or_array_layers: 1,
-                    }),
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: TextureDimension::D2,
-                    format: TextureFormat::Rgba16Float,
-                    usage: TextureUsages::STORAGE_BINDING
-                        | TextureUsages::TEXTURE_BINDING
-                        | TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                },
-            )
-        };
-        let weather_window_art = window("weather_window_art");
-        let weather_window_physical = window("weather_window_physical");
-
-        let cloud_shadow_map = textures.get(
-            TextureDescriptor {
-                label: Some("cloud_shadow_map"),
-                size: cloud_shadow_map_extent,
+            textures.get(TextureDescriptor {
+                label: Some(label),
+                size: cloud_extent(Extent3d {
+                    width: WEATHER_WINDOW_SIZE,
+                    height: WEATHER_WINDOW_SIZE,
+                    depth_or_array_layers: 1,
+                }),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
@@ -1447,36 +1594,49 @@ pub(super) fn prepare_atmosphere_textures(
                     | TextureUsages::TEXTURE_BINDING
                     | TextureUsages::COPY_SRC,
                 view_formats: &[],
-            },
-        );
+            })
+        };
+        let weather_window_art = window("weather_window_art");
+        let weather_window_physical = window("weather_window_physical");
 
-        let cloud_shadow_map_tmp = textures.get(
-            TextureDescriptor {
-                label: Some("cloud_shadow_map_tmp"),
-                size: cloud_shadow_map_extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        );
+        let cloud_shadow_map = textures.get(TextureDescriptor {
+            label: Some("cloud_shadow_map"),
+            size: cloud_shadow_map_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
 
-        let cloud_shadow_map_history = textures.get(
-            TextureDescriptor {
-                label: Some("cloud_shadow_map_history"),
-                size: cloud_shadow_map_extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING
-                    | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-        );
+        let cloud_shadow_map_tmp = textures.get(TextureDescriptor {
+            label: Some("cloud_shadow_map_tmp"),
+            size: cloud_shadow_map_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let cloud_shadow_map_history = textures.get(TextureDescriptor {
+            label: Some("cloud_shadow_map_history"),
+            size: cloud_shadow_map_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
 
         // Half-resolution cloud raymarch targets (design.md §1.2).
         let full_size = camera
@@ -1494,13 +1654,15 @@ pub(super) fn prepare_atmosphere_textures(
                     sample_count: 1,
                     dimension: TextureDimension::D2,
                     format,
-                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | copy,
+                    usage: TextureUsages::STORAGE_BINDING
+                        | TextureUsages::TEXTURE_BINDING
+                        | TextureUsages::COPY_SRC
+                        | copy,
                     view_formats: &[],
                 }
             };
-        let mut get = |label, format, size, copy| {
-            textures.get(clouds_texture(label, format, size, copy))
-        };
+        let mut get =
+            |label, format, size, copy| textures.get(clouds_texture(label, format, size, copy));
         // Ping-pong reconstruction targets: distinct labels keep the cached textures stable
         // across frames, and the frame parity picks which one is written this frame.
         let none = TextureUsages::empty();
@@ -1508,23 +1670,47 @@ pub(super) fn prepare_atmosphere_textures(
         let clouds_b = get("clouds_b", TextureFormat::Rgba16Float, clouds_size, none);
         let clouds_depth_a = get("clouds_depth_a", TextureFormat::R32Float, clouds_size, none);
         let clouds_depth_b = get("clouds_depth_b", TextureFormat::R32Float, clouds_size, none);
-        let (clouds, clouds_history, clouds_depth, clouds_depth_history) =
-            if frame_count.0 % 2 == 0 {
-                (clouds_a, clouds_b, clouds_depth_a, clouds_depth_b)
-            } else {
-                (clouds_b, clouds_a, clouds_depth_b, clouds_depth_a)
-            };
+        let (clouds, clouds_history, clouds_depth, clouds_depth_history) = if frame_count.0 % 2 == 0
+        {
+            (clouds_a, clouds_b, clouds_depth_a, clouds_depth_b)
+        } else {
+            (clouds_b, clouds_a, clouds_depth_b, clouds_depth_a)
+        };
         let haze_usage = TextureUsages::RENDER_ATTACHMENT;
-        let haze_l_a = get("haze_inscattering_a", TextureFormat::Rgba16Float, clouds_size, haze_usage);
-        let haze_l_b = get("haze_inscattering_b", TextureFormat::Rgba16Float, clouds_size, haze_usage);
-        let haze_t_a = get("haze_transmittance_a", TextureFormat::Rgba16Float, clouds_size, haze_usage);
-        let haze_t_b = get("haze_transmittance_b", TextureFormat::Rgba16Float, clouds_size, haze_usage);
-        let (haze_inscattering, haze_history_inscattering, haze_transmittance, haze_history_transmittance) =
-            if frame_count.0 % 2 == 0 {
-                (haze_l_a, haze_l_b, haze_t_a, haze_t_b)
-            } else {
-                (haze_l_b, haze_l_a, haze_t_b, haze_t_a)
-            };
+        let haze_l_a = get(
+            "haze_inscattering_a",
+            TextureFormat::Rgba16Float,
+            clouds_size,
+            haze_usage,
+        );
+        let haze_l_b = get(
+            "haze_inscattering_b",
+            TextureFormat::Rgba16Float,
+            clouds_size,
+            haze_usage,
+        );
+        let haze_t_a = get(
+            "haze_transmittance_a",
+            TextureFormat::Rgba16Float,
+            clouds_size,
+            haze_usage,
+        );
+        let haze_t_b = get(
+            "haze_transmittance_b",
+            TextureFormat::Rgba16Float,
+            clouds_size,
+            haze_usage,
+        );
+        let (
+            haze_inscattering,
+            haze_history_inscattering,
+            haze_transmittance,
+            haze_history_transmittance,
+        ) = if frame_count.0 % 2 == 0 {
+            (haze_l_a, haze_l_b, haze_t_a, haze_t_b)
+        } else {
+            (haze_l_b, haze_l_a, haze_t_b, haze_t_a)
+        };
         let clouds_trace = get(
             "clouds_trace",
             TextureFormat::Rgba16Float,
@@ -1579,7 +1765,14 @@ pub struct ViewTextureStore {
 }
 
 /// The parts of a [`TextureDescriptor`] that require a new texture when they change.
-type TextureKey = (Extent3d, u32, u32, TextureDimension, TextureFormat, TextureUsages);
+type TextureKey = (
+    Extent3d,
+    u32,
+    u32,
+    TextureDimension,
+    TextureFormat,
+    TextureUsages,
+);
 
 impl ViewTextureStore {
     /// This view's texture with the descriptor's label, reallocated when the descriptor changes.
@@ -1598,7 +1791,10 @@ impl ViewTextureStore {
                 return texture.clone();
             }
         }
-        let device = self.device.as_ref().expect("ViewTextureStore without a device");
+        let device = self
+            .device
+            .as_ref()
+            .expect("ViewTextureStore without a device");
         let texture = device.create_texture(&descriptor);
         let default_view = texture.create_view(&TextureViewDescriptor::default());
         let cached = CachedTexture {
@@ -1798,7 +1994,11 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
-    directional_lights: Query<(Entity, &ExtractedDirectionalLight, &bevy_camera::visibility::RenderLayers)>,
+    directional_lights: Query<(
+        Entity,
+        &ExtractedDirectionalLight,
+        &bevy_camera::visibility::RenderLayers,
+    )>,
     mut states: bevy_ecs::system::Local<HashMap<RetainedViewEntity, CloudShadowTemporalState>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -1890,7 +2090,8 @@ fn cloud_shadow_temporal_params(
     };
     // Lowered to the cumulus tops when above them (`cloud_shadow_anchor_origin_at` in the
     // shaders).
-    let anchor = anchor.normalize_or_zero() * anchor.length().min(settings.cloud_shadow_anchor_max_radius);
+    let anchor =
+        anchor.normalize_or_zero() * anchor.length().min(settings.cloud_shadow_anchor_max_radius);
 
     let trace_dir = (-light_dir).normalize_or_zero();
     let world_up = Vec3::Y;
@@ -1927,7 +2128,9 @@ fn cloud_shadow_temporal_params(
         && temporal_state.history_texture == Some(history_texture);
 
     let cloud_offset = cloud_layer.map_or(Vec3::ZERO, |c| c.noise_offset);
-    let cirrus_offset = cloud_layer.and_then(|c| c.lowest_thin()).map_or(Vec3::ZERO, |t| t.offset);
+    let cirrus_offset = cloud_layer
+        .and_then(|c| c.lowest_thin())
+        .map_or(Vec3::ZERO, |t| t.offset);
     let (cloud_motion, cirrus_motion) = if history_valid {
         (
             cloud_offset - temporal_state.cloud_offset,
@@ -2383,25 +2586,28 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     )),
                 ))
             } else {
-                Some(render_device.create_bind_group(
-                    "render_sky_msaa_bind_group_clouds",
-                    &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky_msaa_clouds),
-                    &base_sky_entries().extend_with_indices((
-                        (20, cloud_layer_binding.clone()),
-                        (21, &fbm_noise_texture.texture.default_view),
-                        (22, &**cloud_noise_sampler),
-                        (23, &textures.cloud_shadow_map.default_view),
-                        (24, &perlin_worley_noise_texture.texture.default_view),
-                        (25, stbn_view.as_ref()),
-                        (33, &detail_noise_texture.texture.default_view),
-                        (34, &fbm_noise_texture.profile.default_view),
-                        (35, &fbm_noise_texture.scheme_noise.default_view),
-                        (36, &textures.weather_window_art.default_view),
-                        (37, &textures.weather_window_physical.default_view),
-                        (26, &textures.clouds.default_view),
-                        (27, &textures.clouds_depth.default_view),
-                    )),
-                ))
+                Some(
+                    render_device.create_bind_group(
+                        "render_sky_msaa_bind_group_clouds",
+                        &pipeline_cache
+                            .get_bind_group_layout(&render_sky_layouts.render_sky_msaa_clouds),
+                        &base_sky_entries().extend_with_indices((
+                            (20, cloud_layer_binding.clone()),
+                            (21, &fbm_noise_texture.texture.default_view),
+                            (22, &**cloud_noise_sampler),
+                            (23, &textures.cloud_shadow_map.default_view),
+                            (24, &perlin_worley_noise_texture.texture.default_view),
+                            (25, stbn_view.as_ref()),
+                            (33, &detail_noise_texture.texture.default_view),
+                            (34, &fbm_noise_texture.profile.default_view),
+                            (35, &fbm_noise_texture.scheme_noise.default_view),
+                            (36, &textures.weather_window_art.default_view),
+                            (37, &textures.weather_window_physical.default_view),
+                            (26, &textures.clouds.default_view),
+                            (27, &textures.clouds_depth.default_view),
+                        )),
+                    ),
+                )
             }
         });
         // The half-res haze prepass writes this frame's haze, so it reads the previous frame's
@@ -2511,8 +2717,16 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 )
             };
             [
-                edt("cloud_field_edt_x_bind_group", &textures.cloud_field_a.default_view, &textures.cloud_field_b.default_view),
-                edt("cloud_field_edt_y_bind_group", &textures.cloud_field_b.default_view, &textures.cloud_field_a.default_view),
+                edt(
+                    "cloud_field_edt_x_bind_group",
+                    &textures.cloud_field_a.default_view,
+                    &textures.cloud_field_b.default_view,
+                ),
+                edt(
+                    "cloud_field_edt_y_bind_group",
+                    &textures.cloud_field_b.default_view,
+                    &textures.cloud_field_a.default_view,
+                ),
                 render_device.create_bind_group(
                     "cloud_field_edt_z_bind_group",
                     &pipeline_cache.get_bind_group_layout(&layouts.cloud_field_final),
@@ -2644,7 +2858,6 @@ pub struct AtmosphereBuffer {
     pub(crate) buffer: StorageBuffer<AtmosphereData>,
 }
 
-
 pub(crate) fn prepare_atmosphere_buffers(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -2758,7 +2971,12 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.
 fn atm_dbg_defs() -> Vec<bevy_shader::ShaderDefVal> {
     std::env::var("ATMOSPHERE_DBG")
-        .map(|v| v.split(',').filter(|d| !d.is_empty()).map(|d| d.to_string().into()).collect())
+        .map(|v| {
+            v.split(',')
+                .filter(|d| !d.is_empty())
+                .map(|d| d.to_string().into())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -2822,7 +3040,9 @@ pub(super) fn prepare_cloud_reference_accumulators(
     if std::env::var_os("CLOUD_REFERENCE").is_none() {
         let buffer = placeholder.get_or_insert_with(|| create(32)).clone();
         for (entity, ..) in &views {
-            commands.entity(entity).insert(CloudReferenceAccumulator(buffer.clone()));
+            commands
+                .entity(entity)
+                .insert(CloudReferenceAccumulator(buffer.clone()));
         }
         return;
     }
@@ -2837,7 +3057,12 @@ pub(super) fn prepare_cloud_reference_accumulators(
         for f in light.transform.to_matrix().to_cols_array() {
             f.to_bits().hash(&mut h);
         }
-        for f in [light.color.red, light.color.green, light.color.blue, light.color.alpha] {
+        for f in [
+            light.color.red,
+            light.color.green,
+            light.color.blue,
+            light.color.alpha,
+        ] {
             f.to_bits().hash(&mut h);
         }
         light.illuminance.to_bits().hash(&mut h);
@@ -2875,7 +3100,11 @@ pub(super) fn prepare_cloud_reference_accumulators(
             Some((k, buffer)) if *k == key => buffer.clone(),
             _ => {
                 let buffer = create(bytes);
-                render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[frame_count.0, 0, 0, 0]));
+                render_queue.write_buffer(
+                    &buffer,
+                    0,
+                    bytemuck::cast_slice(&[frame_count.0, 0, 0, 0]),
+                );
                 super::debug_dump::note(&format!(
                     "reference accumulator (re)started at frame {} for view {:?}",
                     frame_count.0, view.retained_view_entity
@@ -2889,7 +3118,9 @@ pub(super) fn prepare_cloud_reference_accumulators(
                  (cirrus) is not in the reference image; compare without it"
             );
         }
-        commands.entity(entity).insert(CloudReferenceAccumulator(buffer.clone()));
+        commands
+            .entity(entity)
+            .insert(CloudReferenceAccumulator(buffer.clone()));
         seen.insert(view.retained_view_entity, (key, buffer));
     }
     *accumulators = seen;
