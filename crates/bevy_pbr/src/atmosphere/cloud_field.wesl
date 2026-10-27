@@ -7,9 +7,14 @@
 //          inside distance. edt_z writes the final signed distance in metres (negative inside).
 //   escape: per-voxel escape probability of multiply scattered light (Hillaire 2020 f_ms with the
 //          similarity-reduced optical depth, see `escape`), from the extinction written by init.
+//   diffusion_source / sor_red / sor_black / diffusion_publish: the diffuse (multiply scattered)
+//          sunlight of the cloud field from a delta-Eddington diffusion solve (see `sor`).
 
-import package::atmosphere::bindings::{atmosphere, view};
+import package::atmosphere::bindings::{atmosphere, view, lights, settings, cloud_shadow_map, cloud_field_sdf};
 import package::atmosphere::functions::CLOUD_MIE_MEAN_COS;
+// The diffusion source's sun optical depth (its pipelines alone set CLOUDS_ENABLED).
+@if(CLOUDS_ENABLED)
+import package::atmosphere::functions::{cloud_shadow_frame, cloud_shadow_transmittance, cloud_thin_shadow_weight};
 import package::atmosphere::clouds::{
     cloud_layer,
     get_cloud_medium_density_coarse,
@@ -21,6 +26,7 @@ import package::atmosphere::clouds::{
     cloud_field_voxel_m,
     CLOUD_FIELD_RES_XY,
     CLOUD_FIELD_RES_Z,
+    cloud_shadow_xy_to_uv,
 };
 
 @group(0) @binding(40) var out_field_init: texture_storage_3d<rgba16float, write>;
@@ -222,4 +228,212 @@ fn edt_z(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: 
     let d_in = min(sqrt(v.y), f32(WIN_XY));
     let sdf = select(d_out - half, half - d_in, v.x == 0.0) * vox;
     textureStore(out_field_sdf, q, vec4(sdf, column_od, line_cell[0], line_cell[1]));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Diffuse sunlight: the delta-Eddington diffusion equation on the field's cells (Joseph, Wiscombe &
+// Weinman 1976: forward peak g^2 left in the direct beam, sigma' = (1 - g^2) sigma, g' = g / (1 + g)),
+// for U = 4 pi J_diff per unit sun irradiance (the cloud pass's multiple-scattering source is
+// E U / (4 pi) per unit sigma_s):
+//     -div(D grad U) = (1 + g') sigma' T'_sun,   D = 1 / (3 sigma'),
+// with T'_sun the delta-scaled transmittance toward the sun through the field, solved on the cloud
+// cells (sigma > DIFF_SIGMA_MIN) with the Marshak condition at every face to clear air or the grid
+// edge (no diffuse light entering: net outward flux U / 2). The diffuse light at a point depends
+// on the whole cloud around it (it peaks inside the sunlit side and falls toward the far side),
+// which no local estimate reproduces: against a 3D Monte Carlo of the IPRT C2 cube (Emde et al.
+// 2019) the solve gives 0.82 x the MC field at 100 m cells, 0.65-0.69 x on this grid, where the
+// escape series gives 0.44 x (.clouds-handoff/validation/iprt_c2/c2_field.py, c2_sor.py).
+// Red-black successive over-relaxation in place, warm-started from the previous frame: 32
+// iterations converge from zero (0.3 %), 1-2 track a sun moved by 2 degrees.
+@group(0) @binding(55) var diff_src: texture_storage_3d<r32float, read_write>;
+@group(0) @binding(56) var diff_u: texture_storage_3d<r32float, read_write>;
+@group(0) @binding(57) var out_field_diff: texture_storage_3d<rgba16float, write>;
+
+const DIFF_SIGMA_MIN: f32 = 1e-4;
+const DIFF_OMEGA: f32 = 1.85;
+const DIFF_SUN_STEPS: u32 = 16u;
+
+fn diff_g() -> vec2<f32> {
+    let g = CLOUD_MIE_MEAN_COS;
+    return vec2(1.0 - g * g, g / (1.0 + g));
+}
+
+fn field_in_range(id: vec3<i32>) -> bool {
+    return all(id >= vec3(0)) && all(id < vec3(i32(CLOUD_FIELD_RES_XY), i32(CLOUD_FIELD_RES_XY), i32(CLOUD_FIELD_RES_Z)));
+}
+
+/// Optical depth toward the first directional light from p, past the field's own march, from the
+/// cloud shadow map (one texel: the field's cells are coarser than its texels), including the thin
+/// layers above p; 0 off the map. Only beyond the march: inside a cloud the map's front depth and
+/// mean extinction give 5-10x too little optical depth (hero/backlit views against the light
+/// taps, ATM_DBG_OUT_SUN_TAU), as for the cloud pass's own lookup past its light taps.
+@if(CLOUDS_ENABLED)
+fn diffusion_sun_tau_beyond(p: vec3<f32>, l: vec3<f32>) -> f32 {
+    let frame = cloud_shadow_frame(l);
+    let extent = settings.cloud_shadow_map_extent;
+    let rel = p - frame.anchor;
+    let xy = vec2(dot(rel, frame.bx), dot(rel, frame.by));
+    if (!frame.mapped || extent <= 0.0 || any(abs(xy) > vec2(extent))) {
+        return 0.0;
+    }
+    let d_sample = dot(rel, normalize(-l)) + 2.0 * extent;
+    let size = vec2<i32>(textureDimensions(cloud_shadow_map));
+    let texel = clamp(vec2<i32>(cloud_shadow_xy_to_uv(xy, extent) * vec2<f32>(size)), vec2(0), size - 1);
+    let q = textureLoad(cloud_shadow_map, texel, 0);
+    let t = cloud_shadow_transmittance(q.rgb, d_sample) * exp(-cloud_thin_shadow_weight(p) * q.a);
+    return -log(max(t, 1e-6));
+}
+
+/// Source of one cell: (1 + g') sigma' T'_sun, the sun's optical depth marched toward the first
+/// directional light through the field's extinction (16 steps growing from 40 m, ~14 km) and the
+/// shadow map beyond the march's end (clouds past the grid, the thin layers).
+@if(CLOUDS_ENABLED)
+fn diffusion_source_cell(id: vec3<u32>) {
+    if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
+        return;
+    }
+    let e = textureLoad(in_field_ext, id, 0);
+    let gg = diff_g();
+    var src = 0.0;
+    if (e.r > DIFF_SIGMA_MIN && lights.n_directional_lights > 0u) {
+        let l = lights.directional_lights[0].direction_to_light;
+        let vox = cloud_field_voxel_m();
+        // Grid space (voxels): x, y horizontal (atmosphere xz), z vertical.
+        let dir = vec3(l.x / vox, l.z / vox, l.y / max(e.g, 1e-3));
+        let res = vec3(f32(CLOUD_FIELD_RES_XY), f32(CLOUD_FIELD_RES_XY), f32(CLOUD_FIELD_RES_Z));
+        let centre = vec3<f32>(id) + 0.5;
+        var tau = 0.0;
+        var t = 0.0;
+        var dt = ESC_STEP0_M;
+        for (var s = 0u; s < DIFF_SUN_STEPS; s++) {
+            let q = centre + dir * (t + 0.5 * dt);
+            if (any(q < vec3(0.0)) || any(q >= res)) { break; }
+            tau += textureLoad(in_field_ext, vec3<i32>(q), 0).r * dt;
+            t += dt;
+            dt *= ESC_STEP_GROWTH;
+        }
+        // The cell centre in atmosphere space (as `init`, with the extinction's own build cell).
+        let xz = cloud_field_origin_from_cell(e.ba) + (vec2<f32>(id.xy) + 0.5) * vox;
+        let r = cloud_layer.cloud_layer_start + (f32(id.z) + 0.5) * e.g;
+        let p = vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y);
+        tau += diffusion_sun_tau_beyond(p + l * t, l);
+        src = (1.0 + gg.y) * gg.x * e.r * exp(-gg.x * tau);
+    }
+    textureStore(diff_src, id, vec4(src));
+}
+
+/// The source of every cell (a full build).
+@if(CLOUDS_ENABLED)
+@compute @workgroup_size(4, 4, 4)
+fn diffusion_source(@builtin(global_invocation_id) id: vec3<u32>) {
+    diffusion_source_cell(id);
+}
+
+/// The source of one cell in every 2 x 2 x 2 block (the frame's corner, frame mod 8), dispatched
+/// over an eighth of the cells: each frame refreshes 1/8 of the cells spread over the whole field
+/// (layers instead put the cloudy middle of the layer in two frames: 0.13-0.57 ms), all of them
+/// every 8 frames (the field's own rebuild cadence).
+@if(CLOUDS_ENABLED)
+@compute @workgroup_size(4, 4, 4)
+fn diffusion_source_slice(@builtin(global_invocation_id) id: vec3<u32>) {
+    let k = view.frame_count % 8u;
+    diffusion_source_cell(2u * id + vec3(k & 1u, (k >> 1u) & 1u, k >> 2u));
+}
+
+/// One colour of a red-black sweep, dispatched over half the cells in x: cell x = 2 i + the
+/// parity of (y + z + colour), so every invocation updates a cell of that colour.
+fn sor(half_id: vec3<u32>, parity: u32) {
+    let id = vec3(2u * half_id.x + ((half_id.y + half_id.z + parity) & 1u), half_id.y, half_id.z);
+    if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
+        return;
+    }
+    let e = textureLoad(in_field_ext, id, 0);
+    if (e.r <= DIFF_SIGMA_MIN) {
+        textureStore(diff_u, id, vec4(0.0));
+        return;
+    }
+    let gg = diff_g();
+    let d = 1.0 / (3.0 * gg.x * e.r);
+    let vox = cloud_field_voxel_m();
+    let hz = max(e.g, 1e-3);
+    let c = vec3<i32>(id);
+    var sum = 0.0;
+    var diag = 0.0;
+    for (var k = 0; k < 6; k++) {
+        let axis = k / 2;
+        var o = vec3(0);
+        o[axis] = select(-1, 1, (k & 1) == 1);
+        let h = select(vox, hz, axis == 2);
+        let n = c + o;
+        var dn = 0.0;
+        if (field_in_range(n)) {
+            let sn = textureLoad(in_field_ext, n, 0).r;
+            if (sn > DIFF_SIGMA_MIN) {
+                dn = 1.0 / (3.0 * gg.x * sn);
+            }
+        }
+        if (dn > 0.0) {
+            let cond = 2.0 * d * dn / (d + dn) / (h * h);
+            sum += cond * textureLoad(diff_u, n).r;
+            diag += cond;
+        } else {
+            diag += 1.0 / (h * (h / (2.0 * d) + 2.0));
+        }
+    }
+    let u = textureLoad(diff_u, c).r;
+    let new_u = (textureLoad(diff_src, c).r + sum) / max(diag, 1e-30);
+    textureStore(diff_u, c, vec4(max(mix(u, new_u, DIFF_OMEGA), 0.0)));
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn sor_red(@builtin(global_invocation_id) id: vec3<u32>) {
+    sor(id, 0u);
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn sor_black(@builtin(global_invocation_id) id: vec3<u32>) {
+    sor(id, 1u);
+}
+
+/// Copies the solution into the filterable volume the cloud pass samples (r: U per unit sun
+/// irradiance, gb: build cell); `diffusion_reset` restarts the solve from zero.
+@compute @workgroup_size(4, 4, 4)
+fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
+        return;
+    }
+    // g, b: the build cell of the extinction the solve used (cloud_field_uvw), so the cloud pass
+    // maps positions with the solution's own cell while the SDF of a new build is pending.
+    let e = textureLoad(in_field_ext, id, 0);
+    var u = textureLoad(diff_u, id).r;
+    // Clear cells next to cloud take the mean of their cloud neighbours: the camera sees the
+    // outer tens of metres of a cloud, within a cell of clear air, and trilinear filtering
+    // against a stored 0 halved the diffuse light at every surface. Cells far from cloud (the
+    // field's distance, more than two cells) skip the neighbourhood.
+    let far = textureLoad(cloud_field_sdf, id, 0).r > 2.0 * cloud_field_voxel_m();
+    if (e.r <= DIFF_SIGMA_MIN && far) {
+        u = 0.0;
+    } else if (e.r <= DIFF_SIGMA_MIN) {
+        var sum = 0.0;
+        var n = 0.0;
+        for (var k = 0; k < 6; k++) {
+            var o = vec3(0);
+            o[k / 2] = select(-1, 1, (k & 1) == 1);
+            let q = vec3<i32>(id) + o;
+            if (field_in_range(q) && textureLoad(in_field_ext, q, 0).r > DIFF_SIGMA_MIN) {
+                sum += textureLoad(diff_u, q).r;
+                n += 1.0;
+            }
+        }
+        u = select(0.0, sum / max(n, 1.0), n > 0.0);
+    }
+    textureStore(out_field_diff, id, vec4(u, e.ba, 0.0));
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn diffusion_reset(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
+        return;
+    }
+    textureStore(diff_u, id, vec4(0.0));
 }

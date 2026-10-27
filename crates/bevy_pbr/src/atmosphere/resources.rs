@@ -220,6 +220,8 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_field_escape: BindGroupLayoutDescriptor,
     /// Weather window compose pass (`weather_window.wesl`).
     pub weather_window: BindGroupLayoutDescriptor,
+    /// Diffusion solve of the cloud field (`cloud_field.wesl` diffusion_*, sor_*).
+    pub cloud_field_diffusion: BindGroupLayoutDescriptor,
 }
 
 #[derive(Resource)]
@@ -556,6 +558,11 @@ impl AtmosphereBindGroupLayouts {
                         49,
                         texture_2d(TextureSampleType::Float { filterable: true }),
                     ),
+                    // Diffuse sunlight of the cloud field (`cloud_field.wesl` diffusion solve).
+                    (
+                        59,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
                 )),
             )
         };
@@ -677,6 +684,52 @@ impl AtmosphereBindGroupLayouts {
                         ),
                         (
                             46,
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            cloud_field_diffusion: BindGroupLayoutDescriptor::new(
+                "cloud_field_diffusion_bind_group_layout",
+                &BindGroupLayoutEntries::with_indices(
+                    ShaderStages::COMPUTE,
+                    (
+                        (0, uniform_buffer::<GpuAtmosphere>(true)),
+                        (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                        (3, uniform_buffer::<ViewUniform>(true)),
+                        (4, uniform_buffer::<GpuLights>(true)),
+                        (20, uniform_buffer::<GpuCloudLayers>(true)),
+                        (
+                            23,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            44,
+                            texture_3d(TextureSampleType::Float { filterable: false }),
+                        ),
+                        (
+                            47,
+                            texture_3d(TextureSampleType::Float { filterable: false }),
+                        ),
+                        (
+                            55,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                        (
+                            56,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                        (
+                            57,
                             texture_storage_3d(
                                 TextureFormat::Rgba16Float,
                                 StorageTextureAccess::WriteOnly,
@@ -1050,6 +1103,8 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_field_edt_z: CachedComputePipelineId,
     pub cloud_field_escape: CachedComputePipelineId,
     pub weather_window: CachedComputePipelineId,
+    /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
+    pub cloud_field_diffusion: [CachedComputePipelineId; 6],
 }
 
 impl FromWorld for AtmosphereLutPipelines {
@@ -1243,6 +1298,25 @@ impl FromWorld for AtmosphereLutPipelines {
                 &layouts.cloud_field_escape,
                 "escape",
             ),
+            // The source reads the cloud shadow map (`functions.wesl` under CLOUDS_ENABLED).
+            cloud_field_diffusion: [
+                "diffusion_source",
+                "sor_red",
+                "sor_black",
+                "diffusion_publish",
+                "diffusion_reset",
+                "diffusion_source_slice",
+            ]
+            .map(|entry| {
+                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some(entry.into()),
+                    layout: vec![layouts.cloud_field_diffusion.clone()],
+                    shader: load_embedded_asset!(world, "cloud_field.wesl"),
+                    shader_defs: [atm_dbg_defs(), vec!["CLOUDS_ENABLED".into()]].concat(),
+                    entry_point: Some(entry.into()),
+                    ..default()
+                })
+            }),
             weather_window: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("weather_window_pipeline".into()),
                 layout: vec![layouts.weather_window.clone()],
@@ -1446,6 +1520,11 @@ pub struct AtmosphereTextures {
     /// map's), B the physical channels. [`WEATHER_WINDOW_SIZE`]^2, recomposed every frame.
     pub weather_window_art: CachedTexture,
     pub weather_window_physical: CachedTexture,
+    /// Diffusion solve of the cloud field (`cloud_field.wesl`): source and solution (R32Float,
+    /// read-write) and the published, filterable solution the cloud pass samples.
+    pub cloud_field_diff_src: CachedTexture,
+    pub cloud_field_diff_u: CachedTexture,
+    pub cloud_field_diff: CachedTexture,
 }
 
 pub(super) fn prepare_atmosphere_textures(
@@ -1578,6 +1657,40 @@ pub(super) fn prepare_atmosphere_textures(
             view_formats: &[],
         });
 
+        let mut field_volume =
+            |label: &'static str, format: TextureFormat, usage: TextureUsages| {
+                textures.get(TextureDescriptor {
+                    label: Some(label),
+                    size: cloud_extent(Extent3d {
+                        width: CLOUD_FIELD_RES_XY,
+                        height: CLOUD_FIELD_RES_XY,
+                        depth_or_array_layers: CLOUD_FIELD_RES_Z,
+                    }),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D3,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+        let cloud_field_diff_src = field_volume(
+            "cloud_field_diff_src",
+            TextureFormat::R32Float,
+            TextureUsages::STORAGE_BINDING,
+        );
+        let cloud_field_diff_u = field_volume(
+            "cloud_field_diff_u",
+            TextureFormat::R32Float,
+            TextureUsages::STORAGE_BINDING,
+        );
+        let cloud_field_diff = field_volume(
+            "cloud_field_diff",
+            TextureFormat::Rgba16Float,
+            TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+        );
         let mut window = |label: &'static str| {
             textures.get(TextureDescriptor {
                 label: Some(label),
@@ -1750,6 +1863,9 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_esc,
                 weather_window_art,
                 weather_window_physical,
+                cloud_field_diff_src,
+                cloud_field_diff_u,
+                cloud_field_diff,
             }
         });
         seen.insert(view.retained_view_entity, textures);
@@ -1963,6 +2079,8 @@ pub(crate) struct AtmosphereBindGroups {
     /// Cloud SDF passes: x (a->b), y (b->a), z (a->sdf).
     /// edt_x, edt_y, edt_z, escape.
     pub cloud_field_edt: Option<[BindGroup; 4]>,
+    /// Diffusion solve (`cloud_field.wesl`), dynamic offsets: atmosphere, lights.
+    pub cloud_field_diffusion: Option<BindGroup>,
 }
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
@@ -2680,6 +2798,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (44, &textures.cloud_field_sdf.default_view),
                         (48, &textures.cloud_field_esc.default_view),
                         (49, &fbm_noise_texture.cirrus.default_view),
+                        (59, &textures.cloud_field_diff.default_view),
                     )),
                 )
             });
@@ -2745,6 +2864,29 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 ),
             ]
         });
+
+        let cloud_field_diffusion = cloud_shadow_map
+            .as_ref()
+            .zip(cloud_layer_binding.clone())
+            .map(|(_, cloud_layer_binding)| {
+                render_device.create_bind_group(
+                    "cloud_field_diffusion_bind_group",
+                    &pipeline_cache.get_bind_group_layout(&layouts.cloud_field_diffusion),
+                    &BindGroupEntries::with_indices((
+                        (0, atmosphere_binding.clone()),
+                        (1, settings_binding.clone()),
+                        (3, view_binding.clone()),
+                        (4, lights_binding.clone()),
+                        (20, cloud_layer_binding),
+                        (23, &textures.cloud_shadow_map.default_view),
+                        (44, &textures.cloud_field_sdf.default_view),
+                        (47, &textures.cloud_field_ext.default_view),
+                        (55, &textures.cloud_field_diff_src.default_view),
+                        (56, &textures.cloud_field_diff_u.default_view),
+                        (57, &textures.cloud_field_diff.default_view),
+                    )),
+                )
+            });
 
         let sky_view_lut_clouds = cloud_layer_binding
             .as_ref()
@@ -2840,6 +2982,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             clouds_raymarch_multisampled: *msaa != Msaa::Off,
             clouds_reconstruct,
             cloud_field_edt,
+            cloud_field_diffusion,
         });
     }
 
@@ -2960,9 +3103,13 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   audit 24).
 /// - `ATM_DBG_MS_DIFFUSION`: add the delta-Eddington vertical-slab diffusion term to the multiple
 ///   scattering in thick cloud (experiment: shaded sides right, lit sides still short).
+/// - `ATM_DBG_MS_SERIES_ONLY`: the escape series alone for multiple scattering (without the cloud
+///   field's diffusion solve).
 /// - `ATM_DBG_LIGHT_BRUTE`: a dense uniform light march (256 x 30 m) instead of the growing taps.
-/// - `ATM_DBG_OUT_SUN_OD`: write (local sun optical depth, far-map transmittance, the cloud field's
-///   escape probability, density) at each pixel's first in-cloud sample instead of cloud colour.
+/// - `ATM_DBG_OUT_SUN_OD`: write (local sun optical depth, the cloud field's diffusion solution,
+///   its escape probability, density) at each pixel's first in-cloud sample instead of cloud colour.
+/// - `ATM_DBG_OUT_SUN_TAU`: write (sun optical depth of the light taps plus the map beyond, the
+///   cloud shadow map's alone at the sample, the diffusion solution, density) there instead.
 /// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the
 ///   tracer's bounce (r), flight segment (g) and sun-ray (b) budgets, and that continued past a
 ///   segment's null-collision budget (a, exact).

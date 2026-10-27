@@ -439,6 +439,62 @@ pub fn atmosphere_luts(
                     _ => pass.dispatch_workgroups(n_xy / 8, n_xy / 8, n_z.div_ceil(4)),
                 }
             }
+            // Diffuse sunlight (`cloud_field.wesl` diffusion solve). Not precomputable (the field
+            // and the sun move), but both change slowly: per frame the source of 1/8 of the cells
+            // (every cell over the field's 8-frame rebuild), one red-black SOR iteration
+            // warm-started from the previous frame's solution, and the publish; on a full build
+            // the whole source and 32 iterations from zero.
+            let diffusion = pipelines
+                .cloud_field_diffusion
+                .map(|id| pipeline_cache.get_compute_pipeline(id));
+            if let (
+                Some(bg),
+                [Some(source), Some(red), Some(black), Some(publish), Some(reset), Some(source_slice)],
+            ) = (bind_groups.cloud_field_diffusion.as_ref(), diffusion)
+            {
+                let g = UVec3::new(
+                    super::resources::CLOUD_FIELD_RES_XY.div_ceil(4),
+                    super::resources::CLOUD_FIELD_RES_XY.div_ceil(4),
+                    super::resources::CLOUD_FIELD_RES_Z.div_ceil(4),
+                );
+                let offsets = [
+                    atmosphere_uniforms_offset.index(),
+                    settings_uniforms_offset.index(),
+                    view_uniforms_offset.offset,
+                    lights_uniforms_offset.offset,
+                    cloud_layer_uniforms_offset.index(),
+                ];
+                // One pass: wgpu orders the dispatches (storage read-write between them).
+                let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_diffusion"),
+                    timestamp_writes: super::gpu_timing::compute(&timing_device, "cloud_diffusion"),
+                });
+                pass.set_bind_group(0, bg, &offsets);
+                // SOR colours index half the cells in x, the source slice an eighth of the cells.
+                let mut dispatch = |p: &bevy_render::render_resource::ComputePipeline,
+                                    gx: u32,
+                                    gy: u32,
+                                    gz: u32| {
+                    pass.set_pipeline(p);
+                    pass.dispatch_workgroups(gx, gy, gz);
+                };
+                if full_build {
+                    dispatch(reset, g.x, g.y, g.z);
+                    dispatch(source, g.x, g.y, g.z);
+                } else {
+                    dispatch(
+                        source_slice,
+                        g.x.div_ceil(2),
+                        g.y.div_ceil(2),
+                        g.z.div_ceil(2),
+                    );
+                }
+                for _ in 0..if full_build { 32 } else { 1 } {
+                    dispatch(red, g.x.div_ceil(2), g.y, g.z);
+                    dispatch(black, g.x.div_ceil(2), g.y, g.z);
+                }
+                dispatch(publish, g.x, g.y, g.z);
+            }
         }
     }
 

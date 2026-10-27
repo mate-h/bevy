@@ -45,6 +45,18 @@ const CLOUD_SDF_SKIP_MARGIN_VOXELS: f32 = 2.5;
 // Escape probability of multiply scattered light (r) and the vertical optical depths to the
 // layer top (g) and bottom (b) (cloud_field.wesl `escape`; cell from cloud_field_sdf).
 @group(0) @binding(48) var cloud_field_esc: texture_3d<f32>;
+// Diffuse sunlight of the cloud field per unit sun irradiance, U = 4 pi J_diff / E (r), and its
+// build cell (gb) (cloud_field.wesl diffusion solve).
+@group(0) @binding(59) var cloud_field_diff: texture_3d<f32>;
+
+/// The cloud field's diffusion solution at p (0 outside the grid).
+fn cloud_field_diffuse(p: vec3<f32>) -> f32 {
+    let uvw = cloud_field_uvw(p, textureLoad(cloud_field_diff, vec3(0), 0).gb);
+    if (any(uvw.xy < vec2(0.0)) || any(uvw.xy > vec2(1.0))) {
+        return 0.0;
+    }
+    return textureSampleLevel(cloud_field_diff, atmosphere_lut_sampler, saturate(uvw), 0.0).r;
+}
 /// Second exponential integral E2(x) = int_1^inf exp(-x t) / t^2 dt (the hemispheric escape of a
 /// slab of optical depth x). Rational fit exp(-x) (x^2 + a x + b) / (x^3 + c x^2 + d x + b),
 /// E2(0) = 1, max relative error 0.64 % on [0, 40] (least squares against scipy.special.expn).
@@ -822,8 +834,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // Optical depth along the view ray since it entered the current cloud (reset on empty
         // samples): the view-side half of the local escape estimate below.
         var view_od_in_cloud = 0.0;
-        // ATM_DBG_OUT_SUN_OD: (sun optical depth local, far-map transmittance, the cloud field's
-        // escape probability, density) at the first in-cloud sample.
+        // ATM_DBG_OUT_SUN_OD: (sun optical depth local, the field's diffusion solution, the
+        // field's escape probability, density) at the first in-cloud sample.
         var dbg_sun = vec4(-1.0);
         var depth_weight_sum = 0.0;
         var depth_sum = 0.0;
@@ -1002,7 +1014,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 @if(ATM_DBG_NO_FAR_SHADOW) { t_far = 1.0; }
                 let t_local = exp(-light_optical_depth);
                 @if(ATM_DBG_OUT_SUN_OD) {
-                    if (dbg_sun.x < 0.0) { dbg_sun = vec4(light_optical_depth, t_far, esc_col.x, density); }
+                    if (dbg_sun.x < 0.0) { dbg_sun = vec4(light_optical_depth, cloud_field_diffuse(p), esc_col.x, density); }
+                }
+                // ATM_DBG_OUT_SUN_TAU: (sun optical depth, local march + map beyond; the map alone
+                // at p; the field's diffusion solution; density) at the first in-cloud sample.
+                @if(ATM_DBG_OUT_SUN_TAU) {
+                    if (dbg_sun.x < 0.0) {
+                        dbg_sun = vec4(light_optical_depth - log(max(t_far, 1e-6)), -log(max(sample_cloud_shadow_map(p, l, false), 1e-6)), cloud_field_diffuse(p), density);
+                    }
                 }
                 let t_cloud = t_far * t_local;
                 let cos_theta = dot(l, ray_dir);
@@ -1052,13 +1071,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     // columns to the layer top and bottom), lit by the sunlight that reaches the
                     // column (the far shadow map), takes over where it is larger
                     // (ATM_DBG_MS_DIFFUSION).
-                    // Off by default until the lit faces get their diffuse light too (the vertical
-                    // slab lights only the layer top: lit sides stay ~35 % short and the clouds
-                    // lose form; .clouds-handoff/notes/lighting_ms_deficit.md).
-                    var diffusion_on = false;
-                    @if(ATM_DBG_MS_DIFFUSION) { diffusion_on = mu_light > 0.0; }
-                    if (diffusion_on) {
-                        ms_vol = max(ms_vol, t_far * cloud_diffuse_sun(esc_col.y, esc_col.z, max(mu_light, 0.05)));
+                    // The cloud field's 3D diffusion solve (cloud_field.wesl): the diffuse light of
+                    // the whole cloud around p, lit by the first directional light. The escape
+                    // series stays where it is larger (thin cloud, beyond the grid).
+                    var field_on = light_i == 0u;
+                    @if(ATM_DBG_MS_SERIES_ONLY) { field_on = false; }
+                    if (field_on) {
+                        ms_vol = max(ms_vol, cloud_field_diffuse(p));
+                    }
+                    // Experiment: the vertical-slab solution (lights only the layer top).
+                    @if(ATM_DBG_MS_DIFFUSION) {
+                        if (mu_light > 0.0) {
+                            ms_vol = max(ms_vol, t_far * cloud_diffuse_sun(esc_col.y, esc_col.z, max(mu_light, 0.05)));
+                        }
                     }
                     direct += ms_vol * (0.25 / PI);
                 }
@@ -1112,6 +1137,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         }
         result = vec4(lum * view.exposure, transmittance);
         @if(ATM_DBG_OUT_SUN_OD) { result = dbg_sun; }
+        @if(ATM_DBG_OUT_SUN_TAU) { result = dbg_sun; }
         @if(ATM_DBG_OUT_H) {
             let ph = ray_origin + ray_dir * weighted_depth;
             let ch = cloud_density_context(length(ph), ph);
