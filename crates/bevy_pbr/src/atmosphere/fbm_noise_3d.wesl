@@ -39,9 +39,19 @@ fn weather_generation(uv: vec2<f32>) -> f32 {
     return perlin_fbm_tiled(uv + warp * 0.03, 8, 4);
 }
 
-/// Cloud type varies smoothly over ~8 km.
+/// Cloud type (with the physical profiles, the air mass): one gradient-noise octave with 16 km
+/// cells (2 per 32 km tile), linear in [0.4, 1]. An air mass carries its own cloud base (the
+/// profile row's lifting condensation level, 0.56 km marine .. 1.68 km continental), so the type
+/// gradient is a slope of the cloud base. The shear lean (`clouds.wesl` cloud_sample_pos) moves
+/// the field at height z above the base by S z^2 / (2 w), and the moved field folds over itself
+/// where (S z / w) |grad base| > 1: at the tops of the default layer (S z / w ~ 1.7) a base
+/// slope above ~0.6. The previous 8 km cells, sharpened by a smoothstep, put marine and
+/// continental air within 1-2 km of each other (base slopes up to 1.8, folding over 16 % of the
+/// map at the tops: clouds smeared along the wind and cut off). These cells keep the base slope
+/// below 0.16 (fold rate <= 0.27); real air masses vary over 100s of km (fronts), the most the
+/// tile can hold.
 fn weather_type(uv: vec2<f32>) -> f32 {
-    return clamp(smoothstep(0.3, 0.7, perlin_fbm_tiled(uv + vec2(0.37, 0.11), 4, 2)) * 0.6 + 0.4, 0.0, 1.0);
+    return clamp(perlin_fbm_tiled(uv + vec2(0.37, 0.11), 2, 1) * 0.6 + 0.4, 0.0, 1.0);
 }
 
 @compute

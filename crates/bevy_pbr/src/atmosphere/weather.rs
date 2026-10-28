@@ -55,7 +55,10 @@ pub struct CloudInfluenceValues {
     pub density_scale: Option<f32>,
     /// Cloud-fraction scale (physical B.r).
     pub cloud_fraction: Option<f32>,
-    /// Air mass (physical B.g): the profile row, 0 stratocumulus .. 1 deep cumulus.
+    /// Air mass (physical B.g): the profile row, 0 stratocumulus .. 1 deep cumulus. Each air mass
+    /// has its own cloud base (up to ~1.1 km apart), and the shear lean folds the clouds where the
+    /// base slopes more than ~0.6 (`fbm_noise_3d.wesl` weather_type): feather an air-mass change
+    /// over at least ~3 km (the smoothstep's slope is 1.5x the mean).
     pub air_mass: Option<f32>,
     /// Cloud droplet number concentration (physical B.b), cm^-3: maritime ~50-150, continental
     /// several hundred.
