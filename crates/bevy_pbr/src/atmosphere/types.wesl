@@ -48,6 +48,9 @@ struct AtmosphereSettings {
     cloud_max_distance: f32,
     cloud_step_samples: u32,
     cloud_max_render_size: vec2<u32>,
+    // Centre of the cloud shadow map (atmosphere space), with hysteresis (`mod.rs`
+    // cloud_shadow_anchor): fixed while the light turns, moved when the camera leaves it.
+    cloud_shadow_anchor: vec3<f32>,
 }
 
 /// "Atmosphere space" uses local up for the zenith so the horizon-detail

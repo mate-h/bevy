@@ -41,6 +41,20 @@ struct CloudShadowTemporalParams {
     cloud_motion: vec3<f32>,
     // Thin (cirrus) layer displacement since the previous frame: transports alpha.
     cirrus_motion: vec3<f32>,
+    // |cos(light zenith)| / cloud layer thickness (1/m).
+    history_angle_scale: f32,
+    // Angle the light turned (rad) over the last k + 1 frames, k = 0..16 (component k % 4 of
+    // element k / 4).
+    rotation_since: array<vec4<f32>, 4>,
+}
+
+/// Angle the light turned over the last `frames` frames (0 for none).
+fn light_turned_over(frames: u32) -> f32 {
+    if (frames == 0u) {
+        return 0.0;
+    }
+    let k = min(frames, 16u) - 1u;
+    return temporal_params.rotation_since[k / 4u][k % 4u];
 }
 
 // Time-slicing: the texel (within each N x N tile) traced on a given frame, in Bayer order so
@@ -212,6 +226,71 @@ fn reproject_layers(coord: vec2<i32>, uv: vec2<f32>, extent: f32, half_depth: f3
     return prev;
 }
 
+/// Frames since the texel in tile slot `slot` was last traced (0: this frame), from the Bayer
+/// order of `cloud_shadow_interleave_slot`.
+fn cloud_shadow_texel_age(slot: vec2<u32>, n: u32) -> u32 {
+    let frames = n * n;
+    for (var k = 0u; k < frames; k++) {
+        let f = temporal_params.frame_index + frames - k;
+        if (all(cloud_shadow_interleave_slot(f, n) == slot)) {
+            return k;
+        }
+    }
+    return frames;
+}
+
+/// Trust in a history that saw the light `turned` (rad) away from the current one: the optical
+/// depth of a turned ray is a different path through the cloud, not a displaced one, so
+/// reprojection cannot correct it. The ray's far end in the cloud layer moves sideways by
+/// turned x thickness / |mu|; the history is trusted while that stays within the texel,
+/// exp(-turned / (texel x |mu| / thickness)). A static light keeps it at 1.
+fn cloud_shadow_history_trust(uv: vec2<f32>, turned: f32) -> f32 {
+    let rho = length(2.0 * uv - 1.0);
+    let a = CLOUD_SHADOW_WARP_A;
+    let texel = temporal_params.extent * (a + 3.0 * (1.0 - a) * rho * rho)
+        * 2.0 / f32(temporal_params.size.x);
+    return exp(-turned / max(texel * temporal_params.history_angle_scale, 1e-9));
+}
+
+/// This frame's traces, interpolated to `coord`: bilinear over the sparse lattice of traced
+/// texels (one per n x n tile, at `slot`), optical depth as transmittance, front depth from the
+/// nearest trace. Correct for the current light at 1/n resolution.
+fn cloud_shadow_fresh(coord: vec2<i32>, slot: vec2<u32>, n: u32) -> vec4<f32> {
+    let size = vec2<i32>(temporal_params.size);
+    let ni = i32(n);
+    let q = (vec2<f32>(coord) - vec2<f32>(slot)) / f32(n);
+    let i0 = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    let lattice = vec2<i32>(slot);
+    var linear = vec4(0.0);
+    var vis = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2(k & 1, k >> 1);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        // The nearest traced lattice point on the map (the lattice ends inside the last tile).
+        var c = (i0 + o) * ni + lattice;
+        c = select(c, c - ni, c >= size);
+        c = select(c, c + ni, c < vec2(0));
+        let tap = textureLoad(curr_cloud_shadow, c);
+        linear += w * tap;
+        vis += w * exp(-max(tap.b, 0.0));
+    }
+    linear.b = select(linear.b, -log(vis), vis > 1e-30);
+    var near = vec2<i32>(round(q)) * ni + lattice;
+    near = select(near, near - ni, near >= size);
+    near = select(near, near + ni, near < vec2(0));
+    linear.r = textureLoad(curr_cloud_shadow, near).r;
+    return linear;
+}
+
+/// mix of two shadow-map values, the cumulus optical depth (b) as transmittance.
+fn cloud_shadow_mix(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> {
+    var m = mix(a, b, t);
+    let vis = mix(exp(-max(a.b, 0.0)), exp(-max(b.b, 0.0)), t);
+    m.b = select(m.b, -log(vis), vis > 1e-30);
+    return m;
+}
+
 @compute
 @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -235,20 +314,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var filtered_data = curr_data;
     // Untraced texels of a time-sliced map hold whatever was traced N² frames ago, which is the
-    // cleared (zero optical depth = fully lit) texture right after startup / a history cut. Fill
-    // them from the texel of the same N×N tile that *was* traced this frame instead.
+    // cleared (zero optical depth = fully lit) texture right after startup / a history cut, or
+    // was traced for another light direction. Without a usable history they take this frame's
+    // traces, interpolated.
     if (!traced_this_frame) {
-        let size_i = vec2<i32>(size);
-        let tile_coord = min(coord - (coord % vec2<i32>(i32(interleave))) + vec2<i32>(slot), size_i - 1);
-        filtered_data = textureLoad(curr_cloud_shadow, tile_coord);
+        filtered_data = cloud_shadow_fresh(coord, slot, interleave);
     }
 
     if (temporal_params.history_valid != 0u && !traced_this_frame) {
-        // Not traced this frame: reproject the previous filtered result (falls back to the
-        // stale traced value when the history is out of bounds).
+        // Not traced this frame: reproject the previous filtered result, trusted as far as the
+        // light has turned since this texel was traced; the rest from this frame's traces. A
+        // static light keeps the reprojected history (full resolution); a turning light gets
+        // the current light's shadows at 1/N resolution instead of a smeared history.
         let reprojected = reproject_layers(coord, uv, extent, half_depth, true);
         if (reprojected.r >= 0.0) {
-            filtered_data = reprojected;
+            let age = cloud_shadow_texel_age(gid.xy % vec2(interleave), interleave);
+            let trust = cloud_shadow_history_trust(uv, light_turned_over(age));
+            filtered_data = cloud_shadow_mix(filtered_data, reprojected, trust);
+            filtered_data.r = select(filtered_data.r, reprojected.r, trust >= 0.5);
         }
     } else if (temporal_params.history_valid != 0u) {
         // Clamp-to-neighborhood (AABB): compute min/max of G and B in 3x3 neighborhood.
@@ -285,7 +368,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Temporal blend: prev + alpha * (curr - prev)
             // Do NOT filter depth (Unreal: precision/convergence issues)
-            let alpha = temporal_params.temporal_alpha;
+            // The history was traced N² frames ago: weighted by the trust left after the light
+            // turned since (all of the trace for a fast-turning light).
+            let trust = cloud_shadow_history_trust(uv, light_turned_over(interleave * interleave));
+            let alpha = 1.0 - (1.0 - temporal_params.temporal_alpha) * trust;
             filtered_data.g = prev.g + alpha * (curr_data.g - prev.g);
             // The cumulus optical depth blends as transmittance (see `sample_history`): a linear
             // blend of depths is darker than the blend of the transmittances (exp is convex), so

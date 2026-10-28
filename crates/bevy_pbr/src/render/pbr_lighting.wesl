@@ -36,8 +36,7 @@ import package::{
     render::mesh_view_types::{POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE, RectLight},
     render::mesh_view_bindings as view_bindings,
     atmosphere::functions::{
-        calculate_visible_sun_ratio, clamp_to_surface, build_light_basis,
-        snap_anchor_to_texel_grid, cloud_shadow_anchor_origin_at, cubic_bspline_weights,
+        calculate_visible_sun_ratio, clamp_to_surface, build_light_basis, cubic_bspline_weights,
     },
     atmosphere::clouds::cloud_shadow_xy_to_uv,
     atmosphere::bruneton_functions::transmittance_lut_r_mu_to_uv,
@@ -1152,14 +1151,7 @@ fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
     let trace_dir = normalize(-L);
     let basis = build_light_basis(trace_dir);
 
-    let atmosphere = view_bindings::atmosphere_data.atmosphere;
-    let camera_as = clamp_to_surface(
-        atmosphere,
-        (atmosphere.world_to_atmosphere * vec4(view_bindings::view.world_position, 1.0)).xyz,
-    );
-    let anchor = snap_anchor_to_texel_grid(
-        cloud_shadow_anchor_origin_at(camera_as, settings.cloud_shadow_anchor_max_radius),
-        basis, extent, settings.cloud_shadow_map_size);
+    let anchor = settings.cloud_shadow_anchor;
 
     let rel = P_as - anchor;
     let x = dot(rel, basis.x);

@@ -62,12 +62,6 @@ fn clamp_to_surface(position: vec3<f32>) -> vec3<f32> {
     return position;
 }
 
-/// Centre of the cloud shadow map (see `cloud_shadow_anchor_origin_at` in functions.wesl).
-fn cloud_shadow_anchor_origin() -> vec3<f32> {
-    let p = get_view_position();
-    return normalize(p) * min(length(p), settings.cloud_shadow_anchor_max_radius);
-}
-
 fn get_view_position() -> vec3<f32> {
     // Matches `functions.wgsl::get_view_position()` to keep anchor consistent.
     let atmo_pos = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xyz;
@@ -90,28 +84,6 @@ fn build_light_basis(light_dir: vec3<f32>) -> LightBasis {
     return LightBasis(x, y);
 }
 
-fn snap_anchor_to_texel_grid(anchor: vec3<f32>, basis: LightBasis, extent: f32, size: vec2<u32>) -> vec3<f32> {
-    // Snap the anchor in the shadow-map XY plane to stabilize the map under camera motion.
-    // This mirrors Unreal's stabilized shadow-map anchor strategy.
-    let res = vec2<f32>(size);
-    // Snap in large steps (UE5 r.VolumetricCloud.ShadowMap.SnapLength, 20 km), a whole number of
-    // texels: the map stays fixed in the world while the camera flies, so shadow texels do not
-    // crawl (snapping per texel shifted the time-sliced, temporally filtered map every ~125 m).
-    // 1/16 of the half-extent (4 km at 64 km) keeps the camera within 2 km of the warped map's
-    // fine-texel centre; each snap re-maps the map once (reprojected by the temporal pass).
-    let texel = (2.0 * extent) / max(res, vec2(1.0));
-    let texel_size = max(round(0.0625 * extent / texel), vec2(1.0)) * texel;
-
-    let ax = dot(anchor, basis.x);
-    let ay = dot(anchor, basis.y);
-
-    let snapped_ax = round(ax / texel_size.x) * texel_size.x;
-    let snapped_ay = round(ay / texel_size.y) * texel_size.y;
-
-    let dx = snapped_ax - ax;
-    let dy = snapped_ay - ay;
-    return anchor + basis.x * dx + basis.y * dy;
-}
 
 
 // Time-slicing: the texel (within each N x N tile) traced on a given frame, in Bayer order so
@@ -216,8 +188,8 @@ fn main(@builtin(global_invocation_id) thread_id: vec3<u32>) {
     let uv = (vec2<f32>(gid.xy) + vec2(0.5)) / vec2<f32>(size);
     let xy = cloud_shadow_uv_to_xy(uv, extent);
 
-    var anchor = cloud_shadow_anchor_origin();
-    anchor = snap_anchor_to_texel_grid(anchor, basis, extent, size);
+    // Centre with hysteresis, set on the CPU (`mod.rs` cloud_shadow_anchor).
+    let anchor = settings.cloud_shadow_anchor;
     let ray_origin = anchor + basis.x * xy.x + basis.y * xy.y - trace_dir * half_depth;
     let max_t = 2.0 * half_depth;
     let max_t_km = max_t * 0.001;

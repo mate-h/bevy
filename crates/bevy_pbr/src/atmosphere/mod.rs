@@ -326,6 +326,7 @@ impl Plugin for AtmospherePlugin {
 /// builds [`GpuAtmosphereSettings`].
 pub fn extract_atmosphere(
     mut commands: Commands,
+    mut shadow_anchors: bevy_ecs::system::Local<bevy_platform::collections::HashMap<Entity, Vec3>>,
     atmosphere_entities: Extract<
         Query<(
             Entity,
@@ -347,6 +348,8 @@ pub fn extract_atmosphere(
     >,
 ) {
     let candidates: Vec<_> = atmosphere_entities.iter().collect();
+    // Shadow-map anchors of cameras that no longer exist.
+    shadow_anchors.retain(|entity, _| cameras.iter().any(|(e, ..)| e == *entity));
 
     for (render_entity, settings, cam_global) in &cameras {
         // Remove any stale render-world state when AtmosphereSettings is removed or candidates is empty
@@ -427,6 +430,18 @@ pub fn extract_atmosphere(
                 layers.lowest_thin().map_or(0.0, GpuThinCloudLayer::mid_radius);
             commands.entity(render_entity).insert(layers);
         }
+        // The map's centre: re-snapped after the camera moves 1/16 of the map's half extent
+        // (4 km at 64 km), which keeps it within the warped map's fine-texel centre.
+        let camera_as = extracted_world_to_atmosphere.transform_point3(cam_world);
+        let anchor = cloud_shadow_anchor(
+            camera_as,
+            atmo.inner_radius,
+            gpu_settings.cloud_shadow_anchor_max_radius,
+            0.0625 * gpu_settings.cloud_shadow_map_extent,
+            shadow_anchors.get(&render_entity).copied(),
+        );
+        shadow_anchors.insert(render_entity, anchor);
+        gpu_settings.cloud_shadow_anchor = anchor;
         commands.entity(render_entity).insert(gpu_settings);
         if !has_layers {
             commands.entity(render_entity).remove::<GpuCloudLayers>();
@@ -681,6 +696,33 @@ pub struct GpuAtmosphereSettings {
     pub cloud_max_distance: f32,
     pub cloud_step_samples: u32,
     pub cloud_max_render_size: UVec2,
+    /// Centre of the cloud shadow map (atmosphere space): [`cloud_shadow_anchor`], set at
+    /// extraction and read by the map's producer, the CPU reprojection and every consumer.
+    pub cloud_shadow_anchor: Vec3,
+}
+
+/// Centre of the cloud shadow map with hysteresis: the camera (atmosphere space, kept above the
+/// surface), lowered to `max_radius` (the cumulus tops) when higher, held where it was until the
+/// camera has moved `snap` (m) from it. Independent of the light: turning the sun rotates the
+/// map about a fixed centre. Rounding the camera's coordinates in the light's basis (UE5's
+/// stabilised anchor) re-snapped on every frame of a turning light: the planet-centred position
+/// sweeps through the light-plane grid (1 degree moves it ~110 km at Earth's radius), so the
+/// map's centre jumped by up to a snap step each frame and its history was re-mapped with it.
+/// The map stays fixed in the world while the camera flies within `snap` of it, as before.
+pub fn cloud_shadow_anchor(
+    camera: Vec3,
+    inner_radius: f32,
+    max_radius: f32,
+    snap: f32,
+    previous: Option<Vec3>,
+) -> Vec3 {
+    let r = camera.length();
+    let surface = inner_radius + 1.0;
+    let origin = camera.normalize_or_zero() * r.max(surface).min(max_radius.max(surface));
+    match previous {
+        Some(anchor) if anchor.distance(origin) < snap => anchor,
+        _ => origin,
+    }
 }
 
 impl GpuAtmosphereSettings {
@@ -736,6 +778,8 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             cloud_max_distance: s.cloud_max_distance,
             cloud_step_samples: s.cloud_step_samples.max(1),
             cloud_max_render_size: s.cloud_max_render_size.max(UVec2::ONE),
+            // Set at extraction (`cloud_shadow_anchor`).
+            cloud_shadow_anchor: Vec3::ZERO,
         }
     }
 }

@@ -323,29 +323,6 @@ fn cloud_shadow_optical_depth(data: vec3<f32>) -> f32 {
     return exp(-optical_depth);
 }
 
-// No bindings: shared with PBR's mesh cloud shadows.
-fn snap_anchor_to_texel_grid(anchor: vec3<f32>, basis: LightBasis, extent: f32, size: vec2<u32>) -> vec3<f32> {
-    // Keep producer/consumer aligned by snapping the anchor to the shadow-map texel grid.
-    let res = vec2<f32>(size);
-    // Snap in large steps (UE5 r.VolumetricCloud.ShadowMap.SnapLength, 20 km), a whole number of
-    // texels: the map stays fixed in the world while the camera flies, so shadow texels do not
-    // crawl (snapping per texel shifted the time-sliced, temporally filtered map every ~125 m).
-    // 1/16 of the half-extent (4 km at 64 km) keeps the camera within 2 km of the warped map's
-    // fine-texel centre; each snap re-maps the map once (reprojected by the temporal pass).
-    let texel = (2.0 * extent) / max(res, vec2(1.0));
-    let texel_size = max(round(0.0625 * extent / texel), vec2(1.0)) * texel;
-
-    let ax = dot(anchor, basis.x);
-    let ay = dot(anchor, basis.y);
-
-    let snapped_ax = round(ax / texel_size.x) * texel_size.x;
-    let snapped_ay = round(ay / texel_size.y) * texel_size.y;
-
-    let dx = snapped_ax - ax;
-    let dy = snapped_ay - ay;
-    return anchor + basis.x * dx + basis.y * dy;
-}
-
 /// Unreal-style cloud shadow map evaluation.
 ///
 /// The `cloud_shadow_map` stores:
@@ -427,7 +404,7 @@ struct CloudShadowFrame {
 @if(CLOUDS_ENABLED)
 fn cloud_shadow_frame(direction_to_light: vec3<f32>) -> CloudShadowFrame {
     let basis = build_light_basis(safe_normalize(-direction_to_light));
-    let anchor = snap_anchor_to_texel_grid(cloud_shadow_anchor_origin(), basis, settings.cloud_shadow_map_extent, settings.cloud_shadow_map_size);
+    let anchor = settings.cloud_shadow_anchor;
     return CloudShadowFrame(anchor, basis.x, basis.y, cloud_shadow_is_mapped_light(direction_to_light));
 }
 
@@ -501,8 +478,7 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     let basis = build_light_basis(trace_dir);
 
     // Anchor must match the compute shader's anchor to keep lookups stable.
-    var anchor = cloud_shadow_anchor_origin();
-    anchor = snap_anchor_to_texel_grid(anchor, basis, extent, settings.cloud_shadow_map_size);
+    let anchor = settings.cloud_shadow_anchor;
     let rel = world_pos - anchor;
 
     // Map world point to the orthographic light volume.
@@ -739,20 +715,6 @@ fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
 }
 
 /// Returns the observer's position in the atmosphere
-/// Centre of the cloud shadow map before snapping: the camera position `p` (atmosphere space),
-/// lowered to `max_radius` (`settings.cloud_shadow_anchor_max_radius`, the cumulus tops) when
-/// higher. No bindings: shared by the producer, the atmosphere consumers and PBR's mesh shadows.
-/// Centred on a camera tens of km up, the ground below it lay ~h cos(sun elevation) off-centre
-/// (60 km from 68 km at 30 deg sun), at the map's edge.
-fn cloud_shadow_anchor_origin_at(p: vec3<f32>, max_radius: f32) -> vec3<f32> {
-    return normalize(p) * min(length(p), max_radius);
-}
-
-@if(CLOUDS_ENABLED)
-fn cloud_shadow_anchor_origin() -> vec3<f32> {
-    return cloud_shadow_anchor_origin_at(get_view_position(), settings.cloud_shadow_anchor_max_radius);
-}
-
 fn get_view_position() -> vec3<f32> {
     let atmo_pos = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xyz;
     return clamp_to_surface(atmosphere, atmo_pos);

@@ -6,7 +6,6 @@
 use bevy_asset::{load_embedded_asset, AssetId, Assets};
 use bevy_image::Image;
 use bevy_ecs::{
-    query::With,
     resource::Resource,
     system::{Local, Query, Res, ResMut},
     world::{FromWorld, World},

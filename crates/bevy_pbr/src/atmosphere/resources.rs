@@ -20,7 +20,7 @@ use bevy_ecs::{
 };
 use bevy_image::ToExtents;
 use bevy_light::atmosphere::ScatteringMedium;
-use bevy_math::{Affine3A, Mat4, UVec2, Vec2, Vec3, Vec3A};
+use bevy_math::{Affine3A, Mat4, UVec2, Vec3, Vec3A, Vec4};
 use bevy_platform::collections::HashMap;
 use bevy_render::camera::ExtractedCamera;
 use bevy_render::render_resource::UniformBuffer;
@@ -973,6 +973,12 @@ pub struct CloudShadowTemporalParams {
     /// Horizontal displacement of the thin (cirrus) layer since the previous frame: transports
     /// the thin-layer optical depth in alpha.
     pub cirrus_motion: Vec3,
+    /// |cos(light zenith)| / cloud layer thickness (1/m): a texel's history stays valid while
+    /// the light turns by less than its size times this (`cloud_shadow_temporal.wesl`).
+    pub history_angle_scale: f32,
+    /// Angle the light turned (rad) over the last k + 1 frames, k = 0..16 (component k % 4 of
+    /// element k / 4): what a texel traced k + 1 frames ago has missed.
+    pub rotation_since: [Vec4; 4],
 }
 
 /// Per-view state for cloud shadow temporal filtering.
@@ -994,6 +1000,8 @@ pub struct CloudShadowTemporalState {
     pub extent: f32,
     /// The history texture the map was copied into.
     pub history_texture: Option<TextureId>,
+    /// Angle the light turned (rad) in each of the last 16 frames, the latest first.
+    pub rotations: [f32; 16],
 }
 
 impl FromWorld for RenderSkyBindGroupLayouts {
@@ -1676,7 +1684,9 @@ pub(super) fn prepare_atmosphere_textures(
             sample_count: 1,
             dimension: TextureDimension::D3,
             format: TextureFormat::Rgba16Float,
-            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
@@ -2157,7 +2167,6 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         (
             Entity,
             &ExtractedView,
-            &ExtractedAtmosphere,
             &GpuAtmosphereSettings,
             &AtmosphereTextures,
             Option<&GpuCloudLayers>,
@@ -2191,7 +2200,7 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         )
     });
     let mut seen = HashMap::default();
-    for (entity, view, atmosphere, settings, textures, cloud_layer, view_layers) in &views {
+    for (entity, view, settings, textures, cloud_layer, view_layers) in &views {
         if !settings.cloud_shadow_uses_temporal_pass() || cloud_layer.is_none() {
             // No temporal pass, or no cloud layer (1x1 placeholder shadow textures): no history
             // is kept, so it is invalid when they come back.
@@ -2206,8 +2215,6 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
         let previous = states.remove(&view.retained_view_entity);
         let (state, params) = cloud_shadow_temporal_params(
             previous.as_ref(),
-            view,
-            atmosphere,
             settings,
             cloud_layer,
             light_dir,
@@ -2231,8 +2238,6 @@ pub struct CloudShadowTemporalParamsUniform(pub UniformBuffer<CloudShadowTempora
 /// One view's shadow temporal parameters and its new state.
 fn cloud_shadow_temporal_params(
     previous: Option<&CloudShadowTemporalState>,
-    view: &ExtractedView,
-    atmosphere: &ExtractedAtmosphere,
     settings: &GpuAtmosphereSettings,
     cloud_layer: Option<&GpuCloudLayers>,
     light_dir: Vec3,
@@ -2249,21 +2254,8 @@ fn cloud_shadow_temporal_params(
     };
     let light_rotation_cut_deg = settings.cloud_shadow_temporal_light_rotation_cut_deg;
 
-    let inner_radius = atmosphere.inner_radius;
-    let camera_pos = view.world_from_view.translation();
-    let world_pos = atmosphere.world_to_atmosphere.transform_point3(camera_pos);
-    let min_radius = inner_radius + 1.0;
-    let r = world_pos.length();
-    let anchor = if r < min_radius {
-        world_pos.normalize_or_zero() * min_radius
-    } else {
-        world_pos
-    };
-    // Lowered to the cumulus tops when above them (`cloud_shadow_anchor_origin_at` in the
-    // shaders).
-    let anchor =
-        anchor.normalize_or_zero() * anchor.length().min(settings.cloud_shadow_anchor_max_radius);
-
+    // The map's centre, with hysteresis (`cloud_shadow_anchor`), as every shader reads it.
+    let anchor = settings.cloud_shadow_anchor;
     let trace_dir = (-light_dir).normalize_or_zero();
     let world_up = Vec3::Y;
     let a = if trace_dir.dot(world_up).abs() > 0.999 {
@@ -2275,17 +2267,6 @@ fn cloud_shadow_temporal_params(
     let basis_y = trace_dir.cross(basis_x);
 
     let size = settings.cloud_shadow_map_size;
-    let res = size.as_vec2();
-    // Same coarse snap as `snap_anchor_to_texel_grid` (shaders): a quarter of the half-extent,
-    // a whole number of texels (UE5 cloud shadow map SnapLength).
-    let texel = (2.0 * extent) / res.max(Vec2::ONE);
-    let texel_size = ((0.0625 * extent) / texel).round().max(Vec2::ONE) * texel;
-    let ax = anchor.dot(basis_x);
-    let ay = anchor.dot(basis_y);
-    let snapped_ax = (ax / texel_size.x).round() * texel_size.x;
-    let snapped_ay = (ay / texel_size.y).round() * texel_size.y;
-    let anchor = anchor + basis_x * (snapped_ax - ax) + basis_y * (snapped_ay - ay);
-
     let prev_anchor = temporal_state.anchor;
     let prev_light_dir = temporal_state.light_dir;
     let anchor_moved = (anchor - prev_anchor).length_squared() > 1e-6;
@@ -2310,6 +2291,27 @@ fn cloud_shadow_temporal_params(
     } else {
         (Vec3::ZERO, Vec3::ZERO)
     };
+    // The light's turn this frame, and over the last frames (a time-sliced texel was traced up
+    // to 16 frames ago, and its history holds whatever the turning light left in it since).
+    let light_rotation = if history_valid {
+        prev_light_dir
+            .dot(light_dir.normalize_or_zero())
+            .clamp(-1.0, 1.0)
+            .acos()
+    } else {
+        0.0
+    };
+    let mut rotations = [0.0; 16];
+    if history_valid {
+        rotations[1..].copy_from_slice(&temporal_state.rotations[..15]);
+    }
+    rotations[0] = light_rotation;
+    let mut rotation_since = [Vec4::ZERO; 4];
+    let mut sum = 0.0;
+    for (k, r) in rotations.iter().enumerate() {
+        sum += r;
+        rotation_since[k / 4][k % 4] = sum;
+    }
     let new_state = CloudShadowTemporalState {
         anchor,
         light_dir: light_dir.normalize_or_zero(),
@@ -2321,6 +2323,7 @@ fn cloud_shadow_temporal_params(
         size,
         extent,
         history_texture: Some(history_texture),
+        rotations,
     };
 
     let prev_anchor = if history_valid { prev_anchor } else { anchor };
@@ -2330,6 +2333,11 @@ fn cloud_shadow_temporal_params(
         light_dir.normalize_or_zero()
     };
     let prev_trace_dir = -prev_light_dir_to_light;
+    // A ray through the cloud layer at zenith cosine mu crosses it over thickness / mu; turning
+    // the light by d moves the ray's far end sideways by d thickness / mu.
+    let mu = trace_dir.dot(anchor.normalize_or_zero()).abs().max(1e-3);
+    let thickness = cloud_layer.map_or(1.0, |c| (c.cloud_layer_end - c.cloud_layer_start).max(1.0));
+    let history_angle_scale = mu / thickness;
     // Build the previous basis from the trace direction exactly like the current one (and like
     // `build_light_basis` in the shaders); building it from the direction *to* the light mirrors
     // the X axis and reprojects the history to the wrong texels.
@@ -2361,6 +2369,8 @@ fn cloud_shadow_temporal_params(
             frame_index,
             cloud_motion: Vec3::new(cloud_motion.x, 0.0, cloud_motion.z),
             cirrus_motion: Vec3::new(cirrus_motion.x, 0.0, cirrus_motion.z),
+            history_angle_scale,
+            rotation_since,
         },
     )
 }
