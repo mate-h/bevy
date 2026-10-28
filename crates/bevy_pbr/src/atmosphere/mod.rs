@@ -43,6 +43,7 @@ mod cloud_profile;
 mod environment;
 pub mod fbm_noise;
 mod debug_dump;
+pub mod debug_view;
 mod gpu_timing;
 mod node;
 pub mod perlin_worley_noise;
@@ -100,6 +101,10 @@ pub use cloud_profile::{
     CLOUD_PROFILE_TYPE_RES,
 };
 pub use weather::{CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues};
+pub use debug_view::{
+    AtmosphereDebugPanel, AtmosphereDebugSource, AtmosphereDebugView, AtmosphereDebugViewPlugin,
+    DebugChannels, DebugDecode, DebugMapping,
+};
 use node::{atmosphere_luts, render_sky};
 use perlin_worley_noise::{
     generate_perlin_worley_noise_once, init_perlin_worley_noise_params_buffer,

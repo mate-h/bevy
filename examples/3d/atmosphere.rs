@@ -45,6 +45,7 @@ use bevy::{
         AtmosphereMode, AtmosphereSettings, AtmosphereWind, CloudTimeScale, CloudWeather,
         CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues, CloudLayerOf,
         CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
+        AtmosphereDebugView, AtmosphereDebugViewPlugin,
         DefaultOpaqueRendererMethod,
         VolumetricCloudSettings,
         ExtendedMaterial, MaterialExtension, ScreenSpaceReflections,
@@ -137,9 +138,15 @@ fn main() {
             FreeCameraPlugin,
         ))
         .add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, Water>>::default())
+        .add_plugins(AtmosphereDebugViewPlugin)
         .add_systems(
             Startup,
-            (setup_camera_fog, setup_terrain_scene, print_controls),
+            (
+                setup_camera_fog,
+                setup_terrain_scene,
+                setup_debug_overlay.after(setup_camera_fog),
+                print_controls,
+            ),
         )
         .add_systems(
             Update,
@@ -147,6 +154,7 @@ fn main() {
                 dynamic_scene,
                 sun_drag,
                 atmosphere_controls,
+                debug_overlay_controls,
                 cycle_cloud_profiles,
                 visibility_toggle.after(atmosphere_controls),
                 camera_pose_title,
@@ -333,6 +341,123 @@ fn print_controls() {
     println!("    T          - Toggle 60x cloud time-lapse (wind, rising thermals, cloud life cycle)");
     println!("    Right drag - Slide the time of day (sun position)");
     println!("    Up/Down    - Increase/Decrease exposure");
+    println!("    Tab        - Toggle the debug view (LUTs, cloud buffers, cloud field, weather, noise)");
+    println!("    [ / ]      - Debug view: move the slice of the 3D textures down/up");
+}
+
+/// The debug overlay's root node (Tab).
+#[derive(Component)]
+struct DebugOverlay;
+
+/// The debug overlay's slice readout.
+#[derive(Component)]
+struct DebugSliceText;
+
+/// Edge of a debug preview in the overlay (logical px).
+const DEBUG_TILE: f32 = 136.0;
+
+/// The debug view (`AtmosphereDebugView`): a grid of live previews of the atmosphere's lookup
+/// tables, cloud buffers, cloud field, weather and noise, drawn by the engine into images each
+/// frame. Hidden until Tab; `ATMOSPHERE_DEBUG_VIEW=1` starts with it shown.
+fn setup_debug_overlay(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    cameras: Query<(Entity, &Camera), With<Camera3d>>,
+) {
+    let mut view = AtmosphereDebugView::all(&mut images);
+    view.enabled = std::env::var("ATMOSPHERE_DEBUG_VIEW").is_ok();
+    let columns = 5.0;
+    let mut overlay = commands.spawn_empty();
+    // On the main camera, which renders offscreen in background runs.
+    if let Some((camera, _)) = cameras.iter().min_by_key(|(_, c)| c.order) {
+        overlay.insert(UiTargetCamera(camera));
+    }
+    overlay
+        .insert((
+            DebugOverlay,
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(8),
+                right: px(8),
+                width: px(columns * (DEBUG_TILE + 4.0) + 8.0),
+                flex_wrap: FlexWrap::Wrap,
+                column_gap: px(4),
+                row_gap: px(2),
+                padding: UiRect::all(px(4)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+            if view.enabled { Visibility::Inherited } else { Visibility::Hidden },
+        ))
+        .with_children(|parent| {
+            for panel in &view.panels {
+                parent
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        width: px(DEBUG_TILE),
+                        ..default()
+                    })
+                    .with_children(|tile| {
+                        tile.spawn((
+                            ImageNode::new(panel.image.clone()),
+                            Node {
+                                width: px(DEBUG_TILE),
+                                height: px(DEBUG_TILE),
+                                ..default()
+                            },
+                        ));
+                        tile.spawn((
+                            Text::new(panel.label.clone()),
+                            TextFont {
+                                font_size: FontSize::Px(10.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.85, 0.85, 0.85)),
+                        ));
+                    });
+            }
+            parent.spawn((
+                DebugSliceText,
+                Text::new("3D slice 0.50 ([ / ])"),
+                TextFont {
+                    font_size: FontSize::Px(10.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.85, 0.85, 0.85)),
+            ));
+        });
+    commands.insert_resource(view);
+}
+
+/// Tab shows/hides the debug view (the engine skips the previews while hidden); [ and ] move
+/// the slice of every 3D texture (cloud field and aerial perspective: height / distance).
+fn debug_overlay_controls(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut view: ResMut<AtmosphereDebugView>,
+    mut overlay: Query<&mut Visibility, With<DebugOverlay>>,
+    mut slice_text: Query<&mut Text, With<DebugSliceText>>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Tab) {
+        view.enabled = !view.enabled;
+        for mut visibility in &mut overlay {
+            *visibility = if view.enabled { Visibility::Inherited } else { Visibility::Hidden };
+        }
+    }
+    let step = if keyboard_input.just_pressed(KeyCode::BracketRight) {
+        1.0 / 32.0
+    } else if keyboard_input.just_pressed(KeyCode::BracketLeft) {
+        -1.0 / 32.0
+    } else {
+        return;
+    };
+    let mut slice = 0.5;
+    for panel in &mut view.panels {
+        panel.slice = (panel.slice + step).clamp(0.0, 1.0 - 1e-3);
+        slice = panel.slice;
+    }
+    for mut text in &mut slice_text {
+        text.0 = format!("3D slice {slice:.2} ([ / ])");
+    }
 }
 
 fn atmosphere_controls(
