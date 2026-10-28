@@ -24,7 +24,8 @@ use tracing::warn;
 
 use super::{
     cloud_profile::{
-        f32_to_f16, nubis_profile_texels, physical_profile_texels, CloudProfiles,
+        constant_lean_texels, f32_to_f16, nubis_profile_texels, physical_lean_texels,
+        physical_profile_texels, CloudProfiles,
         CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_TYPE_RES,
     },
     detail_noise::{DetailNoiseGenerated, DetailNoiseTexture},
@@ -330,6 +331,7 @@ pub fn init_fbm_noise_texture(
         view_formats: &[],
     });
     write_cloud_profile(&render_queue, &profile_texture, physical_profile_texels());
+    write_cloud_lean(&render_queue, &profile_texture, physical_lean_texels());
     // Noise distribution rows: uniform until measured; scheme row: threshold 0, mean excess and
     // magnitude 1 until computed (`cloud_noise_quantiles.wesl`).
     let identity: Vec<u8> = (0..(CLOUD_NOISE_QUANTILE_ROWS + 1) * CLOUD_PROFILE_HEIGHT_RES as u32)
@@ -429,12 +431,37 @@ const CLOUD_PROFILE_EXTENT: Extent3d = Extent3d {
 /// then one cloud-scheme row. Must match `clouds.wesl` and `cloud_noise_quantiles.wesl`, which
 /// also take the profile row count.
 const CLOUD_NOISE_QUANTILE_ROWS: u32 = 8;
-/// The profile rows, the noise distribution rows and the scheme row.
+/// First of the lean rows (one per cloud type, `cloud_profile.rs`), after the scheme row. Must
+/// match `clouds.wesl` CLOUD_LEAN_FIRST_ROW.
+const CLOUD_LEAN_FIRST_ROW: u32 = CLOUD_PROFILE_TYPE_RES as u32 + CLOUD_NOISE_QUANTILE_ROWS + 1;
+/// The profile rows, the noise distribution rows, the scheme row and the lean rows.
 const CLOUD_PROFILE_TEXTURE_EXTENT: Extent3d = Extent3d {
     width: CLOUD_PROFILE_HEIGHT_RES as u32,
-    height: CLOUD_PROFILE_TYPE_RES as u32 + CLOUD_NOISE_QUANTILE_ROWS + 1,
+    height: CLOUD_LEAN_FIRST_ROW + CLOUD_PROFILE_TYPE_RES as u32,
     depth_or_array_layers: 1,
 };
+
+fn write_cloud_lean(queue: &RenderQueue, texture: &Texture, rgba16f: &[u8]) {
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: Origin3d {
+                x: 0,
+                y: CLOUD_LEAN_FIRST_ROW,
+                z: 0,
+            },
+            aspect: TextureAspect::All,
+        },
+        rgba16f,
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8 * CLOUD_PROFILE_HEIGHT_RES as u32),
+            rows_per_image: None,
+        },
+        CLOUD_PROFILE_EXTENT,
+    );
+}
 
 fn write_cloud_profile(queue: &RenderQueue, texture: &Texture, rgba16f: &[u8]) {
     queue.write_texture(
@@ -449,10 +476,10 @@ fn write_cloud_profile(queue: &RenderQueue, texture: &Texture, rgba16f: &[u8]) {
     );
 }
 
-/// Profile lookup texels (Rgba16Float) chosen in the extract schedule, uploaded by
+/// Profile lookup texels and lean rows (Rgba16Float) chosen in the extract schedule, uploaded by
 /// [`upload_cloud_profiles`].
 #[derive(Resource, Default)]
-pub struct PendingCloudProfiles(pub(crate) Option<Vec<u8>>);
+pub struct PendingCloudProfiles(pub(crate) Option<Vec<u8>>, pub(crate) Option<Vec<u8>>);
 
 /// What the lookup holds.
 #[derive(PartialEq)]
@@ -467,14 +494,25 @@ pub(crate) enum ProfileSource {
 /// evaluated in the shader and leaves the lookups unused). One set for all atmospheres, like the
 /// weather map.
 pub(crate) fn extract_cloud_profiles(
-    layers: Extract<Query<&CloudProfiles, With<VolumetricCloudLayer>>>,
+    layers: Extract<Query<(&CloudProfiles, &VolumetricCloudLayer)>>,
     images: Extract<Res<Assets<Image>>>,
     mut last: Local<Option<ProfileSource>>,
+    mut last_lean: Local<Option<Option<u32>>>,
     mut pending: ResMut<PendingCloudProfiles>,
 ) {
-    let Some(profiles) = layers.iter().next() else {
+    let Some((profiles, layer)) = layers.iter().next() else {
         return;
     };
+    // Lean rows: the physical set's own, else a constant updraft at the layer's speed (an image
+    // carries no updraft; the Nubis and envelope modes lean analytically in the shader).
+    let lean = (!matches!(profiles, CloudProfiles::Physical)).then(|| layer.updraft_speed.to_bits());
+    if last_lean.as_ref() != Some(&lean) {
+        pending.1 = Some(match lean {
+            None => physical_lean_texels().to_vec(),
+            Some(bits) => constant_lean_texels(f32::from_bits(bits)),
+        });
+        *last_lean = Some(lean);
+    }
     let expected = (
         TextureFormat::Rgba16Float,
         CLOUD_PROFILE_EXTENT.width,
@@ -518,8 +556,14 @@ pub fn upload_cloud_profiles(
     texture: Option<Res<FbmNoiseTexture>>,
     queue: Res<RenderQueue>,
 ) {
-    if let (Some(texture), Some(texels)) = (texture, pending.0.take()) {
+    let Some(texture) = texture else {
+        return;
+    };
+    if let Some(texels) = pending.0.take() {
         write_cloud_profile(&queue, &texture.profile.texture, &texels);
+    }
+    if let Some(texels) = pending.1.take() {
+        write_cloud_lean(&queue, &texture.profile.texture, &texels);
     }
 }
 

@@ -13,9 +13,12 @@
 //!   lifting condensation level (marine cumulus near 0.55 km, continental near 1.7 km). The
 //!   profile is sampled at the height above it.
 //!
-//! The last rows, filled on the GPU, hold the shape- and billow-noise distributions per noise mip
+//! The next rows, filled on the GPU, hold the shape- and billow-noise distributions per noise mip
 //! and the cloud scheme's threshold table, which make the profile the cloud fraction exactly
-//! (`clouds.wesl` `cloud_thermal_excess`). SI throughout: m, kg/m^3.
+//! (`clouds.wesl` `cloud_thermal_excess`). The last [`CLOUD_PROFILE_TYPE_RES`] rows hold the
+//! clouds' lean per type (R: downwind drift of the cloudy updraft per [`CLOUD_LEAN_SHEAR`] of
+//! shear, against the same height above the base; `clouds.wesl` `cloud_sample_pos`). SI
+//! throughout: m, kg/m^3.
 
 use bevy_asset::Handle;
 use bevy_ecs::component::Component;
@@ -100,6 +103,18 @@ impl CloudProfiles {
 const PHYSICAL_KTX2: &[u8] = include_bytes!("cloud_profiles.ktx2");
 /// The baked [`CloudProfiles::Nubis`] set (R bottom-type, G top-type gradient).
 const NUBIS_KTX2: &[u8] = include_bytes!("cloud_profiles_nubis.ktx2");
+/// The lean of the [`CloudProfiles::Physical`] clouds, one row per type, baked with them from the
+/// same parcel ensemble: R the downwind drift (m) of the cloudy updraft at the row's height above
+/// its base per [`CLOUD_LEAN_SHEAR`] of shear, x(z) = S int_0^z z' / w(z') dz' with w the mean
+/// updraft speed of the cloudy rising parcels (G, m/s); held above the last rising level. The
+/// updraft accelerates above the base and decelerates near its top, unlike a constant speed:
+/// marine trade cumulus rise at 1-2 m/s near the base and 3-6 m/s aloft, continental cumulus at
+/// 6-9 m/s, so marine clouds lean more near their bases and continental clouds stand more upright
+/// (the constant 3 m/s leaned every cloud alike).
+const LEAN_KTX2: &[u8] = include_bytes!("cloud_lean.ktx2");
+
+/// Shear the lean rows are tabulated for (1/s): the lean is the layer's shear / this x the row.
+pub const CLOUD_LEAN_SHEAR: f32 = 1.0e-3;
 
 /// The single level of an uncompressed KTX2 (vkFormat 97 = R16G16B16A16_SFLOAT,
 /// [`CLOUD_PROFILE_HEIGHT_RES`] x [`CLOUD_PROFILE_TYPE_RES`], checked by a test).
@@ -117,6 +132,25 @@ pub(crate) fn physical_profile_texels() -> &'static [u8] {
 /// Texels of [`CloudProfiles::Nubis`].
 pub(crate) fn nubis_profile_texels() -> &'static [u8] {
     ktx2_texels(NUBIS_KTX2)
+}
+
+/// Lean rows of [`CloudProfiles::Physical`] (see `LEAN_KTX2`).
+pub(crate) fn physical_lean_texels() -> &'static [u8] {
+    ktx2_texels(LEAN_KTX2)
+}
+
+/// Lean rows for an updraft rising at a constant `updraft_speed` (m/s), every type alike:
+/// S z^2 / (2 w) per [`CLOUD_LEAN_SHEAR`], for profile images that carry no updraft.
+pub(crate) fn constant_lean_texels(updraft_speed: f32) -> Vec<u8> {
+    let w = updraft_speed.max(0.1);
+    (0..CLOUD_PROFILE_TYPE_RES * CLOUD_PROFILE_HEIGHT_RES)
+        .flat_map(|i| {
+            let z = (i % CLOUD_PROFILE_HEIGHT_RES) as f32 / (CLOUD_PROFILE_HEIGHT_RES - 1) as f32
+                * CLOUD_PROFILE_RANGE_M;
+            [CLOUD_LEAN_SHEAR * z * z / (2.0 * w), w, 0.0, 0.0].map(f32_to_f16)
+        })
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 /// Height range of the clouds of [`CloudProfiles::Physical`] above the surface (m): the lowest
@@ -159,7 +193,7 @@ fn f16_to_f32(h: u16) -> f32 {
     }
 }
 
-/// IEEE half from f32 for values in [0, 1] (subnormals flush to 0).
+/// IEEE half from f32 (finite values below 65504; subnormals flush to 0).
 pub(crate) fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -185,6 +219,7 @@ mod tests {
         for (ktx2, texels) in [
             (PHYSICAL_KTX2, physical_profile_texels()),
             (NUBIS_KTX2, nubis_profile_texels()),
+            (LEAN_KTX2, physical_lean_texels()),
         ] {
             let u32_at = |o: usize| u32::from_le_bytes(ktx2[o..o + 4].try_into().unwrap());
             assert_eq!(&ktx2[..12], b"\xabKTX 20\xbb\r\n\x1a\n");
@@ -201,6 +236,29 @@ mod tests {
         let (base, top) = physical_profile_bounds();
         assert!((500.0..600.0).contains(&base), "{base}");
         assert!((4000.0..5000.0).contains(&top), "{top}");
+    }
+
+    #[test]
+    fn lean_rows() {
+        let texel = |t: &[u8], row: usize, i: usize, c: usize| {
+            let o = ((row * CLOUD_PROFILE_HEIGHT_RES + i) * 4 + c) * 2;
+            f16_to_f32(u16::from_le_bytes([t[o], t[o + 1]]))
+        };
+        // Constant updraft: S z^2 / (2 w) at the top of the range, 4 km at 3 m/s.
+        let constant = constant_lean_texels(3.0);
+        let top = texel(&constant, 10, CLOUD_PROFILE_HEIGHT_RES - 1, 0);
+        assert!((top - 1e-3 * 4000.0 * 4000.0 / 6.0).abs() < 2.0, "{top}");
+        // Physical: no drift at the base, never decreasing upwards; continental cumulus (6-9
+        // m/s) lean less than deep trade cumulus (1-6 m/s) at the same height.
+        let lean = physical_lean_texels();
+        for row in 0..CLOUD_PROFILE_TYPE_RES {
+            assert_eq!(texel(lean, row, 0, 0), 0.0);
+            for i in 1..CLOUD_PROFILE_HEIGHT_RES {
+                assert!(texel(lean, row, i, 0) >= texel(lean, row, i - 1, 0));
+            }
+        }
+        let at_1500 = 1500 * (CLOUD_PROFILE_HEIGHT_RES - 1) / 4000;
+        assert!(texel(lean, 63, at_1500, 0) < 0.5 * texel(lean, 42, at_1500, 0));
     }
 
     #[test]

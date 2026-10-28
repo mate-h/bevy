@@ -984,12 +984,19 @@ pub struct VolumetricCloudLayer {
 
     /// Override of the vertical wind shear dU/dz above the cloud base (1/s, horizontal; 1e-3 =
     /// 1 m/s per km). `None`: the mean shear of [`AtmosphereWind`] over the layer. Clouds lean
-    /// downwind like the trajectory of a parcel rising at [`VolumetricCloudLayer::updraft_speed`]
-    /// through the sheared flow: x(z) = shear z^2 / (2 w). The lean is static (a cloud is
-    /// continuously renewed by new thermals), not accumulated over time.
+    /// downwind like the trajectory of their updraft through the sheared flow,
+    /// x(z) = shear int_0^z z' / w(z') dz' at height z above the base: with
+    /// [`CloudProfiles::Physical`] w(z) is the cloudy updraft of each air mass (baked with the
+    /// profiles: marine cumulus lean more than continental ones), otherwise the constant
+    /// [`VolumetricCloudLayer::updraft_speed`], x = shear z^2 / (2 w). The lean is static (a cloud
+    /// is continuously renewed by new thermals), not accumulated over time. Across air masses the
+    /// lean differs, and the leaned field folds where it changes faster than 1 m per m
+    /// horizontally: the procedural weather stays below that up to ~2x the default shear
+    /// (~3.6e-3 /s); stronger shear tears real cumulus apart, which a displaced field cannot show.
     pub wind_shear: Option<Vec3>,
-    /// Cumulus updraft speed (m/s). Fair-weather cumulus: ~1-5 m/s (textbook range, e.g.
-    /// Stull, Practical Meteorology). Sets the shear lean and the rise of the internal structure.
+    /// Cumulus updraft speed (m/s): the rise of the internal structure (the noise moves up
+    /// through the profile), and the shear lean of the Nubis, envelope and image profiles.
+    /// Fair-weather cumulus: ~1-5 m/s (textbook range, e.g. Stull, Practical Meteorology).
     pub updraft_speed: f32,
     /// Life time of a cloud (s), 0 = static weather: the procedural weather map cross-fades
     /// between independent coverage patterns over this period, so each cloud grows (wider and

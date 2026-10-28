@@ -243,6 +243,10 @@ const CLOUD_PROFILE_RANGE_M: f32 = 4000.0;
 const CLOUD_PROFILE_TYPE_ROWS: f32 = 64.0;
 const CLOUD_NOISE_QUANTILE_ROWS: f32 = 8.0;
 const CLOUD_SCHEME_ROW: f32 = 72.0;
+/// First of the lean rows, one per cloud type (`fbm_noise.rs` CLOUD_LEAN_FIRST_ROW), and the shear
+/// they are tabulated for (`cloud_profile.rs` CLOUD_LEAN_SHEAR).
+const CLOUD_LEAN_FIRST_ROW: f32 = 73.0;
+const CLOUD_LEAN_SHEAR: f32 = 1.0e-3;
 
 /// Cloud base above the surface (m) of a cloud type with the profile lookups: the A channel, km
 /// (`cloud_profile.rs`).
@@ -499,21 +503,30 @@ fn cloud_density_context(r: f32, world_pos: vec3<f32>) -> vec4<f32> {
 /// Sample position in the moving cloud field (all density inputs: weather, shape, detail):
 /// - advection: the field moves with the cloud-base wind, density at `p` is the pattern at
 ///   `p - noise_offset` (horizontal);
-/// - shear lean: a parcel rising at updraft speed w through wind shear S above the base drifts
-///   x(z) = S z^2 / (2 w) downwind at height z, so the column is displaced by that much (static:
-///   clouds are renewed by new thermals, the lean does not accumulate).
+/// - shear lean: a parcel rising at updraft speed w(z) through wind shear S above the base drifts
+///   x(z) = S int_0^z z' / w(z') dz' downwind at height z, so the column is displaced by that much
+///   (static: clouds are renewed by new thermals, the lean does not accumulate). With the lookup
+///   profiles w(z) is the cloudy updraft of the column's air mass (the lean rows, `cloud_profile.rs`);
+///   otherwise the layer's constant updraft speed, x = S z^2 / (2 w).
 /// Nubis/HZD scroll the noise with the wind (pseudo-motion); HZD15 also skews with height.
 fn cloud_sample_pos(world_pos: vec3<f32>, r: f32) -> vec3<f32> {
     // The lean starts at the cloud's own base: with the physical profiles, its air mass's (the
     // type at the advected, unleaned position). From the bottom of the layer, which spans every
     // air mass's base, a cloud with a higher base was tilted from its base up.
-    var bottom = cloud_layer.cloud_layer_start;
+    var lean: vec3<f32>;
     if (cloud_layer.profile_mode == 0u) {
         let advected = world_pos - vec3(cloud_layer.noise_offset.x, 0.0, cloud_layer.noise_offset.z);
-        bottom = atmosphere.inner_radius + cloud_profile_base_m(cloud_weather_type(advected));
+        let cloud_type = cloud_weather_type(advected);
+        let z = max(r - atmosphere.inner_radius - cloud_profile_base_m(cloud_type), 0.0);
+        let n = vec2<f32>(textureDimensions(cloud_profile_lut));
+        let u = (min(z / CLOUD_PROFILE_RANGE_M, 1.0) * (n.x - 1.0) + 0.5) / n.x;
+        let v = (CLOUD_LEAN_FIRST_ROW + saturate(cloud_type) * (CLOUD_PROFILE_TYPE_ROWS - 1.0) + 0.5) / n.y;
+        let drift = textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(u, v), 0.0).r;
+        lean = cloud_layer.wind_shear * (drift / CLOUD_LEAN_SHEAR);
+    } else {
+        let z = max(r - cloud_layer.cloud_layer_start, 0.0);
+        lean = cloud_layer.wind_shear * (z * z / (2.0 * max(cloud_layer.updraft_speed, 0.1)));
     }
-    let z = max(r - bottom, 0.0);
-    let lean = cloud_layer.wind_shear * (z * z / (2.0 * max(cloud_layer.updraft_speed, 0.1)));
     return world_pos - vec3(cloud_layer.noise_offset.x + lean.x, 0.0, cloud_layer.noise_offset.z + lean.z);
 }
 
