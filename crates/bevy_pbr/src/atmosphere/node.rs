@@ -612,6 +612,37 @@ pub fn atmosphere_luts(
         );
         command_encoder.pop_debug_group();
     }
+
+    // The map's mip chain (`cloud_shadow_mips.wesl`): lookups read it at their pixel footprint.
+    if cloud_layer_uniforms_offset.is_some()
+        && let Some(mips_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.cloud_shadow_mips)
+    {
+        let texture = &textures.cloud_shadow_map.texture;
+        let layout = pipeline_cache.get_bind_group_layout(&layouts.cloud_shadow_mips);
+        let level = |mip: u32| {
+            texture.create_view(&bevy_render::render_resource::TextureViewDescriptor {
+                label: Some("cloud_shadow_map_mip"),
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let mut pass = labelled_compute_pass!("cloud_shadow_mips");
+        pass.set_pipeline(mips_pipeline);
+        for mip in 1..texture.mip_level_count() {
+            let bind_group = timing_device.create_bind_group(
+                "cloud_shadow_mips_bind_group",
+                &layout,
+                &bevy_render::render_resource::BindGroupEntries::sequential((
+                    &level(mip - 1),
+                    &level(mip),
+                )),
+            );
+            pass.set_bind_group(0, &bind_group, &[]);
+            let n = (texture.width() >> mip).max(1).div_ceil(8);
+            pass.dispatch_workgroups(n, ((texture.height() >> mip).max(1)).div_ceil(8), 1);
+        }
+    }
 }
 
 pub fn render_sky(

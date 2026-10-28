@@ -105,6 +105,44 @@ fn cloud_shadow_xy_to_uv(xy: vec2<f32>, extent: f32) -> vec2<f32> {
     return 0.5 * (xy / extent) * (rho / max(r, 1e-6)) + 0.5;
 }
 
+/// Size (m) of the warped cloud shadow map's texel at `uv` along its smaller, tangential axis:
+/// extent (a + (1 - a) rho^2) x 2 / size. The radial axis is (a + 3 (1 - a) rho^2) / (a + (1 - a)
+/// rho^2) times larger (2.75 x at the rim). Level-of-detail selection takes the smaller axis, as
+/// hardware mip selection takes the larger footprint-to-texel ratio.
+fn cloud_shadow_texel_m(uv: vec2<f32>, extent: f32, size: f32) -> f32 {
+    let rho = length(2.0 * uv - 1.0);
+    return extent * (CLOUD_SHADOW_WARP_A + (1.0 - CLOUD_SHADOW_WARP_A) * rho * rho) * 2.0 / max(size, 1.0);
+}
+
+/// Mip level of the cloud shadow map (`cloud_shadow_mips.wesl`) for a lookup whose pixel covers
+/// `footprint` m of the light plane: log2 of the texels it spans, 0 to the last level.
+fn cloud_shadow_lod(footprint: f32, uv: vec2<f32>, extent: f32, size: f32, levels: u32) -> f32 {
+    let texels = max(footprint, 1e-3) / cloud_shadow_texel_m(uv, extent, size);
+    return clamp(log2(texels), 0.0, f32(levels) - 1.0);
+}
+
+/// Angle one pixel subtends (rad) for a perspective projection (Bevy's: clip_from_view[1][1] =
+/// 1 / tan(fov_y / 2), [3][3] = 0), 0 for an orthographic one (no footprint growth).
+fn pixel_angle(clip_from_view: mat4x4<f32>, viewport_height: f32) -> f32 {
+    if (clip_from_view[3][3] != 0.0) {
+        return 0.0;
+    }
+    return 2.0 / (clip_from_view[1][1] * max(viewport_height, 1.0));
+}
+
+/// Footprint (m) in the light plane (basis `bx`, `by`) of a pixel of angle `angle` at distance
+/// `d`, seen along `v` (unit, camera to point) on a surface with normal `n`: the pixel covers
+/// d angle across the view and d angle / |v.n| along it on the surface (grazing views stretch
+/// it), each projected along the light onto the map. The larger of the two.
+fn cloud_shadow_surface_footprint(d: f32, angle: f32, v: vec3<f32>, n: vec3<f32>, bx: vec3<f32>, by: vec3<f32>) -> f32 {
+    let w = d * angle;
+    let across = safe_normalize(cross(n, v)) * w;
+    let along = safe_normalize(v - n * dot(v, n)) * (w / max(abs(dot(v, n)), 1e-3));
+    let a = length(vec2(dot(across, bx), dot(across, by)));
+    let b = length(vec2(dot(along, bx), dot(along, by)));
+    return max(a, b);
+}
+
 /// Weather-map uv to weather-window texel coordinates (`weather_window.wesl`).
 fn weather_window_local(uv: vec2<f32>) -> vec2<f32> {
     return uv * vec2<f32>(textureDimensions(noise_texture_2d)) - cloud_layer.weather_window_origin;

@@ -38,7 +38,9 @@ import package::{
     atmosphere::functions::{
         calculate_visible_sun_ratio, clamp_to_surface, build_light_basis, cubic_bspline_weights,
     },
-    atmosphere::clouds::cloud_shadow_xy_to_uv,
+    atmosphere::clouds::{
+        cloud_shadow_xy_to_uv, cloud_shadow_lod, pixel_angle, cloud_shadow_surface_footprint,
+    },
     atmosphere::bruneton_functions::transmittance_lut_r_mu_to_uv,
 };
 import bevy_render::maths::{PI, orthonormalize, quat_rotate};
@@ -943,7 +945,7 @@ color *= (*light).color.rgb * texture_sample;
     let sun_visibility = calculate_visible_sun_ratio(atmosphere, r, mu_light, (*light).sun_disk_angular_size);
 
     // Apply atmospheric effects
-    color *= transmittance * sun_visibility * sample_atmosphere_cloud_shadow(P_as, L);
+    color *= transmittance * sun_visibility * sample_atmosphere_cloud_shadow(P_as, L, N);
 }
 
     return color;
@@ -1140,7 +1142,7 @@ fn rect_light(
 /// other lights' lookups would read its shadows in their own basis). There are no cloud
 /// bindings here for a march toward those lights.
 @if(ATMOSPHERE)
-fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
+fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>, N: vec3<f32>) -> f32 {
     let settings = view_bindings::atmosphere_data.settings;
     let extent = settings.cloud_shadow_map_extent;
     if (extent <= 0.0 || view_bindings::lights.n_directional_lights == 0u
@@ -1165,11 +1167,34 @@ fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
     }
     let uv = cloud_shadow_xy_to_uv(vec2(x, y), extent);
     let thin = f32(length(P_as) < settings.cloud_thin_shadow_max_radius);
+    // At the pixel's footprint on the surface, as the planet ground (`sample_cloud_shadow_ground`;
+    // the atmosphere frame only translates and scales, so N holds there too).
+    let camera_as = (view_bindings::atmosphere_data.atmosphere.world_to_atmosphere
+        * vec4(view_bindings::view.world_position, 1.0)).xyz;
+    let to_point = P_as - camera_as;
+    let d = length(to_point);
+    let footprint = cloud_shadow_surface_footprint(
+        d, pixel_angle(view_bindings::view.clip_from_view, view_bindings::view.viewport.w),
+        to_point / max(d, 1e-3), N, basis.x, basis.y);
+    let levels = textureNumLevels(view_bindings::atmosphere_cloud_shadow_map);
+    let lod = cloud_shadow_lod(footprint, uv, extent, f32(settings.cloud_shadow_map_size.x), levels);
+    let m = u32(lod);
+    let t0 = atmosphere_cloud_shadow_bspline(uv, m, d_sample, thin);
+    if (lod == f32(m) || m + 1u >= levels) {
+        return t0;
+    }
+    return mix(t0, atmosphere_cloud_shadow_bspline(uv, m + 1u, d_sample, thin), lod - f32(m));
+}
+
+/// Cubic B-spline (4x4 texels) of the per-texel transmittance at mip `mip`, at depth `d_sample`
+/// from the map's near plane.
+@if(ATMOSPHERE)
+fn atmosphere_cloud_shadow_bspline(uv: vec2<f32>, mip: u32, d_sample: f32, thin: f32) -> f32 {
     // Cubic B-spline (4x4 texels) of the per-texel transmittance, as for the planet ground
     // (`sample_cloud_shadow_ground`): cumulus optical depth is ~50, so a bilinear blend of the
     // stored depths stays opaque until the last texel and drew the texel grid as staircase
     // shadow edges.
-    let size = vec2<i32>(settings.cloud_shadow_map_size);
+    let size = vec2<i32>(textureDimensions(view_bindings::atmosphere_cloud_shadow_map, mip));
     let st = uv * vec2<f32>(size) - 0.5;
     let i0 = vec2<i32>(floor(st)) - 1;
     let f = st - floor(st);
@@ -1180,7 +1205,7 @@ fn sample_atmosphere_cloud_shadow(P_as: vec3<f32>, L: vec3<f32>) -> f32 {
         var row = 0.0;
         for (var i = 0; i < 4; i++) {
             let c = clamp(i0 + vec2(i, j), vec2(0), size - 1);
-            let data = textureLoad(view_bindings::atmosphere_cloud_shadow_map, c, 0);
+            let data = textureLoad(view_bindings::atmosphere_cloud_shadow_map, c, mip);
             let front_depth = data.r * 1000.0;
             let tau = min(data.g * max(0.0, d_sample - front_depth), data.b);
             row += wx[i] * exp(-tau - thin * data.a);

@@ -46,7 +46,7 @@ import package::atmosphere::{
         get_cloud_absorption_coeff,
         get_cloud_scattering_coeff,
         sample_cloud_contribution,
-        cloud_shadow_xy_to_uv,
+        cloud_shadow_xy_to_uv, cloud_shadow_lod, pixel_angle, cloud_shadow_surface_footprint,
     },
 };
 
@@ -429,11 +429,34 @@ fn cloud_shadow_ground_uv(frame: CloudShadowFrame, world_pos: vec3<f32>) -> vec2
 /// (cloud-edge diffuseness plus the sun's penumbra, 0.0093 x cloud height).
 @if(CLOUDS_ENABLED)
 fn sample_cloud_shadow_ground(world_pos: vec3<f32>, direction_to_light: vec3<f32>) -> f32 {
-    let uv = cloud_shadow_ground_uv(cloud_shadow_frame(direction_to_light), world_pos);
+    let frame = cloud_shadow_frame(direction_to_light);
+    let uv = cloud_shadow_ground_uv(frame, world_pos);
     if (uv.x < 0.0) {
         return cloud_far_transmittance(world_pos, direction_to_light, true);
     }
-    let size = vec2<i32>(textureDimensions(cloud_shadow_map));
+    // At the pixel's footprint on the ground (`cloud_shadow_mips.wesl`): far and grazing views
+    // read the level whose texels the pixel covers, interpolated between two levels so the
+    // level does not pop as the distance changes.
+    let to_point = world_pos - get_view_position();
+    let d = length(to_point);
+    let footprint = cloud_shadow_surface_footprint(
+        d, pixel_angle(view.clip_from_view, view.viewport.w), to_point / max(d, 1e-3),
+        normalize(world_pos), frame.bx, frame.by);
+    let levels = textureNumLevels(cloud_shadow_map);
+    let lod = cloud_shadow_lod(footprint, uv, settings.cloud_shadow_map_extent,
+        f32(settings.cloud_shadow_map_size.x), levels);
+    let m = u32(lod);
+    let t0 = cloud_shadow_ground_bspline(uv, m);
+    if (lod == f32(m) || m + 1u >= levels) {
+        return t0;
+    }
+    return mix(t0, cloud_shadow_ground_bspline(uv, m + 1u), lod - f32(m));
+}
+
+/// Cubic B-spline (4x4 texels) of the per-texel transmittance at mip `mip`.
+@if(CLOUDS_ENABLED)
+fn cloud_shadow_ground_bspline(uv: vec2<f32>, mip: u32) -> f32 {
+    let size = vec2<i32>(textureDimensions(cloud_shadow_map, mip));
     let st = uv * vec2<f32>(size) - 0.5;
     let i0 = vec2<i32>(floor(st)) - 1;
     let f = st - floor(st);
@@ -445,7 +468,7 @@ fn sample_cloud_shadow_ground(world_pos: vec3<f32>, direction_to_light: vec3<f32
         var row = 0.0;
         for (var x = 0; x < 4; x++) {
             let c = clamp(i0 + vec2(x, y), vec2(0), size - 1);
-            let d = textureLoad(cloud_shadow_map, c, 0);
+            let d = textureLoad(cloud_shadow_map, c, mip);
             row += wx[x] * cloud_shadow_optical_depth(d.rgb) * exp(-d.a);
         }
         t += wy[y] * row;
@@ -508,6 +531,11 @@ fn cloud_shadow_map_lookup(world_pos: vec3<f32>, xy: vec2<f32>, d_sample: f32, u
     let uv = cloud_shadow_xy_to_uv(xy, extent);
     // Thin layers (alpha) shadow only points below them.
     let thin = cloud_thin_shadow_weight(world_pos);
+    // The level at the pixel's footprint across the view at this point (`cloud_shadow_mips.wesl`;
+    // no surface: the footprint is d x the pixel angle).
+    let lod = cloud_shadow_lod(
+        distance(world_pos, get_view_position()) * pixel_angle(view.clip_from_view, view.viewport.w),
+        uv, extent, f32(settings.cloud_shadow_map_size.x), textureNumLevels(cloud_shadow_map));
 
     @if(CLOUD_SHADOW_SIMPLE_SAMPLING) {
     // Bilinear filter of the per-texel transmittance (4 loads), not of the stored data. Between
@@ -517,14 +545,15 @@ fn cloud_shadow_map_lookup(world_pos: vec3<f32>, xy: vec2<f32>, d_sample: f32, u
     // length then jumped wherever a ray's shadow-map footprint passed a staircase corner: fixed
     // terraces in the haze in front of backlit clouds and arcs across light shafts, nested
     // around the sun and unaffected by the march jitter.
-    let size = vec2<i32>(textureDimensions(cloud_shadow_map));
+    let mip = u32(round(lod));
+    let size = vec2<i32>(textureDimensions(cloud_shadow_map, mip));
     let st = uv * vec2<f32>(size) - 0.5;
     let i0 = vec2<i32>(floor(st));
     let f = st - floor(st);
     var t = 0.0;
     for (var k = 0; k < 4; k++) {
         let o = vec2(k & 1, k >> 1);
-        let q = textureLoad(cloud_shadow_map, clamp(i0 + o, vec2(0), size - 1), 0);
+        let q = textureLoad(cloud_shadow_map, clamp(i0 + o, vec2(0), size - 1), mip);
         let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
         let tq = select(cloud_shadow_transmittance(q.rgb, d_sample), cloud_shadow_optical_depth(q.rgb), use_optical_depth_only);
         t += w * tq * exp(-thin * q.a);
@@ -534,17 +563,17 @@ fn cloud_shadow_map_lookup(world_pos: vec3<f32>, xy: vec2<f32>, d_sample: f32, u
     // 4-tap PCF (2x2 half-texel) to reduce aliasing and soften shadow edges.
     // Samples are offset by ±0.25 texels so the 2x2 footprint covers the sampling area.
     let size = vec2<f32>(settings.cloud_shadow_map_size);
-    let texel = vec2(1.0 / max(size.x, 1.0), 1.0 / max(size.y, 1.0));
+    let texel = exp2(lod) / max(size, vec2(1.0));
     // LUT passes (AP froxels, sky-view) sample the map sparsely along each ray, so they use a
     // wider 2x2 bilinear footprint (= 4x4-texel tent), UE5-style cloud shadow-map spatial filtering;
     // otherwise the map's texel grid aliases into a checker in the far haze.
     var o = 0.25 * texel;
     @if(ATMOSPHERE_LUT_CLOUD_SHADOW) { o = 1.0 * texel; }
 
-    let q00 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(-o.x, -o.y), 0.0);
-    let q10 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(o.x, -o.y), 0.0);
-    let q01 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(-o.x, o.y), 0.0);
-    let q11 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(o.x, o.y), 0.0);
+    let q00 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(-o.x, -o.y), lod);
+    let q10 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(o.x, -o.y), lod);
+    let q01 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(-o.x, o.y), lod);
+    let q11 = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv + vec2(o.x, o.y), lod);
     let d00 = q00.rgb;
     let d10 = q10.rgb;
     let d01 = q01.rgb;

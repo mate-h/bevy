@@ -154,6 +154,7 @@ impl Plugin for AtmospherePlugin {
         embedded_asset!(app, "fbm_noise_3d.wesl");
         embedded_asset!(app, "cloud_noise_quantiles.wesl");
         embedded_asset!(app, "weather_window.wesl");
+        embedded_asset!(app, "cloud_shadow_mips.wesl");
         embedded_asset!(app, "perlin_worley_noise_3d.wesl");
         embedded_asset!(app, "detail_noise_3d.wesl");
         embedded_asset!(app, "noise_mip_downsample_3d.wesl");

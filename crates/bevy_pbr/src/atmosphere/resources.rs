@@ -222,6 +222,8 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_field_escape: BindGroupLayoutDescriptor,
     /// Weather window compose pass (`weather_window.wesl`).
     pub weather_window: BindGroupLayoutDescriptor,
+    /// One level of the cloud shadow map's mip chain from the level above (`cloud_shadow_mips.wesl`).
+    pub cloud_shadow_mips: BindGroupLayoutDescriptor,
     /// Diffusion solve of the cloud field (`cloud_field.wesl` diffusion_*, sor_*).
     pub cloud_field_diffusion: BindGroupLayoutDescriptor,
 }
@@ -754,6 +756,19 @@ impl AtmosphereBindGroupLayouts {
                     ),
                 ),
             ),
+            cloud_shadow_mips: BindGroupLayoutDescriptor::new(
+                "cloud_shadow_mips_bind_group_layout",
+                &BindGroupLayoutEntries::sequential(
+                    ShaderStages::COMPUTE,
+                    (
+                        texture_2d(TextureSampleType::Float { filterable: false }),
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
             weather_window: BindGroupLayoutDescriptor::new(
                 "weather_window_bind_group_layout",
                 &BindGroupLayoutEntries::sequential(
@@ -1127,6 +1142,7 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_field_edt_z: CachedComputePipelineId,
     pub cloud_field_escape: CachedComputePipelineId,
     pub weather_window: CachedComputePipelineId,
+    pub cloud_shadow_mips: CachedComputePipelineId,
     /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
     pub cloud_field_diffusion: [CachedComputePipelineId; 8],
 }
@@ -1342,6 +1358,13 @@ impl FromWorld for AtmosphereLutPipelines {
                     entry_point: Some(entry.into()),
                     ..default()
                 })
+            }),
+            cloud_shadow_mips: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("cloud_shadow_mips_pipeline".into()),
+                layout: vec![layouts.cloud_shadow_mips.clone()],
+                shader: load_embedded_asset!(world, "cloud_shadow_mips.wesl"),
+                entry_point: Some("main".into()),
+                ..default()
             }),
             weather_window: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("weather_window_pipeline".into()),
@@ -1775,10 +1798,11 @@ pub(super) fn prepare_atmosphere_textures(
         let weather_window_art = window("weather_window_art");
         let weather_window_physical = window("weather_window_physical");
 
+        // Mip chain: lookups read the map at their pixel footprint (`cloud_shadow_mips.wesl`).
         let cloud_shadow_map = textures.get(TextureDescriptor {
             label: Some("cloud_shadow_map"),
             size: cloud_shadow_map_extent,
-            mip_level_count: 1,
+            mip_level_count: cloud_shadow_map_extent.max_mips(TextureDimension::D2),
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba16Float,
@@ -2596,33 +2620,41 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )),
         );
 
+        // The map's passes write and read its top level as storage (a storage view holds one
+        // mip); every lookup samples the whole mip chain through `default_view`.
+        let shadow_mip0 = textures.cloud_shadow_map.texture.create_view(&TextureViewDescriptor {
+            label: Some("cloud_shadow_map_mip0"),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..default()
+        });
         // When temporal enabled: trace writes to tmp; filter reads tmp first.
         // When temporal disabled: trace writes to cloud_shadow_map; filter reads cloud_shadow_map first.
         let trace_storage = if temporal_enabled {
             &textures.cloud_shadow_map_tmp.default_view
         } else {
-            &textures.cloud_shadow_map.default_view
+            &shadow_mip0
         };
         let (filter_read_a, filter_write_a) = if temporal_enabled {
             (
                 &textures.cloud_shadow_map_tmp.default_view,
-                &textures.cloud_shadow_map.default_view,
+                &shadow_mip0,
             )
         } else {
             (
-                &textures.cloud_shadow_map.default_view,
+                &shadow_mip0,
                 &textures.cloud_shadow_map_tmp.default_view,
             )
         };
         let (filter_read_b, filter_write_b) = if temporal_enabled {
             (
-                &textures.cloud_shadow_map.default_view,
+                &shadow_mip0,
                 &textures.cloud_shadow_map_tmp.default_view,
             )
         } else {
             (
                 &textures.cloud_shadow_map_tmp.default_view,
-                &textures.cloud_shadow_map.default_view,
+                &shadow_mip0,
             )
         };
 
@@ -2695,7 +2727,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                                 (1, &textures.cloud_shadow_map_tmp.default_view),
                                 (2, &textures.cloud_shadow_map_history.default_view),
                                 (3, &atmosphere_sampler.0),
-                                (4, &textures.cloud_shadow_map.default_view),
+                                (4, &shadow_mip0),
                             )),
                         )
                     })
