@@ -35,6 +35,7 @@ pub fn atmosphere_luts(
         &super::ExtractedAtmosphere,
         &ExtractedView,
         Option<&GpuCloudLayers>,
+        Option<&super::resources::CloudLightTurn>,
     )>,
     pipelines: Res<AtmosphereLutPipelines>,
     layouts: Res<super::resources::AtmosphereBindGroupLayouts>,
@@ -58,6 +59,7 @@ pub fn atmosphere_luts(
         extracted_atmosphere,
         extracted_view,
         gpu_cloud_layers,
+        light_turn,
     ) = view.into_inner();
     // This system runs once per view: amortised state (the LUT cache, the cloud-field rebuild
     // stage) is per view, or two views would split one counter between them (audit 9).
@@ -487,6 +489,14 @@ pub fn atmosphere_luts(
                 let mut steps: Vec<(&'static str, Vec<Dispatch>)> = Vec::new();
                 // SOR colours index half the cells in x, the source slice an eighth of the cells.
                 let half_x = UVec3::new(g.x.div_ceil(2), g.y, g.z);
+                // A turning light moves every cell's source (its sun transmittance) at once:
+                // past 1/8 of a voxel over the last 16 frames (`CloudLightTurn`; the shadow map
+                // it reads converges within those frames), the whole source is refreshed each
+                // frame and the solve takes 8 iterations (red-black SOR on this grid: 8 cut the
+                // error of a 30-degree change to 0.25 of its start, against 0.65 for one).
+                // Otherwise one slice of the source and one iteration per frame.
+                let turning = !full_build
+                    && light_turn.is_some_and(|t| t.recent > t.field_tolerance);
                 if full_build {
                     steps.push(("cloud_diffusion_reset", vec![(reset, g)]));
                     steps.push(("cloud_diffusion_source", vec![(source, g)]));
@@ -496,13 +506,23 @@ pub fn atmosphere_luts(
                     if stage == 0 {
                         steps.push(("cloud_diffusion_shift", vec![(shift, g), (shift_commit, g)]));
                     }
-                    steps.push((
-                        "cloud_diffusion_source_slice",
-                        vec![(source_slice, (g + UVec3::ONE) / 2)],
-                    ));
+                    if turning {
+                        steps.push(("cloud_diffusion_source", vec![(source, g)]));
+                    } else {
+                        steps.push((
+                            "cloud_diffusion_source_slice",
+                            vec![(source_slice, (g + UVec3::ONE) / 2)],
+                        ));
+                    }
                 }
                 let sor = [(red, half_x), (black, half_x)];
-                let iterations = if full_build { 32 } else { 1 };
+                let iterations = if full_build {
+                    32
+                } else if turning {
+                    8
+                } else {
+                    1
+                };
                 steps.push(("cloud_diffusion_sor", sor.repeat(iterations)));
                 steps.push(("cloud_diffusion_publish", vec![(publish, g)]));
                 let run = |pass: &mut ComputePass, dispatches: &[Dispatch]| {

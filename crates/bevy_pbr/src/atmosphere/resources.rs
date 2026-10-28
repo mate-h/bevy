@@ -43,6 +43,8 @@ pub(crate) const CLOUD_FIELD_RES_XY: u32 = 128;
 /// Edge of the weather window around the camera, in weather-map texels (`weather_window.wesl`).
 pub const WEATHER_WINDOW_SIZE: u32 = 1024;
 pub(crate) const CLOUD_FIELD_RES_Z: u32 = 32;
+/// Horizontal extent of the cloud field grid (m; `clouds.wesl` CLOUD_FIELD_EXTENT_M).
+pub(crate) const CLOUD_FIELD_EXTENT_M: f32 = 24_000.0;
 
 /// Shadow map bind group layout entries
 fn shadow_map_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<4> {
@@ -2221,14 +2223,30 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
             textures.cloud_shadow_map_history.texture.id(),
             frame_count.0,
         );
+        let turn = CloudLightTurn {
+            recent: params.rotation_since[3].w,
+            field_tolerance: params.history_angle_scale
+                * (CLOUD_FIELD_EXTENT_M / CLOUD_FIELD_RES_XY as f32)
+                / 8.0,
+        };
         let mut buffer = UniformBuffer::from(params);
         buffer.write_buffer(&render_device, &render_queue);
         commands
             .entity(entity)
-            .insert(CloudShadowTemporalParamsUniform(buffer));
+            .insert((CloudShadowTemporalParamsUniform(buffer), turn));
         seen.insert(view.retained_view_entity, state);
     }
     *states = seen;
+}
+
+/// How far the view's light turned recently, for the cloud field's diffusion solve (`node.rs`):
+/// the angle over the last 16 frames (rad), and the angle at which the solve's source goes stale
+/// by 1/8 of a field voxel (rad): voxel x |mu| / layer thickness / 8, the 8-frame slice cycle's
+/// share of the voxel (see [`CloudShadowTemporalParams::history_angle_scale`]).
+#[derive(Component, Clone, Copy, Default)]
+pub struct CloudLightTurn {
+    pub recent: f32,
+    pub field_tolerance: f32,
 }
 
 /// Per-view uniform for [`CloudShadowTemporalParams`].
