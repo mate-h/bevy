@@ -52,7 +52,9 @@ pub enum CloudProfiles {
     /// - 1: continental cumulus, the CASS composite of the ARM Southern Great Plains site at
     ///   1330 LST (Zhang et al. 2017, J. Atmos. Sci. 74): base 1675 m, the fraction falls off
     ///   through ~2.1 km above it as the cloudy updrafts detrain (Neggers et al. 2009, sec. 5c),
-    ///   within the bulk and bin microphysics LES; liquid water ~1.5x the bulk LES aloft.
+    ///   within the bulk and bin microphysics LES, and tapers to 0 over the ~400 m where the
+    ///   parcels stop (top ~4.4 km; LES 4.2 km, ARSCL above 4.3 km); liquid water ~1.5x the bulk
+    ///   LES aloft.
     /// The baker records its inputs in the KTX2 key/value data.
     #[default]
     Physical,
