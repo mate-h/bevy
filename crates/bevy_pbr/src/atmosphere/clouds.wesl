@@ -892,7 +892,24 @@ fn cloud_field_voxel_m() -> f32 {
     return CLOUD_FIELD_EXTENT_M / f32(CLOUD_FIELD_RES_XY);
 }
 
-/// Grid origin (min corner, atmosphere-space x/z), snapped to whole voxels so it does not swim.
+/// Horizontal position in the cloud frame: atmosphere-space x/z minus the wind advection. Every
+/// density input is sampled at `p - noise_offset` (`cloud_sample_pos`; the shear lean too), so
+/// the clouds are fixed in this frame up to the rising noise and the life cycle. The field is
+/// indexed in it: a field built some frames ago (the rebuild is spread over 8 frames) still lies
+/// on the clouds that moved since. Indexed in atmosphere space, the field fell behind the clouds
+/// by the advection of up to 8 frames and jumped back at each rebuild: its SDF, escape and
+/// diffusion terms flashed every 8 frames in time-lapse (`CloudTimeScale` 60: ~1 s of wind per
+/// frame, a voxel per rebuild at 180x).
+fn cloud_field_frame_xz(p: vec3<f32>) -> vec2<f32> {
+    return p.xz - cloud_layer.noise_offset.xz;
+}
+
+/// A cloud-frame horizontal position back in atmosphere space (this frame's advection).
+fn cloud_field_frame_to_atmosphere_xz(xz: vec2<f32>) -> vec2<f32> {
+    return xz + cloud_layer.noise_offset.xz;
+}
+
+/// Grid origin (min corner, cloud-frame x/z), snapped to whole voxels so it does not swim.
 /// Field cell of the camera: integer voxel index (stored in the field so consumers use the
 /// origin the field was actually built with; the build is spread over several frames).
 fn cloud_field_cell(cam: vec3<f32>) -> vec2<f32> {
@@ -907,7 +924,7 @@ fn cloud_field_cell(cam: vec3<f32>) -> vec2<f32> {
     // 1,500 km) off the place it was built, beyond the SDF skip margin). Rounded cells stay even
     // (half-float spacing is >= 2 there). The grid then follows the camera in coarser steps far
     // from the origin (6 km at Earth-radius coordinates, within the 12 km half extent).
-    let cell = 2.0 * floor(cam.xz / (2.0 * cloud_field_voxel_m()));
+    let cell = 2.0 * floor(cloud_field_frame_xz(cam) / (2.0 * cloud_field_voxel_m()));
     return unpack2x16float(pack2x16float(cell));
 }
 
@@ -919,10 +936,10 @@ fn cloud_field_origin(cam: vec3<f32>) -> vec2<f32> {
     return cloud_field_origin_from_cell(cloud_field_cell(cam));
 }
 
-/// Normalised field coordinate of an atmosphere-space point; outside [0,1]^3 = not covered.
-/// `cell` is the stored build cell (`cloud_field_sdf.ba`).
+/// Normalised field coordinate of an atmosphere-space point (through the cloud frame); outside
+/// [0,1]^3 = not covered. `cell` is the stored build cell (`cloud_field_sdf.ba`).
 fn cloud_field_uvw(p: vec3<f32>, cell: vec2<f32>) -> vec3<f32> {
-    let uv = (p.xz - cloud_field_origin_from_cell(cell)) / CLOUD_FIELD_EXTENT_M;
+    let uv = (cloud_field_frame_xz(p) - cloud_field_origin_from_cell(cell)) / CLOUD_FIELD_EXTENT_M;
     let w = (length(p) - cloud_layer.cloud_layer_start)
         / max(cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start, 1.0);
     return vec3(uv, w);

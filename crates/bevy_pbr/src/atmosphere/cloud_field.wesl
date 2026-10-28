@@ -22,6 +22,7 @@ import package::atmosphere::clouds::{
     get_cloud_scattering_coeff,
     get_cloud_absorption_coeff,
     cloud_field_origin_from_cell,
+    cloud_field_frame_to_atmosphere_xz,
     cloud_field_cell,
     cloud_field_voxel_m,
     CLOUD_FIELD_RES_XY,
@@ -64,7 +65,7 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let thick = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
     let dz = thick / f32(CLOUD_FIELD_RES_Z);
     let cell = cloud_field_cell(view_position());
-    let xz = cloud_field_origin_from_cell(cell) + (vec2<f32>(id.xy) + 0.5) * vox;
+    let xz = cloud_field_frame_to_atmosphere_xz(cloud_field_origin_from_cell(cell) + (vec2<f32>(id.xy) + 0.5) * vox);
     let r = cloud_layer.cloud_layer_start + (f32(id.z) + 0.5) * dz;
     let p = vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y);
     let coarse = get_cloud_medium_density_coarse(length(p), p);
@@ -316,8 +317,9 @@ fn diffusion_source_cell(id: vec3<u32>) {
             t += dt;
             dt *= ESC_STEP_GROWTH;
         }
-        // The cell centre in atmosphere space (as `init`, with the extinction's own build cell).
-        let xz = cloud_field_origin_from_cell(e.ba) + (vec2<f32>(id.xy) + 0.5) * vox;
+        // The cell centre in atmosphere space (as `init`, with the extinction's own build cell,
+        // where the cloud it holds is this frame).
+        let xz = cloud_field_frame_to_atmosphere_xz(cloud_field_origin_from_cell(e.ba) + (vec2<f32>(id.xy) + 0.5) * vox);
         let r = cloud_layer.cloud_layer_start + (f32(id.z) + 0.5) * e.g;
         let p = vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y);
         tau += diffusion_sun_tau_beyond(p + l * t, l);
