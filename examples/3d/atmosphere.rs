@@ -155,6 +155,8 @@ fn main() {
                 sun_drag,
                 atmosphere_controls,
                 debug_overlay_controls,
+                debug_overlay_scale,
+                wind_speed_controls,
                 cycle_cloud_profiles,
                 visibility_toggle.after(atmosphere_controls),
                 camera_pose_title,
@@ -341,6 +343,7 @@ fn print_controls() {
     println!("    T          - Toggle 60x cloud time-lapse (wind, rising thermals, cloud life cycle)");
     println!("    Right drag - Slide the time of day (sun position)");
     println!("    Up/Down    - Increase/Decrease exposure");
+    println!("    - / =      - Decrease/Increase the wind speed (whole profile: drift and lean), 0x .. 2x");
     println!("    Tab        - Toggle the debug view (LUTs, cloud buffers, cloud field, weather, noise)");
     println!("    [ / ]      - Debug view: move the slice of the 3D textures down/up");
 }
@@ -352,6 +355,72 @@ struct DebugOverlay;
 /// The debug overlay's slice readout.
 #[derive(Component)]
 struct DebugSliceText;
+
+/// Wind speed multiplier (- / =) on the atmosphere's wind profile as spawned.
+struct WindScale {
+    base: Option<AtmosphereWind>,
+    scale: f32,
+}
+
+impl Default for WindScale {
+    fn default() -> Self {
+        Self { base: None, scale: 1.0 }
+    }
+}
+
+/// Scales the whole wind profile (- / =): the clouds' drift and, through the shear, their lean.
+/// Up to 2x: with stronger shear the lean changes across air masses faster than the field can
+/// follow (`VolumetricCloudLayer::wind_shear`). `ATMOSPHERE_WIND_SCALE=<x>` sets it at startup.
+fn wind_speed_controls(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut state: Local<WindScale>,
+    mut winds: Query<&mut AtmosphereWind>,
+) {
+    let initial = (state.base.is_none() && !winds.is_empty())
+        .then(|| env_f32("ATMOSPHERE_WIND_SCALE"))
+        .flatten();
+    if let Some(scale) = initial {
+        state.scale = scale.clamp(0.0, 2.0);
+    } else if keyboard_input.just_pressed(KeyCode::Equal) {
+        state.scale = (state.scale + 0.25).min(2.0);
+    } else if keyboard_input.just_pressed(KeyCode::Minus) {
+        state.scale = (state.scale - 0.25).max(0.0);
+    } else {
+        if state.base.is_none() {
+            for wind in &winds {
+                state.base = Some(wind.clone());
+            }
+        }
+        return;
+    }
+    let scale = state.scale;
+    for mut wind in &mut winds {
+        let base = state.base.get_or_insert_with(|| wind.clone());
+        wind.levels = base.levels.iter().map(|&(z, v)| (z, v * scale)).collect();
+    }
+    let (bottom, top) = bevy::pbr::physical_profile_bounds();
+    let shear = state.base.as_ref().map_or(0.0, |b| b.mean_shear(bottom, top).length()) * scale;
+    println!("Wind x{scale:.2} (cloud-layer shear {:.1} m/s per km)", shear * 1e3);
+}
+
+/// Edge of the debug grid at UI scale 1 (logical px): 5 x 4 tiles with labels.
+const DEBUG_GRID: Vec2 = Vec2::new(5.0 * (DEBUG_TILE + 4.0) + 8.0, 4.0 * (DEBUG_TILE + 26.0) + 24.0);
+
+/// The debug overlay at the display's scale: the window is pinned to scale factor 1 (dumps match
+/// across displays), so on a HiDPI display the overlay would be half size. The UI scale is the
+/// display's own scale factor (2 on HiDPI), at most what keeps the grid within 60 % of the
+/// window's width and its height.
+fn debug_overlay_scale(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, mut ui_scale: ResMut<UiScale>) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let fit = (0.6 * window.physical_width() as f32 / DEBUG_GRID.x)
+        .min(0.98 * window.physical_height() as f32 / DEBUG_GRID.y);
+    let scale = window.resolution.base_scale_factor().min(fit).max(0.5);
+    if (ui_scale.0 - scale).abs() > 1e-3 {
+        ui_scale.0 = scale;
+    }
+}
 
 /// Edge of a debug preview in the overlay (logical px).
 const DEBUG_TILE: f32 = 136.0;
