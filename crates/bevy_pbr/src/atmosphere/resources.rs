@@ -1653,7 +1653,10 @@ pub(super) fn prepare_atmosphere_textures(
                 sample_count: 1,
                 dimension: TextureDimension::D3,
                 format,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                // COPY_SRC: debug dumps (`CLOUD_DUMP_DIR`).
+                usage: TextureUsages::STORAGE_BINDING
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
         };
@@ -1697,12 +1700,12 @@ pub(super) fn prepare_atmosphere_textures(
         let cloud_field_diff_src = field_volume(
             "cloud_field_diff_src",
             TextureFormat::R32Float,
-            TextureUsages::STORAGE_BINDING,
+            TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
         );
         let cloud_field_diff_u = field_volume(
             "cloud_field_diff_u",
             TextureFormat::R32Float,
-            TextureUsages::STORAGE_BINDING,
+            TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
         );
         let cloud_field_diff = field_volume(
             "cloud_field_diff",

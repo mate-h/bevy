@@ -12,7 +12,10 @@
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
 //!   `ATMOSPHERE_LUT_MODE`.
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
-//!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse).
+//!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse),
+//!   `ATMOSPHERE_SUN_SWEEP=<deg/frame>,<first>,<last>` (turns the sun by a fixed angle per frame),
+//!   `ATMOSPHERE_WIND_SCALE=<x>` (wind profile multiplier, 0..2; `-` / `=`).
+//! - Debug view: `ATMOSPHERE_DEBUG_VIEW=1` starts with the LUT / buffer previews shown (Tab).
 //! - Cloud shadows: `ATMOSPHERE_SHADOW_INTERLEAVE`, `ATMOSPHERE_SHADOW_SAMPLES`,
 //!   `ATMOSPHERE_SHADOW_TEMPORAL_ALPHA`.
 //! - Capture / runs: `ATMOSPHERE_BACKGROUND`, `ATMOSPHERE_SCREENSHOT`, `ATMOSPHERE_SCREENSHOT_SECS`,
@@ -153,6 +156,7 @@ fn main() {
             (
                 dynamic_scene,
                 sun_drag,
+                sun_sweep,
                 atmosphere_controls,
                 debug_overlay_controls,
                 debug_overlay_scale,
@@ -1297,6 +1301,25 @@ fn dynamic_scene(
     if !sun_motion_state.paused {
         suns.iter_mut()
             .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 40.0));
+    }
+}
+
+/// `ATMOSPHERE_SUN_SWEEP=<deg per frame>,<first frame>,<last frame>`: swings the sun along its
+/// arc (as right-drag) by a fixed angle per frame, independent of time, so fast lighting changes
+/// are reproducible in background runs and dumps.
+fn sun_sweep(mut frame: Local<u32>, mut suns: Query<&mut Transform, With<DirectionalLight>>) {
+    let Some(v) = std::env::var("ATMOSPHERE_SUN_SWEEP").ok() else {
+        return;
+    };
+    let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    let n = *frame;
+    *frame += 1;
+    if p.len() != 3 || (n as f32) < p[1] || (n as f32) > p[2] {
+        return;
+    }
+    let rotation = Quat::from_rotation_z(-p[0].to_radians());
+    for mut tf in &mut suns {
+        tf.rotation = rotation * tf.rotation;
     }
 }
 

@@ -705,6 +705,19 @@ pub fn render_sky(
                 "rgba16f",
             );
         }
+        // The cloud field and its diffusion solve, as this frame left them (all 3D).
+        let s3 = |t: &bevy_render::render_resource::Texture| {
+            UVec3::new(t.width(), t.height(), t.depth_or_array_layers())
+        };
+        for (name, t, bpt, ext) in [
+            ("field_ext", &textures.cloud_field_ext.texture, 8, "rgba16f"),
+            ("field_esc", &textures.cloud_field_esc.texture, 8, "rgba16f"),
+            ("field_diff", &textures.cloud_field_diff.texture, 8, "rgba16f"),
+            ("field_diff_u", &textures.cloud_field_diff_u.texture, 4, "r32f"),
+            ("field_diff_src", &textures.cloud_field_diff_src.texture, 4, "r32f"),
+        ] {
+            d(command_encoder, name, t, 0, s3(t), bpt, ext);
+        }
         let (pw, det, wx) = &noise_dump;
         if let Some(pw) = pw {
             d(
