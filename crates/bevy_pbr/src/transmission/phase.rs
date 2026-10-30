@@ -1,10 +1,10 @@
 use core::ops::Range;
 
-use bevy_camera::{Camera, Camera3d};
+use bevy_camera::{ActiveCubemapSides, Camera, Camera3d, OmnidirectionalCamera};
 use bevy_core_pipeline::core_3d::TransparentSortingInfo3d;
 use bevy_ecs::{
     entity::{Entity, EntityHash},
-    query::With,
+    query::{Has, With},
     system::{Local, Query, ResMut},
 };
 use bevy_material::{descriptor::CachedRenderPipelineId, labels::DrawFunctionId};
@@ -122,21 +122,48 @@ impl CachedRenderPipelinePhaseItem for Transmissive3d {
 
 pub fn extract_transmissive_camera_phases(
     mut transmissive_3d_phases: ResMut<ViewSortedRenderPhases<Transmissive3d>>,
-    cameras: Extract<Query<(Entity, &Camera), With<Camera3d>>>,
+    cameras: Extract<
+        Query<
+            (
+                Entity,
+                &Camera,
+                Option<&ActiveCubemapSides>,
+                Has<OmnidirectionalCamera>,
+            ),
+            With<Camera3d>,
+        >,
+    >,
     mut live_entities: Local<HashSet<RetainedViewEntity>>,
 ) {
     live_entities.clear();
 
-    for (main_entity, camera) in &cameras {
+    for (main_entity, camera, active_sides, is_omnidirectional) in &cameras {
         if !camera.is_active {
             continue;
         }
 
-        // This is the main camera, so use the first subview index (0).
-        let retained_view_entity = RetainedViewEntity::new(main_entity.into(), None, 0);
+        if is_omnidirectional {
+            // `queue_material_meshes` requires a transmissive phase for every
+            // retained view it processes. Omni cameras expand to 6 face views.
+            let active_sides = active_sides
+                .copied()
+                .unwrap_or_else(ActiveCubemapSides::all);
+            for face_index in 0..6u32 {
+                if !active_sides.contains(ActiveCubemapSides::from_bits_retain(1 << face_index)) {
+                    continue;
+                }
+                let retained_view_entity =
+                    RetainedViewEntity::new(main_entity.into(), None, face_index);
+                transmissive_3d_phases.prepare_for_new_frame(retained_view_entity);
+                live_entities.insert(retained_view_entity);
+            }
+        } else {
+            // This is the main camera, so use the first subview index (0).
+            let retained_view_entity = RetainedViewEntity::new(main_entity.into(), None, 0);
 
-        transmissive_3d_phases.prepare_for_new_frame(retained_view_entity);
-        live_entities.insert(retained_view_entity);
+            transmissive_3d_phases.prepare_for_new_frame(retained_view_entity);
+            live_entities.insert(retained_view_entity);
+        }
     }
 
     transmissive_3d_phases.retain(|view_entity, _| live_entities.contains(view_entity));

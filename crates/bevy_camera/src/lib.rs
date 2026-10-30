@@ -2,6 +2,7 @@
 mod camera;
 mod clear_color;
 mod components;
+mod omnidirectional;
 pub mod primitives;
 mod projection;
 pub mod visibility;
@@ -10,7 +11,9 @@ use bevy_ecs::schedule::SystemSet;
 pub use camera::*;
 pub use clear_color::*;
 pub use components::*;
+pub use omnidirectional::*;
 pub use projection::*;
+pub use visibility::OmnidirectionalVisibleEntities;
 
 use bevy_app::{App, Plugin};
 
@@ -35,7 +38,7 @@ pub mod prelude {
     pub use crate::{
         visibility::{InheritedVisibility, ViewVisibility, Visibility},
         Camera, Camera2d, Camera3d, ClearColor, ClearColorConfig, CompositingSpace, MsaaWriteback,
-        OrthographicProjection, PerspectiveProjection, Projection,
+        OmnidirectionalCamera, OrthographicProjection, PerspectiveProjection, Projection,
     };
 }
 

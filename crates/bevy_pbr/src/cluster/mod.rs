@@ -1,6 +1,7 @@
 use core::{iter, num::NonZero};
 
-use bevy_camera::Camera;
+use bevy_camera::{Camera, OmnidirectionalCamera};
+use bevy_core_pipeline::core_3d::RenderOmnidirectionalCameras;
 use bevy_ecs::{entity::EntityHashMap, prelude::*};
 use bevy_light::{
     cluster::{
@@ -163,7 +164,7 @@ pub struct GpuClusteredLights {
     is_storage_buffer: bool,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct ExtractedClusterConfig {
     /// Special near value for cluster calculations
     pub(crate) near: f32,
@@ -184,6 +185,7 @@ impl<'a> From<&'a Clusters> for ExtractedClusterConfig {
 
 /// A single command in the stream that [`extract_clusters_for_cpu_clustering`]
 /// produces.
+#[derive(Clone)]
 enum ExtractedClusterableObjectElement {
     /// Marks the beginning of a new cluster.
     ClusterHeader(ClusterableObjectCounts),
@@ -207,7 +209,7 @@ enum ExtractedClusterableObjectElement {
     Decal(Entity),
 }
 
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct ExtractedClusterableObjects {
     data: Vec<ExtractedClusterableObjectElement>,
 }
@@ -393,7 +395,16 @@ pub fn gpu_clustering_is_enabled(global_cluster_settings: Res<GlobalClusterSetti
 /// Extracts the clusters that the CPU produced into the render world.
 pub fn extract_clusters_for_cpu_clustering(
     mut commands: Commands,
-    views: Extract<Query<(RenderEntity, &Clusters, &Camera)>>,
+    omnidirectional_cameras: Res<RenderOmnidirectionalCameras>,
+    views: Extract<
+        Query<(
+            Entity,
+            RenderEntity,
+            &Clusters,
+            &Camera,
+            Has<OmnidirectionalCamera>,
+        )>,
+    >,
     mapper: Extract<
         Query<
             (Option<&RenderEntity>, ClusterExtractionMapperQueryFlags),
@@ -402,12 +413,11 @@ pub fn extract_clusters_for_cpu_clustering(
     >,
     global_cluster_settings: Extract<Res<GlobalClusterSettings>>,
 ) {
-    for (entity, clusters, camera) in &views {
-        let mut entity_commands = commands
-            .get_entity(entity)
-            .expect("Clusters entity wasn't synced.");
+    for (main_entity, entity, clusters, camera, is_omni) in &views {
         if !camera.is_active {
-            entity_commands.remove::<(ExtractedClusterableObjects, ExtractedClusterConfig)>();
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.remove::<(ExtractedClusterableObjects, ExtractedClusterConfig)>();
+            }
             continue;
         }
 
@@ -464,10 +474,22 @@ pub fn extract_clusters_for_cpu_clustering(
             }
         }
 
-        entity_commands.insert((
+        let extracted = (
             ExtractedClusterableObjects { data },
             ExtractedClusterConfig::from(clusters),
-        ));
+        );
+
+        if is_omni {
+            if let Some(faces) = omnidirectional_cameras.get(&main_entity) {
+                for &(face_entity, _) in faces {
+                    if let Ok(mut entity_commands) = commands.get_entity(face_entity) {
+                        entity_commands.insert(extracted.clone());
+                    }
+                }
+            }
+        } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.insert(extracted);
+        }
     }
 
     commands.insert_resource(global_cluster_settings.clone());
