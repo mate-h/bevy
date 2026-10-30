@@ -1,4 +1,4 @@
-import bevy_pbr::{
+import package::{
     render::{
         pbr_lighting as lighting,
         utils::interleaved_gradient_noise,
@@ -13,11 +13,13 @@ import bevy_render::maths::PI;
 @if(TONEMAP_IN_SHADER)
 import bevy_core_pipeline::tonemapping::approximate_inverse_tone_mapping;
 
-// The IOR impacts how much a single microfacet refracts incoming light. In turn this changes how
-// "wide" the distribution of output ray directions is and how rough the BRDF should be.
-// This function scales the roughness toward 0.0 as IOR tends towards 1.0, while leaving the default
-// roughness for IOR = 1.5.
-// Adapted from Khronos gltf-Sample-Renderer (https://github.com/KhronosGroup/glTF-Sample-Renderer/blob/bec106e53da4a6a398aa3205f0f96563519a657e/source/Renderer/shaders/functions.glsl#L84-L89)
+@if (VIEW_TRANSMISSION_TEXTURE) {
+
+/// The IOR impacts how much a single microfacet refracts incoming light. In turn this changes how
+/// "wide" the distribution of output ray directions is and how rough the BRDF should be.
+/// This function scales the roughness toward 0.0 as IOR tends towards 1.0, while leaving the default
+/// roughness for IOR = 1.5.
+/// Adapted from Khronos gltf-Sample-Renderer (https://github.com/KhronosGroup/glTF-Sample-Renderer/blob/bec106e53da4a6a398aa3205f0f96563519a657e/source/Renderer/shaders/functions.glsl#L84-L89)
 fn ior_corrected_roughness(roughness: f32, ior: f32) -> f32 {
     return roughness * clamp(ior * 2.0 - 2.0, 0.0, 1.0);
 }
@@ -42,8 +44,8 @@ fn specular_transmissive_light(world_position: vec4<f32>, frag_coord: vec3<f32>,
 
     // Scale / offset position so that coordinate is in right space for sampling transmissive background texture
     let subview_position = (clip_exit_position.xy / clip_exit_position.w) * vec2<f32>(0.5, -0.5) + 0.5;
-    let viewport_origin = view_bindings::view.viewport.xy;
-    let viewport_size = view_bindings::view.viewport.zw;
+    let viewport_origin = view_bindings::view.main_pass_viewport.xy;
+    let viewport_size = view_bindings::view.main_pass_viewport.zw;
     let full_size = vec2<f32>(textureDimensions(view_bindings::view_transmission_texture));
     let offset_position = (subview_position * viewport_size + viewport_origin) / full_size;
 
@@ -73,14 +75,14 @@ fn specular_transmissive_light(world_position: vec4<f32>, frag_coord: vec3<f32>,
 fn fetch_transmissive_background_non_rough(offset_position: vec2<f32>, frag_coord: vec3<f32>) -> vec4<f32> {
     var background_color = textureSampleLevel(
         view_bindings::view_transmission_texture,
-        view_bindings::view_transmission_sampler,
+        view_bindings::linear_sampler,
         offset_position,
         0.0
     );
 
     @if(DEPTH_PREPASS && !WEBGL2)
     // Use depth prepass data to reject values that are in front of the current fragment
-    if prepass_utils::prepass_depth(vec4<f32>(offset_position * view_bindings::view.viewport.zw, 0.0, 0.0), 0u) > frag_coord.z {
+    if prepass_utils::prepass_depth(vec4<f32>(offset_position * vec2<f32>(textureDimensions(view_bindings::depth_prepass_texture)), 0.0, 0.0), 0u) > frag_coord.z {
         background_color.a = 0.0;
     }
 
@@ -92,7 +94,9 @@ fn fetch_transmissive_background_non_rough(offset_position: vec2<f32>, frag_coor
 
 fn fetch_transmissive_background(offset_position: vec2<f32>, frag_coord: vec3<f32>, view_z: f32, transmission_roughness: f32) -> vec4<f32> {
     // Calculate view aspect ratio, used to scale offset so that it's proportionate
-    let aspect = view_bindings::view.viewport.z / view_bindings::view.viewport.w;
+    let viewport_size = view_bindings::view.main_pass_viewport.zw;
+    let aspect = viewport_size.x / viewport_size.y;
+    let viewport_to_texture = viewport_size / vec2<f32>(textureDimensions(view_bindings::view_transmission_texture));
 
     // Calculate how “blurry” the transmission should be.
     // Blur is more or less eyeballed to look approximately “right”, since the “correct”
@@ -164,19 +168,19 @@ fn fetch_transmissive_background(offset_position: vec2<f32>, frag_coord: vec3<f3
         let rotated_spiral_offset = (rotation_matrix * spiral_offset) * vec2(1.0, aspect);
 
         // Calculate final offset position, with blur and spiral offset
-        let modified_offset_position = offset_position + rotated_spiral_offset * blur_intensity * (1.0 - f32(pixel_checkboard) * 0.1);
+        let modified_offset_position = offset_position + rotated_spiral_offset * viewport_to_texture * blur_intensity * (1.0 - f32(pixel_checkboard) * 0.1);
 
         // Sample the view transmission texture at the offset position + noise offset, to get the background color
         var sample = textureSampleLevel(
             view_bindings::view_transmission_texture,
-            view_bindings::view_transmission_sampler,
+            view_bindings::linear_sampler,
             modified_offset_position,
             0.0
         );
 
         @if(DEPTH_PREPASS && !WEBGL2)
         // Use depth prepass data to reject values that are in front of the current fragment
-        if prepass_utils::prepass_depth(vec4<f32>(modified_offset_position * view_bindings::view.viewport.zw, 0.0, 0.0), 0u) > frag_coord.z {
+        if prepass_utils::prepass_depth(vec4<f32>(modified_offset_position * vec2<f32>(textureDimensions(view_bindings::depth_prepass_texture)), 0.0, 0.0), 0u) > frag_coord.z {
             sample = vec4<f32>(0.0);
         }
 
@@ -194,4 +198,6 @@ fn fetch_transmissive_background(offset_position: vec2<f32>, frag_coord: vec3<f3
     result = approximate_inverse_tone_mapping(result, view_bindings::view.color_grading);
 
     return result;
+}
+
 }

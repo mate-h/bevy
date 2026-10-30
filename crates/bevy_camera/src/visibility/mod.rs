@@ -45,7 +45,7 @@ pub use render_layers::*;
 use bevy_app::{Plugin, PostUpdate, ValidateParentHasComponentPlugin};
 use bevy_asset::prelude::AssetChanged;
 use bevy_asset::{AssetEventSystems, Assets};
-use bevy_ecs::{prelude::*, VariantDefaults};
+use bevy_ecs::prelude::*;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_transform::{components::GlobalTransform, TransformSystems};
 use bevy_utils::{Parallel, TypeIdHashMap};
@@ -57,7 +57,8 @@ use crate::{
     primitives::{Aabb, CubemapFrusta, Frustum, MeshAabb, Sphere},
     CubemapFaceProjections, OmnidirectionalProjection, Projection,
 };
-use bevy_math::{primitives::ViewFrustum, Vec3A};
+use bevy_math::Vec3A;
+use bevy_shape::ViewFrustum;
 use bevy_mesh::{mark_3d_meshes_as_changed_if_their_assets_changed, Mesh, Mesh2d, Mesh3d};
 use bevy_transform::components::Transform;
 
@@ -80,7 +81,7 @@ pub struct NoCpuCulling;
 ///
 /// To read the visibility of an entity, query for its [`InheritedVisibility`] instead.
 /// For more information, see [module level documentation](self#what-is-the-difference-between-visibility-components).
-#[derive(Component, Clone, Copy, Reflect, Debug, PartialEq, Eq, Default, VariantDefaults)]
+#[derive(Component, Clone, Copy, Reflect, Debug, PartialEq, Eq, Default)]
 #[reflect(Component, Default, Debug, PartialEq, Clone)]
 #[require(InheritedVisibility, ViewVisibility)]
 pub enum Visibility {
@@ -407,7 +408,7 @@ impl VisibleEntities {
 /// Collection of mesh entities visible for 3D lighting.
 ///
 /// This component contains all mesh entities visible from the current light view.
-/// The collection is updated automatically by `bevy_pbr::SimulationLightSystems`.
+/// The collection is updated automatically by `bevy_light::SimulationLightSystems`.
 #[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Debug, Default, Clone)]
 pub struct VisibleMeshEntities {

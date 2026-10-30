@@ -19,15 +19,15 @@ use bevy_ecs::{
 };
 use bevy_image::Image;
 use bevy_math::{UVec2, UVec4};
+use bevy_extract::extract_instances::{ExtractInstance, ExtractedInstances};
 use bevy_render::{
     camera::{CameraRenderGraph, ExtractedCamera, TemporalJitter},
     extract_component::ExtractComponent,
-    extract_instances::{ExtractInstance, ExtractedInstances},
     render_resource::TextureFormat,
     sync_world::{MainEntity, RenderEntity},
     view::{
         ColorGrading, ExtractedView, Msaa, NoIndirectDrawing, RenderExtractedVisibleEntities,
-        RetainedViewEntity, VisibilityExtractionSystemParam,
+        ResolvedCompositingSpace, RetainedViewEntity, VisibilityExtractionSystemParam,
     },
     Extract, ExtractSchedule, RenderApp,
 };
@@ -68,7 +68,7 @@ where
 {
     fn build(&self, app: &mut App) {
         app.add_plugins(
-            bevy_render::sync_component::SyncComponentPlugin::<C, RenderApp, F>::default(),
+            bevy_render::sync_component::SyncComponentPlugin::<C, F>::default(),
         );
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -341,8 +341,10 @@ pub fn extract_omnidirectional_cameras(
                         .map(Exposure::exposure)
                         .unwrap_or_else(|| Exposure::default().exposure()),
                     hdr,
-                    compositing_space: compositing_space.copied(),
+                    // Cubemap faces render to an image, so tonemapping stays in the pass.
+                    tonemap_in_shader: false,
                 },
+                ResolvedCompositingSpace(compositing_space.copied()),
                 camera_3d.clone(),
                 *frustum,
                 *main_texture_usages,
