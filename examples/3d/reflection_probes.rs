@@ -40,6 +40,18 @@
 //! `IBL_CAPTURE_DIR` optionally saves immutable RGB f32 captures and geometry masks
 //! under a unique run directory, with a manifest written after all payloads.
 //!
+//! Disk-shaped directional lights: `IBL_SUN_LUX`, `IBL_SUN_SIZE_DEG` (angular
+//! diameter) and `IBL_SUN_DIR` ("x,y,z" toward the light) light the sphere with a
+//! sun; `IBL_ENV_INTENSITY=0` removes the environment map so only the sun is
+//! measured. `IBL_SUN_METHOD=rep` uses the representative direction instead of the
+//! LTC disk integral (which needs the `area_light_luts` feature).
+//!
+//! Bright source extraction: `IBL_SOURCES=<lights.json>` (from blender-envmap's
+//! `extract_sources.py`) spawns the extracted lights for the raster pass, with
+//! `IBL_STRESS` set to the residual map and `IBL_REFERENCE_STRESS` to the original
+//! map the pathtracer sees. `IBL_FILTER=ms IBL_EXTRACT=1` extracts the sources on
+//! the GPU with `EnvironmentMapSourceExtraction` instead.
+//!
 //! Reflection probes don't work on WebGL 2 or WebGPU.
 //! The pathtracer mode requires a GPU with ray-query support (`bevy_solari`).
 //!
@@ -58,7 +70,9 @@ use bevy::{
     camera::{CameraMainTextureUsages, Exposure, Hdr, RenderTarget},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     image::TextureFormatPixelInfo,
-    light::{ParallaxCorrection, Skybox},
+    light::{
+        EnvironmentMapSourceExtraction, EnvironmentMapSourceLight, ParallaxCorrection, Skybox,
+    },
     mesh::Indices,
     pbr::generate::generate_environment_map_light,
     prelude::*,
@@ -92,7 +106,9 @@ const MEASURE_MAX_SIDE: u32 = 640;
 /// Readbacks to wait after enabling the measure camera before storing the environment-map image.
 const MEASURE_IBL_FRAMES: u64 = 8;
 
-const ENV_MAP_INTENSITY: f32 = 5000.0;
+/// Default environment map intensity. `IBL_ENV_INTENSITY` overrides it, e.g. `0` to light
+/// the sphere with only the `IBL_SUN_*` directional light.
+const DEFAULT_ENV_MAP_INTENSITY: f32 = 5000.0;
 /// Face size the Manson–Sloan coefficient table was fitted for.
 const GENERATED_ENV_MAP_FACE_SIZE: u32 = 128;
 
@@ -129,6 +145,10 @@ struct Cubemaps {
     // The blurry diffuse cubemap that reflects the world, but not the cubes.
     diffuse_environment_map: Handle<Image>,
 
+    // The pathtracer's environment (`IBL_REFERENCE_STRESS`, default `IBL_STRESS`). Differs
+    // from `specular_environment_map` when that is a residual left by source extraction.
+    reference_specular_environment_map: Handle<Image>,
+
     // The specular cubemap mip chain that reflects the world, but not the cubes.
     specular_environment_map: Handle<Image>,
 
@@ -141,6 +161,29 @@ struct Cubemaps {
 
     // The specular cubemap mip chain that reflects both the world and the cubes.
     specular_reflection_probe: Handle<Image>,
+}
+
+/// `IBL_SUN_METHOD=rep` shades disk-shaped directional lights with the representative
+/// direction instead of the LTC disk integral.
+fn configure_sun_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
+    if *configured || std::env::var("IBL_SUN_METHOD").ok().as_deref() != Some("rep") {
+        return;
+    }
+    for (_, shader) in shaders.iter_mut() {
+        if shader.path.ends_with("render/pbr_lighting.wesl")
+            && let bevy::shader::Source::Wesl(source) = &mut shader.source
+            && source.contains("const DIRECTIONAL_DISK_LTC: bool = true;")
+        {
+            info!("Directional disks use the representative direction");
+            *configured = true;
+            *source = source
+                .replace(
+                    "const DIRECTIONAL_DISK_LTC: bool = true;",
+                    "const DIRECTIONAL_DISK_LTC: bool = false;",
+                )
+                .into();
+        }
+    }
 }
 
 // Keep the experiment local to this harness until quality/cost is established.
@@ -211,7 +254,7 @@ fn main() {
         .init_resource::<MeasureReadbacks>()
         .init_resource::<PathtracerErrorMeasure>()
         .add_systems(Startup, setup)
-        .add_systems(Update, configure_fis_shader)
+        .add_systems(Update, (configure_fis_shader, configure_sun_shader))
         .add_systems(PreUpdate, add_environment_map_to_camera)
         .add_systems(
             Update,
@@ -260,15 +303,20 @@ fn setup(
     spawn_error_overlay(&mut commands, &mut images);
     spawn_sphere(&mut commands, &mut meshes, &mut materials, &app_status);
     // Solari pathtracer needs ≥1 directional/emissive light to build its bind group.
-    // Illuminance 0 contributes no energy — env-map reflections remain the only lighting.
+    // By default its illuminance is 0, so env-map reflections remain the only lighting.
+    // `IBL_SUN_LUX`, `IBL_SUN_SIZE_DEG` (angular diameter) and `IBL_SUN_DIR` ("x,y,z"
+    // toward the light) light the sphere with a disk-shaped sun instead.
+    let sun = sun_settings();
     commands.spawn((
         DirectionalLight {
-            illuminance: 0.0,
+            illuminance: sun.illuminance,
+            angular_size: sun.angular_size,
             shadow_maps_enabled: false,
             ..default()
         },
-        Transform::default(),
+        Transform::default().looking_to(-sun.direction, Vec3::Y),
     ));
+    spawn_extracted_source_lights(&mut commands);
     // Reflection probe mode disabled — A/B prefiltered vs generated vs pathtracer.
     // spawn_reflection_probe(&mut commands, &cubemaps);
     // spawn_scene(&mut commands, &asset_server);
@@ -389,7 +437,7 @@ fn spawn_reflection_probe(commands: &mut Commands, cubemaps: &Cubemaps) {
         EnvironmentMapLight {
             diffuse_map: cubemaps.diffuse_environment_map.clone(),
             specular_map: cubemaps.specular_reflection_probe.clone(),
-            intensity: ENV_MAP_INTENSITY,
+            intensity: env_map_intensity(),
             ..default()
         },
         // 2.0 because the sphere's radius is 1.0 and we want to fully enclose it.
@@ -478,7 +526,7 @@ fn add_environment_map_to_camera(
             .insert(create_camera_environment_map_light(&cubemaps))
             .insert(Skybox {
                 image: Some(cubemaps.specular_environment_map.clone()),
-                brightness: ENV_MAP_INTENSITY,
+                brightness: env_map_intensity(),
                 ..default()
             });
     }
@@ -550,7 +598,7 @@ fn change_reflection_type(
                 Msaa::Off,
                 Skybox {
                     image: Some(cubemaps.specular_environment_map.clone()),
-                    brightness: ENV_MAP_INTENSITY,
+                    brightness: env_map_intensity(),
                     ..default()
                 },
             ));
@@ -569,7 +617,7 @@ fn change_reflection_type(
                     .entity(camera)
                     .insert(GeneratedEnvironmentMapLight {
                         environment_map: cubemaps.specular_environment_map_128.clone(),
-                        intensity: ENV_MAP_INTENSITY,
+                        intensity: env_map_intensity(),
                         ..default()
                     });
             }
@@ -678,7 +726,7 @@ fn create_camera_environment_map_light(cubemaps: &Cubemaps) -> EnvironmentMapLig
         } else {
             cubemaps.specular_environment_map.clone()
         },
-        intensity: ENV_MAP_INTENSITY,
+        intensity: env_map_intensity(),
         ..default()
     }
 }
@@ -708,6 +756,95 @@ fn rotate_camera(
 /// `stress_furnace` (constant, the case split-sum is exact for), `stress_wide`
 /// (60° cap, a source that covers a large part of the hemisphere), `stress_narrow`
 /// (12° disc, the narrow-highlight case).
+fn env_map_intensity() -> f32 {
+    std::env::var("IBL_ENV_INTENSITY")
+        .ok()
+        .map(|value| value.parse().expect("IBL_ENV_INTENSITY must be a number"))
+        .unwrap_or(DEFAULT_ENV_MAP_INTENSITY)
+}
+
+/// The measured directional light. See `setup`.
+struct SunSettings {
+    illuminance: f32,
+    angular_size: f32,
+    direction: Vec3,
+}
+
+fn sun_settings() -> SunSettings {
+    let number = |name: &str, default: f32| {
+        std::env::var(name)
+            .ok()
+            .map(|value| {
+                value
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{name} must be a number"))
+            })
+            .unwrap_or(default)
+    };
+    // Default direction: the center of the stress maps' disks.
+    let direction = std::env::var("IBL_SUN_DIR")
+        .ok()
+        .map(|value| {
+            let parts: Vec<f32> = value
+                .split(',')
+                .map(|part| part.trim().parse().expect("IBL_SUN_DIR must be x,y,z"))
+                .collect();
+            assert_eq!(parts.len(), 3, "IBL_SUN_DIR must be x,y,z");
+            Vec3::new(parts[0], parts[1], parts[2])
+        })
+        .unwrap_or(Vec3::new(-0.426, 0.669, -0.609))
+        .normalize();
+    SunSettings {
+        illuminance: number("IBL_SUN_LUX", 0.0),
+        angular_size: number("IBL_SUN_SIZE_DEG", 0.0).to_radians(),
+        direction,
+    }
+}
+
+fn ibl_reference_stem() -> String {
+    std::env::var("IBL_REFERENCE_STRESS").unwrap_or_else(|_| ibl_stress_stem())
+}
+
+/// A directional light extracted from the environment map (`IBL_SOURCES`). The raster
+/// pass shows it with the residual map; the pathtracer sees the original map instead.
+#[derive(Component)]
+struct ExtractedSourceLight;
+
+/// Spawns the lights of an `extract_sources.py` lights JSON (`IBL_SOURCES`).
+fn spawn_extracted_source_lights(commands: &mut Commands) {
+    let Ok(path) = std::env::var("IBL_SOURCES") else {
+        return;
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let json: serde_json::Value = serde_json::from_str(&text).expect("IBL_SOURCES must be JSON");
+    let number = |value: &serde_json::Value| value.as_f64().expect("number") as f32;
+    for light in json["lights"].as_array().expect("lights array") {
+        let direction = Vec3::new(
+            number(&light["direction"][0]),
+            number(&light["direction"][1]),
+            number(&light["direction"][2]),
+        )
+        .normalize();
+        let color = &light["color_linear"];
+        info!(
+            "Extracted source light {:?} {:.3}°",
+            direction,
+            number(&light["angular_size"]).to_degrees()
+        );
+        commands.spawn((
+            DirectionalLight {
+                illuminance: number(&light["illuminance"]) * env_map_intensity(),
+                color: Color::linear_rgb(number(&color[0]), number(&color[1]), number(&color[2])),
+                angular_size: number(&light["angular_size"]),
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::default().looking_to(-direction, Vec3::Y),
+            ExtractedSourceLight,
+        ));
+    }
+}
+
 fn ibl_stress_stem() -> String {
     std::env::var("IBL_STRESS").unwrap_or_else(|_| "debug_filter_test_2k".to_string())
 }
@@ -726,6 +863,10 @@ impl FromWorld for Cubemaps {
                 .load_asset(format!("environment_maps/{stem}_diffuse.ktx2")),
             specular_environment_map: world
                 .load_asset(format!("environment_maps/{stem}_specular.ktx2")),
+            reference_specular_environment_map: world.load_asset(format!(
+                "environment_maps/{}_specular.ktx2",
+                ibl_reference_stem()
+            )),
             // Filled once the 512² specular map is loaded (see `setup_environment_map_usage`).
             specular_environment_map_128: Handle::default(),
             specular_mip0: Handle::default(),
@@ -1088,6 +1229,16 @@ fn drive_pathtracer_error_measure(
     mut images: ResMut<Assets<Image>>,
     mut measure_target: ResMut<MeasureTarget>,
     mut error_panels: Query<(&ImageNode, &mut Node), With<MeasureErrorPanel>>,
+    mut extracted_lights: Query<&mut DirectionalLight, With<ExtractedSourceLight>>,
+    mut camera_environment_maps: Query<&mut EnvironmentMapLight, With<Camera3d>>,
+    source_lights: Query<
+        (Entity, &DirectionalLight, &Transform),
+        (
+            With<EnvironmentMapSourceLight>,
+            Without<ExtractedSourceLight>,
+            Without<MeasureCamera>,
+        ),
+    >,
 ) {
     if measure.is_idle() {
         if keyboard.just_pressed(KeyCode::KeyM)
@@ -1175,6 +1326,11 @@ fn drive_pathtracer_error_measure(
                 )
                 .id();
             measure.reference_readback = Some(readback);
+            // The reference sees the original environment and none of the lights
+            // extracted from it.
+            for mut light in &mut extracted_lights {
+                light.illuminance = 0.0;
+            }
             for (entity, _, _, _, _) in &mut measure_cameras {
                 commands.entity(entity).insert(Pathtracer {
                     reset: true,
@@ -1182,6 +1338,37 @@ fn drive_pathtracer_error_measure(
                     max_samples: measure.config.spp,
                     accumulation_output: Some(output.clone()),
                 });
+            }
+            // Realtime extraction: the reference sees the original sharp map, without
+            // the extracted lights or the residual the generator now produces.
+            if std::env::var_os("IBL_EXTRACT").is_some() {
+                for (entity, _, _, _, _) in &mut measure_cameras {
+                    commands
+                        .entity(entity)
+                        .remove::<(GeneratedEnvironmentMapLight, EnvironmentMapSourceExtraction)>()
+                        .insert(EnvironmentMapLight {
+                            diffuse_map: cubemaps.diffuse_environment_map.clone(),
+                            specular_map: cubemaps.specular_mip0.clone(),
+                            intensity: env_map_intensity(),
+                            ..default()
+                        });
+                }
+                for (entity, light, transform) in &source_lights {
+                    info!(
+                        "GPU-extracted source light {:?} {:.3}° {:.1} lux",
+                        transform.back(),
+                        light.angular_size.to_degrees(),
+                        light.illuminance,
+                    );
+                    commands.entity(entity).despawn();
+                }
+            }
+            // Solari takes the first active camera's environment map, so swap all of them.
+            if ibl_reference_stem() != ibl_stress_stem() {
+                for mut environment_map in &mut camera_environment_maps {
+                    environment_map.specular_map =
+                        cubemaps.reference_specular_environment_map.clone();
+                }
             }
             measure.phase = MeasurePhase::CapturePathtracer;
             measure.report = format!(
@@ -1331,21 +1518,30 @@ fn start_pathtracer_error_measure(
             .insert((
                 GeneratedEnvironmentMapLight {
                     environment_map: cubemaps.specular_mip0.clone(),
-                    intensity: ENV_MAP_INTENSITY,
+                    intensity: env_map_intensity(),
                     ..default()
                 },
                 Skybox {
                     image: Some(cubemaps.specular_mip0.clone()),
-                    brightness: ENV_MAP_INTENSITY,
+                    brightness: env_map_intensity(),
                     ..default()
                 },
             ));
+        // `IBL_EXTRACT=1` moves bright sources into directional lights on the GPU.
+        if std::env::var_os("IBL_EXTRACT").is_some() {
+            commands
+                .entity(entity)
+                .insert(EnvironmentMapSourceExtraction {
+                    smoothing: 0.0,
+                    ..default()
+                });
+        }
     } else {
         commands.entity(entity).remove::<Pathtracer>().insert((
             create_camera_environment_map_light(cubemaps),
             Skybox {
                 image: Some(cubemaps.specular_environment_map.clone()),
-                brightness: ENV_MAP_INTENSITY,
+                brightness: env_map_intensity(),
                 ..default()
             },
         ));
@@ -1375,12 +1571,17 @@ fn start_pathtracer_error_measure(
     measure.phase = MeasurePhase::CaptureEnvironmentMap {
         ready_at: readbacks.generation + ibl_frames,
     };
+    let sun = sun_settings();
     info!(
-        "IBL stress map {} filter {} roughness {:.2} view {}",
+        "IBL stress map {} filter {} roughness {:.2} view {} env intensity {} sun {} lux {:.3}° {:?}",
         ibl_stress_stem(),
         std::env::var("IBL_FILTER").unwrap_or_else(|_| "karis".into()),
         app_status.sphere_roughness,
         std::env::var("IBL_VIEW").unwrap_or_else(|_| "front".to_string()),
+        env_map_intensity(),
+        sun.illuminance,
+        sun.angular_size.to_degrees(),
+        sun.direction,
     );
     measure.report = format!(
         "Measuring roughness {:.2}: capturing the environment map…",
@@ -1779,6 +1980,9 @@ fn export_capture(
             "roughness": roughness, "exposure_ev100": 11.0,
             "material": {"metallic":1.0,"base_color_linear":[1.0,1.0,1.0],"perceptual_roughness":roughness},
             "filter": std::env::var("IBL_FILTER").unwrap_or_else(|_| "karis".into()),
+            "environment_intensity": env_map_intensity(),
+            "sun": {"illuminance": sun_settings().illuminance, "angular_size": sun_settings().angular_size,
+                    "direction": sun_settings().direction.to_array()},
             "model": "solari_environment_compensated_brdf",
             "camera_world_from_view": transform.to_matrix().to_cols_array(),
             "camera_clip_from_view": projection.get_clip_from_view().to_cols_array(),

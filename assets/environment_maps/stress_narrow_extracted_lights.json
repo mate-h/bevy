@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "units": "illuminance is normal-incidence lux per unit EnvironmentMapLight::intensity; direction points toward the light in Bevy world space, before EnvironmentMapLight::rotation",
+  "lights": [
+    {
+      "direction": [
+        -0.4262368160410532,
+        0.6692473858152305,
+        -0.6086297012393213
+      ],
+      "angular_size": 0.41868781397673666,
+      "illuminance": 10.854699212103261,
+      "color_linear": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "isotropy": 0.997321785115436,
+      "texel_count": 6817
+    }
+  ],
+  "report": {
+    "threshold": 0.0,
+    "dynamic_range_target": 64.0,
+    "map_energy": 10.974499741430549,
+    "extracted_energy_fraction": 0.9999999999999979,
+    "rejected": [],
+    "partition_error": 0.0
+  }
+}

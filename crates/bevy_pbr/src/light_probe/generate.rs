@@ -28,13 +28,13 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_resource::{
         binding_types::*, AddressMode, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
-        BindGroupLayoutEntries, BindingResource, Buffer, BufferBinding, BufferInitDescriptor,
-        BufferUsages, CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-        DownlevelFlags, Extent3d, FilterMode, MipmapFilterMode, Origin3d, PipelineCache, Sampler,
-        SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess,
-        TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
-        TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
-        TextureViewDimension, UniformBuffer,
+        BindGroupLayoutEntries, BindingResource, Buffer, BufferBinding, BufferDescriptor,
+        BufferInitDescriptor, BufferUsages, CachedComputePipelineId, ComputePassDescriptor,
+        ComputePipelineDescriptor, DownlevelFlags, Extent3d, FilterMode, MipmapFilterMode,
+        Origin3d, PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
+        ShaderType, StorageTextureAccess, TexelCopyTextureInfo, Texture, TextureAspect,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+        TextureView, TextureViewDescriptor, TextureViewDimension, UniformBuffer,
     },
     renderer::{RenderAdapter, RenderContext, RenderDevice, RenderQueue},
     settings::WgpuFeatures,
@@ -44,7 +44,10 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
-use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight};
+use bevy_light::{
+    EnvironmentMapLight, EnvironmentMapSourceExtraction, GeneratedEnvironmentMapLight,
+};
+use bevy_render::storage::GpuShaderBuffer;
 use bevy_shader::ShaderDefVal;
 use tracing::info;
 
@@ -52,12 +55,13 @@ use crate::Bluenoise;
 
 use core::num::NonZero;
 
-use super::manson_sloan;
+use super::{manson_sloan, sources};
 
 /// Stores the bind group layouts for the environment map generation pipelines
 #[derive(Resource)]
 pub struct GeneratorBindGroupLayouts {
     pub quadratic_downsample: BindGroupLayoutDescriptor,
+    pub sources: BindGroupLayoutDescriptor,
     pub radiance: BindGroupLayoutDescriptor,
     pub irradiance: BindGroupLayoutDescriptor,
     pub copy: BindGroupLayoutDescriptor,
@@ -74,10 +78,41 @@ pub struct GeneratorSamplers {
 #[derive(Resource)]
 pub struct GeneratorPipelines {
     pub quadratic_downsample: CachedComputePipelineId,
+    /// Source extraction passes, in dispatch order. See `environment_sources.wesl`.
+    pub sources: [CachedComputePipelineId; SOURCE_PASSES.len()],
     pub copy: CachedComputePipelineId,
     pub radiance: CachedComputePipelineId,
     pub irradiance: CachedComputePipelineId,
     pub temporal_blend: CachedComputePipelineId,
+}
+
+/// Entry points of `environment_sources.wesl`, in dispatch order.
+const SOURCE_PASSES: [&str; 7] = [
+    "cell_stats",
+    "global_stats",
+    "cell_clamped",
+    "choose_threshold",
+    "cell_excess",
+    "select_sources",
+    "write_residual",
+];
+
+/// Cells per face edge for source extraction (`MAX_GRID` in the shader).
+const SOURCE_GRID: u32 = 16;
+/// `Cell` in `environment_sources.wesl`: 3 vec4s and 32 threshold sums.
+const SOURCE_CELL_BYTES: u64 = 176;
+
+/// Uniforms for source extraction, `SourceParams` in `environment_sources.wesl`.
+#[derive(Clone, Copy, ShaderType)]
+pub struct SourceParams {
+    base_size: u32,
+    grid: u32,
+    max_sources: u32,
+    _pad: u32,
+    dynamic_range: f32,
+    min_isotropy: f32,
+    min_energy_fraction: f32,
+    _pad2: f32,
 }
 
 /// Uniforms for Manson–Sloan cubemap downsample.
@@ -149,9 +184,19 @@ impl Plugin for EnvironmentMapGenerationPlugin {
         embedded_asset!(app, "quadratic_b_spline_downsample.wesl");
         embedded_asset!(app, "temporal_blend_environment_map.wesl");
         embedded_asset!(app, "copy.wesl");
+        embedded_asset!(app, "environment_sources.wesl");
 
         app.add_plugins(SyncComponentPlugin::<GeneratedEnvironmentMapLight, Self>::default())
-            .add_systems(Update, generate_environment_map_light);
+            .add_systems(Update, generate_environment_map_light)
+            .add_systems(
+                Update,
+                (
+                    sources::prepare_environment_map_source_extraction,
+                    sources::update_environment_map_source_lights,
+                    sources::cleanup_environment_map_source_lights,
+                )
+                    .chain(),
+            );
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -282,8 +327,27 @@ pub fn initialize_generated_environment_map_resources(
         ),
     );
 
+    let sources = BindGroupLayoutDescriptor::new(
+        "environment_sources_bind_group_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                texture_2d_array(TextureSampleType::Float { filterable: true }),
+                texture_storage_2d_array(
+                    TextureFormat::Rgba16Float,
+                    StorageTextureAccess::WriteOnly,
+                ),
+                uniform_buffer::<SourceParams>(false),
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
+            ),
+        ),
+    );
+
     let layouts = GeneratorBindGroupLayouts {
         quadratic_downsample,
+        sources,
         radiance,
         irradiance,
         copy,
@@ -376,8 +440,23 @@ pub fn initialize_generated_environment_map_resources(
         constants: vec![],
     });
 
+    let sources_shader = load_embedded_asset!(asset_server.as_ref(), "environment_sources.wesl");
+    let source_pipelines = SOURCE_PASSES.map(|entry_point| {
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(format!("environment_sources_{entry_point}_pipeline").into()),
+            layout: vec![layouts.sources.clone()],
+            immediate_size: 0,
+            shader: sources_shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some(entry_point.into()),
+            zero_initialize_workgroup_memory: true,
+            constants: vec![],
+        })
+    });
+
     let pipelines = GeneratorPipelines {
         quadratic_downsample: quadratic_pipeline,
+        sources: source_pipelines,
         radiance: radiance_pipeline,
         irradiance: irradiance_pipeline,
         copy: copy_pipeline,
@@ -395,12 +474,17 @@ pub fn extract_generated_environment_map_entities(
             RenderEntity,
             &GeneratedEnvironmentMapLight,
             &EnvironmentMapLight,
+            Option<(
+                &EnvironmentMapSourceExtraction,
+                &sources::EnvironmentMapSourceBuffer,
+            )>,
         )>,
     >,
     mut commands: Commands,
     render_images: Res<RenderAssets<GpuImage>>,
+    render_buffers: Res<RenderAssets<GpuShaderBuffer>>,
 ) {
-    for (entity, filtered_env_map, env_map_light) in query.iter() {
+    for (entity, filtered_env_map, env_map_light, extraction) in query.iter() {
         let Some(env_map) = render_images.get(&filtered_env_map.environment_map) else {
             continue;
         };
@@ -424,6 +508,15 @@ pub fn extract_generated_environment_map_entities(
             rotation: filtered_env_map.rotation,
             affects_lightmapped_mesh_diffuse: filtered_env_map.affects_lightmapped_mesh_diffuse,
             temporal_blend: filtered_env_map.temporal_blend,
+            sources: extraction.and_then(|(settings, buffer)| {
+                Some(RenderEnvironmentMapSources {
+                    max_sources: settings.max_sources.min(4),
+                    dynamic_range: settings.dynamic_range,
+                    min_isotropy: settings.min_isotropy,
+                    min_energy_fraction: settings.min_energy_fraction,
+                    output: render_buffers.get(&buffer.buffer)?.buffer.clone(),
+                })
+            }),
         };
         commands
             .get_entity(entity)
@@ -442,6 +535,25 @@ pub struct RenderEnvironmentMap {
     pub rotation: Quat,
     pub affects_lightmapped_mesh_diffuse: bool,
     pub temporal_blend: f32,
+    /// Present when bright sources are extracted into lights.
+    pub sources: Option<RenderEnvironmentMapSources>,
+}
+
+/// Render-world [`EnvironmentMapSourceExtraction`] settings and its readback buffer.
+#[derive(Clone)]
+pub struct RenderEnvironmentMapSources {
+    pub max_sources: u32,
+    pub dynamic_range: f32,
+    pub min_isotropy: f32,
+    pub min_energy_fraction: f32,
+    pub output: Buffer,
+}
+
+/// Scratch buffers of the source extraction passes.
+#[derive(Component)]
+pub struct SourceExtractionBuffers {
+    pub cells: Buffer,
+    pub globals: Buffer,
 }
 
 #[derive(Component)]
@@ -459,14 +571,45 @@ fn compute_mip_count(size: u32) -> u32 {
     32 - size.leading_zeros()
 }
 
+/// Mip levels of the generated specular map: one per row of the Manson–Sloan
+/// table, so mip `i` is exactly row `i` (perceptual roughness `i / 6`). For a
+/// 128² source that is 128² down to 2², the chain the table was fitted for; the
+/// input radiance chain keeps every level down to 1×1 for the taps to read.
+#[inline]
+fn compute_specular_mip_count(size: u32) -> u32 {
+    compute_mip_count(size).min(manson_sloan::SPECULAR_TABLE_LEVELS as u32)
+}
+
 /// Prepares textures needed for single pass downsampling
 pub fn prepare_generated_environment_map_intermediate_textures(
-    light_probes: Query<(Entity, &RenderEnvironmentMap)>,
+    light_probes: Query<(
+        Entity,
+        &RenderEnvironmentMap,
+        Option<&SourceExtractionBuffers>,
+    )>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
     mut commands: Commands,
 ) {
-    for (entity, env_map_light) in &light_probes {
+    for (entity, env_map_light, source_buffers) in &light_probes {
+        if env_map_light.sources.is_some() && source_buffers.is_none() {
+            let cells = render_device.create_buffer(&BufferDescriptor {
+                label: Some("environment_sources_cells"),
+                size: 6 * u64::from(SOURCE_GRID * SOURCE_GRID) * SOURCE_CELL_BYTES,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let globals = render_device.create_buffer(&BufferDescriptor {
+                label: Some("environment_sources_globals"),
+                size: 16,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            commands
+                .entity(entity)
+                .insert(SourceExtractionBuffers { cells, globals });
+        }
+
         let base_size = env_map_light.environment_map.texture_descriptor.size.width;
         let mip_level_count = compute_mip_count(base_size);
 
@@ -539,6 +682,8 @@ pub fn prepare_generated_environment_map_intermediate_textures(
 #[derive(Component)]
 pub struct GeneratorBindGroups {
     pub quadratic: Vec<BindGroup>,
+    /// Source extraction, replacing `copy` when present.
+    pub sources: Option<BindGroup>,
     pub radiance: Vec<BindGroup>,
     pub irradiance: BindGroup,
     pub copy: BindGroup,
@@ -547,7 +692,12 @@ pub struct GeneratorBindGroups {
 
 /// Prepares bind groups for environment map generation pipelines
 pub fn prepare_generated_environment_map_bind_groups(
-    light_probes: Query<(Entity, &IntermediateTextures, &RenderEnvironmentMap)>,
+    light_probes: Query<(
+        Entity,
+        &IntermediateTextures,
+        &RenderEnvironmentMap,
+        Option<&SourceExtractionBuffers>,
+    )>,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
@@ -579,7 +729,7 @@ pub fn prepare_generated_environment_map_bind_groups(
         size: None,
     });
 
-    for (entity, textures, env_map_light) in &light_probes {
+    for (entity, textures, env_map_light, source_buffers) in &light_probes {
         let base_size = env_map_light.environment_map.texture_descriptor.size.width;
         let mip_count = compute_mip_count(base_size);
 
@@ -624,7 +774,8 @@ pub fn prepare_generated_environment_map_bind_groups(
                 ..Default::default()
             });
 
-        let num_mips = mip_count as usize;
+        let specular_mip_count = compute_specular_mip_count(base_size);
+        let num_mips = specular_mip_count as usize;
         let mut radiance_bind_groups = Vec::with_capacity(num_mips);
 
         let use_temporal = env_map_light.temporal_blend > 0.0;
@@ -643,7 +794,7 @@ pub fn prepare_generated_environment_map_bind_groups(
             // Esoterica linear-perceptual encoding: mip i stores the filter for
             // perceptual roughness i/(n-1). Table rows use the same schedule.
             let perceptual_roughness =
-                manson_sloan::mip_perceptual_roughness(mip as u32, mip_count);
+                manson_sloan::mip_perceptual_roughness(mip as u32, specular_mip_count);
             let face_extent = base_size >> mip;
             let radiance_constants = FilteringConstants {
                 mip_level: mip as f32,
@@ -725,6 +876,37 @@ pub fn prepare_generated_environment_map_bind_groups(
             &BindGroupEntries::with_indices(((0, &src_view), (1, &dst_view))),
         );
 
+        let sources_bind_group =
+            env_map_light
+                .sources
+                .as_ref()
+                .zip(source_buffers)
+                .map(|(settings, buffers)| {
+                    let mut params = UniformBuffer::from(SourceParams {
+                        base_size,
+                        grid: SOURCE_GRID.min(base_size),
+                        max_sources: settings.max_sources,
+                        _pad: 0,
+                        dynamic_range: settings.dynamic_range,
+                        min_isotropy: settings.min_isotropy,
+                        min_energy_fraction: settings.min_energy_fraction,
+                        _pad2: 0.0,
+                    });
+                    params.write_buffer(&render_device, &queue);
+                    render_device.create_bind_group(
+                        Some("environment_sources_bind_group"),
+                        &pipeline_cache.get_bind_group_layout(&layouts.sources),
+                        &BindGroupEntries::sequential((
+                            &src_view,
+                            &dst_view,
+                            &params,
+                            buffers.cells.as_entire_binding(),
+                            buffers.globals.as_entire_binding(),
+                            settings.output.as_entire_binding(),
+                        )),
+                    )
+                });
+
         let temporal_bind_groups = if use_temporal {
             let scratch = textures
                 .specular_scratch
@@ -743,7 +925,7 @@ pub fn prepare_generated_environment_map_bind_groups(
             t_buf.write_buffer(&render_device, &queue);
 
             let mut t_groups = Vec::with_capacity(num_mips);
-            for mip in 0..mip_count {
+            for mip in 0..specular_mip_count {
                 let scratch_view = scratch.texture.create_view(&TextureViewDescriptor {
                     dimension: Some(TextureViewDimension::D2Array),
                     base_mip_level: mip,
@@ -782,6 +964,7 @@ pub fn prepare_generated_environment_map_bind_groups(
             radiance: radiance_bind_groups,
             irradiance: irradiance_bind_group,
             copy: copy_bind_group,
+            sources: sources_bind_group,
             temporal: temporal_bind_groups,
         });
     }
@@ -824,8 +1007,44 @@ pub fn downsampling_system(
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
 
+    let source_pipelines = pipelines
+        .sources
+        .iter()
+        .map(|id| pipeline_cache.get_compute_pipeline(*id))
+        .collect::<Option<Vec<_>>>();
+
     for (bind_groups, env_map_light) in &query {
+        // Source extraction writes the residual into mip 0 in place of the copy.
+        if let (Some(sources_bind_group), Some(source_pipelines)) =
+            (&bind_groups.sources, &source_pipelines)
         {
+            let mut compute_pass =
+                ctx.command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("lightprobe_sources"),
+                        timestamp_writes: None,
+                    });
+            let pass_span = diagnostics.pass_span(&mut compute_pass, "lightprobe_sources");
+            compute_pass.set_bind_group(0, sources_bind_group, &[]);
+
+            let size = env_map_light.environment_map.texture_descriptor.size.width;
+            let grid = SOURCE_GRID.min(size);
+            let cell_workgroups = (6 * grid * grid).div_ceil(64);
+            let texel_workgroups = size.div_ceil(8);
+            for (pipeline, entry_point) in source_pipelines.iter().zip(SOURCE_PASSES) {
+                compute_pass.set_pipeline(pipeline);
+                match entry_point {
+                    "global_stats" | "choose_threshold" | "select_sources" => {
+                        compute_pass.dispatch_workgroups(1, 1, 1);
+                    }
+                    "write_residual" => {
+                        compute_pass.dispatch_workgroups(texel_workgroups, texel_workgroups, 6);
+                    }
+                    _ => compute_pass.dispatch_workgroups(cell_workgroups, 1, 1),
+                }
+            }
+            pass_span.end(&mut compute_pass);
+        } else {
             let mut compute_pass =
                 ctx.command_encoder()
                     .begin_compute_pass(&ComputePassDescriptor {
@@ -947,7 +1166,7 @@ pub fn filtering_system(
                     pass_span.end(&mut compute_pass);
                 }
 
-                let mip_count = compute_mip_count(base_size);
+                let mip_count = compute_specular_mip_count(base_size);
                 for mip in 0..mip_count {
                     let dim = base_size >> mip;
                     encoder.copy_texture_to_texture(
@@ -1017,7 +1236,7 @@ pub fn generate_environment_map_light(
             );
         }
 
-        let mip_count = compute_mip_count(base_size);
+        let mip_count = compute_specular_mip_count(base_size);
 
         // Create a placeholder for the irradiance map
         let mut diffuse = Image::new_fill(

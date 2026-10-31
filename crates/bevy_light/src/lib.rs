@@ -37,8 +37,8 @@ use bevy_camera::visibility::SetViewVisibility;
 mod probe;
 pub use probe::{
     automatically_add_parallax_correction_components, AtmosphereEnvironmentMapLight,
-    EnvironmentMapLight, GeneratedEnvironmentMapLight, IrradianceVolume, LightProbe,
-    ParallaxCorrection, Skybox,
+    EnvironmentMapLight, EnvironmentMapSourceExtraction, EnvironmentMapSourceLight,
+    GeneratedEnvironmentMapLight, IrradianceVolume, LightProbe, ParallaxCorrection, Skybox,
 };
 pub mod atmosphere;
 pub use atmosphere::Atmosphere;

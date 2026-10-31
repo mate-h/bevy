@@ -312,6 +312,62 @@ impl Default for GeneratedEnvironmentMapLight {
     }
 }
 
+/// Moves bright, disk-like sources (the sun, lamps) out of a
+/// [`GeneratedEnvironmentMapLight`] and into [`DirectionalLight`](crate::DirectionalLight)s
+/// with an [`angular_size`](crate::DirectionalLight::angular_size).
+///
+/// Add this next to a [`GeneratedEnvironmentMapLight`]. Every frame, texels brighter
+/// than an automatically chosen threshold are split into a residual that stays in
+/// the environment map and an excess that becomes light. Connected groups of excess
+/// texels that look like a disk become one light each, with the group's illuminance,
+/// direction and angular size. Elongated groups (windows, skylines) stay in the map.
+///
+/// Analytic lights shade a bright source more accurately than a filtered
+/// environment map, and can cast shadows. The lights are spawned and updated
+/// automatically and carry an [`EnvironmentMapSourceLight`] component. Their values
+/// come back from the GPU a few frames late.
+#[derive(Clone, Component, Reflect)]
+#[reflect(Component, Default, Clone)]
+pub struct EnvironmentMapSourceExtraction {
+    /// The maximum number of extracted lights, at most 4.
+    pub max_sources: u32,
+    /// The threshold is the largest one for which the residual's peak luminance is
+    /// at most this many times its mean luminance.
+    pub dynamic_range: f32,
+    /// Minimum ratio of the minor to the major spread of a source for it to count
+    /// as a disk. `1.0` is a perfect disk.
+    pub min_isotropy: f32,
+    /// Sources with less than this fraction of all the excess light stay in the map.
+    pub min_energy_fraction: f32,
+    /// Fraction of the previous frame's light parameters kept each frame, from
+    /// `0.0` (no smoothing) to just below `1.0`.
+    pub smoothing: f32,
+    /// Whether the brightest extracted light casts shadows.
+    pub shadows_enabled: bool,
+}
+
+impl Default for EnvironmentMapSourceExtraction {
+    fn default() -> Self {
+        Self {
+            max_sources: 4,
+            dynamic_range: 64.0,
+            min_isotropy: 0.5,
+            min_energy_fraction: 0.01,
+            smoothing: 0.8,
+            shadows_enabled: false,
+        }
+    }
+}
+
+/// A [`DirectionalLight`](crate::DirectionalLight) spawned by
+/// [`EnvironmentMapSourceExtraction`].
+#[derive(Clone, Copy, Component, Debug, Reflect)]
+#[reflect(Component, Clone, Debug)]
+pub struct EnvironmentMapSourceLight {
+    /// The entity with the [`GeneratedEnvironmentMapLight`] the light came from.
+    pub owner: Entity,
+}
+
 /// Lets the atmosphere contribute environment lighting (reflections and ambient diffuse) to your scene.
 ///
 /// Attach this to a [`Camera3d`](bevy_camera::Camera3d) to light the entire view, or to a

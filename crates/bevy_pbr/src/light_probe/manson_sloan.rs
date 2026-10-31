@@ -6,8 +6,9 @@
 //! <https://github.com/bazhenovc/EsotericaFilterFitter>
 //! (`ReflectionProbeTable_ggx_esoterica_cube.bin`, FTBL payload only).
 //!
-//! Generated MS environment maps use the **same** encoding as that curve: mip `i` of an
-//! `n`-mip chain stores the filter for perceptual roughness `i/(n-1)` (α = perceptual²).
+//! Generated MS environment maps use the **same** encoding as that curve: the specular
+//! chain has one mip per table row (7: 128² … 2² for a 128² source, never 1×1), and mip
+//! `i` stores the filter for perceptual roughness `i/6` (α = perceptual²), exactly row `i`.
 //! Runtime LOD is therefore `perceptual_roughness * maxMip` for both MS-generated maps and
 //! prefiltered `EnvironmentMapLight` maps from glTF-IBL-Sampler / Karis (which also bake
 //! mips on a linear perceptual schedule and square only inside the GGX NDF).
@@ -41,8 +42,15 @@ const _: () = assert!(FILTER_TABLE_VEC4_COUNT == 210);
 const _: () = assert!(POLY_INDICES == (3 * TAPS_PER_AXIS) / 4);
 
 /// Perceptual roughness (√α) at each table row. Linear across levels.
-pub const TABLE_PERCEPTUAL_ROUGHNESS: [f32; SPECULAR_TABLE_LEVELS] =
-    [0.0, 1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0, 4.0 / 6.0, 5.0 / 6.0, 1.0];
+pub const TABLE_PERCEPTUAL_ROUGHNESS: [f32; SPECULAR_TABLE_LEVELS] = [
+    0.0,
+    1.0 / 6.0,
+    2.0 / 6.0,
+    3.0 / 6.0,
+    4.0 / 6.0,
+    5.0 / 6.0,
+    1.0,
+];
 
 /// Maps linear perceptual roughness to a continuous table row index in `[0, 6]`.
 pub fn perceptual_roughness_to_table_t(perceptual_roughness: f32) -> f32 {

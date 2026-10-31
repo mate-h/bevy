@@ -47,6 +47,7 @@ pub mod generate;
 pub mod irradiance_volume;
 
 pub(crate) mod manson_sloan;
+pub mod sources;
 
 /// Size in bytes of the embedded Manson–Sloan polynomial filter table.
 pub const MANSON_SLOAN_FILTER_TABLE_BYTE_LEN: usize = manson_sloan::FILTER_TABLE_BYTES.len();

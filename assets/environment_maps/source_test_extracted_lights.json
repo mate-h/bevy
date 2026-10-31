@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "units": "illuminance is normal-incidence lux per unit EnvironmentMapLight::intensity; direction points toward the light in Bevy world space, before EnvironmentMapLight::rotation",
+  "lights": [
+    {
+      "direction": [
+        -0.42634066299957263,
+        0.6689180176129977,
+        -0.6089189804775197
+      ],
+      "angular_size": 0.10515484055358247,
+      "illuminance": 17.054596351360562,
+      "color_linear": [
+        1.220672330043757,
+        0.9684000485013806,
+        0.6632319659904415
+      ],
+      "isotropy": 0.9691450044730362,
+      "texel_count": 478
+    },
+    {
+      "direction": [
+        0.7848102604104646,
+        0.42294657660077156,
+        0.4529779779372797
+      ],
+      "angular_size": 0.20921890133671658,
+      "illuminance": 5.410576523720268,
+      "color_linear": [
+        0.7560674412157565,
+        1.0080899216210089,
+        1.6381461226341392
+      ],
+      "isotropy": 0.9875205542978198,
+      "texel_count": 1186
+    },
+    {
+      "direction": [
+        -0.497075915671856,
+        0.1044805146743088,
+        0.8613938449468846
+      ],
+      "angular_size": 0.07075986236231749,
+      "illuminance": 2.0737755016032122,
+      "color_linear": [
+        1.3255567338282073,
+        0.9468262384487199,
+        0.5680957430692317
+      ],
+      "isotropy": 0.9392135359125436,
+      "texel_count": 101
+    }
+  ],
+  "report": {
+    "threshold": 0.7576699218749999,
+    "dynamic_range_target": 64.0,
+    "map_energy": 45.925504624837686,
+    "extracted_energy_fraction": 0.5349145029380854,
+    "rejected": [
+      {
+        "angular_size": 0.7055283036475787,
+        "isotropy": 0.006435331152425105,
+        "energy_fraction_of_excess": 0.417220651419076
+      },
+      {
+        "angular_size": 0.12732594091565383,
+        "isotropy": 1.0,
+        "energy_fraction_of_excess": 4.476315880282166e-07
+      }
+    ],
+    "partition_error": 0.0
+  }
+}
