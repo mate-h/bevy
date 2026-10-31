@@ -21,12 +21,12 @@ use bevy_ecs::{
 };
 use bevy_light::cascade::Cascade;
 use bevy_light::cluster::assign::{calculate_cluster_factors, ClusterableObjectType};
-use bevy_light::SunDisk;
 use bevy_light::{
     spot_light_clip_from_view, spot_light_world_from_view, AmbientLight, CascadeShadowConfig,
     Cascades, DirectionalLight, DirectionalLightShadowMap, GlobalAmbientLight, PointLight,
     PointLightShadowMap, RectLight, ShadowFilteringMethod, SpotLight, VolumetricLight,
 };
+use bevy_light::{CustomShadowChannel, SunDisk};
 use bevy_log::warn_once;
 use bevy_material::{
     key::{ErasedMaterialPipelineKey, ErasedMeshPipelineKey},
@@ -95,6 +95,8 @@ pub struct ExtractedPointLight {
     pub soft_shadows_enabled: bool,
     /// whether this point light contributes diffuse light to lightmapped meshes
     pub affects_lightmapped_mesh_diffuse: bool,
+    /// The [`CustomShadowChannel`] whose material-supplied shadow factor applies to this light.
+    pub custom_shadow_channel: Option<u8>,
 }
 
 #[derive(Component, Debug)]
@@ -129,6 +131,39 @@ pub struct ExtractedDirectionalLight {
     pub occlusion_culling: bool,
     pub sun_disk_angular_size: f32,
     pub sun_disk_intensity: f32,
+    /// The [`CustomShadowChannel`] whose material-supplied shadow factor applies to this light.
+    pub custom_shadow_channel: Option<u8>,
+}
+
+/// Bit offset of the custom shadow channel in the point and directional light flags.
+///
+/// The three bits starting here hold `channel + 1`, or 0 if the light has no
+/// [`CustomShadowChannel`].
+///
+/// NOTE: This must match `*_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT` in
+/// `bevy_pbr/src/render/mesh_view_types.wesl`!
+const LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT: u32 = 8;
+
+/// Encodes an optional custom shadow channel into light flag bits.
+fn custom_shadow_channel_flag_bits(channel: Option<u8>) -> u32 {
+    channel.map_or(0, |channel| {
+        (u32::from(channel) + 1) << LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT
+    })
+}
+
+/// Validates a light's [`CustomShadowChannel`] during extraction.
+fn extract_custom_shadow_channel(channel: Option<&CustomShadowChannel>) -> Option<u8> {
+    let channel = channel?;
+    let index = channel.index();
+    if index.is_none() {
+        warn_once!(
+            "A light has `CustomShadowChannel({})`, but only channels below {} are supported; \
+             ignoring it",
+            channel.0,
+            bevy_light::MAX_CUSTOM_SHADOW_CHANNELS
+        );
+    }
+    index
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wesl!
@@ -333,6 +368,7 @@ pub fn extract_lights(
                 &CubemapFrusta,
                 Option<&RenderLayers>,
                 Option<&VolumetricLight>,
+                Option<&CustomShadowChannel>,
             ),
             Or<(
                 Changed<PointLight>,
@@ -342,6 +378,7 @@ pub fn extract_lights(
                 Changed<RenderLayers>,
                 Changed<CubemapFrusta>,
                 Changed<VolumetricLight>,
+                Changed<CustomShadowChannel>,
             )>,
         >,
     >,
@@ -357,6 +394,7 @@ pub fn extract_lights(
                 &Frustum,
                 Option<&RenderLayers>,
                 Option<&VolumetricLight>,
+                Option<&CustomShadowChannel>,
             ),
             Or<(
                 Changed<SpotLight>,
@@ -366,6 +404,7 @@ pub fn extract_lights(
                 Changed<RenderLayers>,
                 Changed<Frustum>,
                 Changed<VolumetricLight>,
+                Changed<CustomShadowChannel>,
             )>,
         >,
     >,
@@ -385,6 +424,7 @@ pub fn extract_lights(
                 Option<&VolumetricLight>,
                 Has<OcclusionCulling>,
                 Option<&SunDisk>,
+                Option<&CustomShadowChannel>,
             ),
             (
                 Without<SpotLight>,
@@ -400,6 +440,7 @@ pub fn extract_lights(
                     Changed<VolumetricLight>,
                     Changed<OcclusionCulling>,
                     Changed<SunDisk>,
+                    Changed<CustomShadowChannel>,
                 )>,
             ),
         >,
@@ -464,6 +505,7 @@ pub fn extract_lights(
         frusta,
         maybe_render_layers,
         volumetric_light,
+        custom_shadow_channel,
     ) in point_lights.iter()
     {
         if !view_visibility.get() {
@@ -573,6 +615,7 @@ pub fn extract_lights(
             spot_light_angles: None,
             volumetric: volumetric_light.is_some(),
             affects_lightmapped_mesh_diffuse: point_light.affects_lightmapped_mesh_diffuse,
+            custom_shadow_channel: extract_custom_shadow_channel(custom_shadow_channel),
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadows_enabled: point_light.soft_shadows_enabled,
             #[cfg(not(feature = "experimental_pbr_pcss"))]
@@ -596,6 +639,7 @@ pub fn extract_lights(
         frustum,
         maybe_render_layers,
         volumetric_light,
+        custom_shadow_channel,
     ) in spot_lights.iter()
     {
         if !view_visibility.get() {
@@ -712,6 +756,7 @@ pub fn extract_lights(
             spot_light_angles: Some((inner_angle, outer_angle)),
             volumetric: volumetric_light.is_some(),
             affects_lightmapped_mesh_diffuse: spot_light.affects_lightmapped_mesh_diffuse,
+            custom_shadow_channel: extract_custom_shadow_channel(custom_shadow_channel),
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadows_enabled: spot_light.soft_shadows_enabled,
             #[cfg(not(feature = "experimental_pbr_pcss"))]
@@ -739,6 +784,7 @@ pub fn extract_lights(
         volumetric_light,
         occlusion_culling,
         sun_disk,
+        custom_shadow_channel,
     ) in &directional_lights
     {
         if !view_visibility.get() {
@@ -871,6 +917,7 @@ pub fn extract_lights(
             occlusion_culling,
             sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
             sun_disk_intensity: sun_disk.unwrap_or_default().intensity,
+            custom_shadow_channel: extract_custom_shadow_channel(custom_shadow_channel),
         };
 
         let mut entity_commands = commands
@@ -1366,7 +1413,7 @@ pub fn prepare_lights(
                     .xyz()
                     .extend(1.0 / (light.range * light.range)),
                 position_radius: light.transform.translation().extend(light.radius),
-                flags: flags.bits(),
+                flags: flags.bits() | custom_shadow_channel_flag_bits(light.custom_shadow_channel),
                 shadow_depth_bias: light.shadow_depth_bias,
                 shadow_normal_bias: light.shadow_normal_bias,
                 shadow_map_near_z: light.shadow_map_near_z,
@@ -1815,7 +1862,7 @@ pub fn prepare_lights(
                 color: Vec4::from_slice(&light.color.to_f32_array()) * light.illuminance,
                 // direction is negated to be ready for N.L
                 dir_to_light: light.transform.back().into(),
-                flags: flags.bits(),
+                flags: flags.bits() | custom_shadow_channel_flag_bits(light.custom_shadow_channel),
                 soft_shadow_size: light.soft_shadow_size.unwrap_or_default(),
                 shadow_depth_bias: light.shadow_depth_bias,
                 shadow_normal_bias: light.shadow_normal_bias,

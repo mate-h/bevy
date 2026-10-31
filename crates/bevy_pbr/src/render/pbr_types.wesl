@@ -120,9 +120,18 @@ struct PbrInput {
     anisotropy_B: vec3<f32>,
     is_orthographic: bool,
     flags: u32,
-    /// Multiplier applied to all directional lights before cascade and contact shadows,
-    /// use this for custom shadow maps. Defaults to 1.0.
+    /// Multiplier applied to the shadow of every directional light that has Bevy shadow maps
+    /// enabled, before contact shadows. Defaults to 1.0.
+    ///
+    /// To shadow specific lights of any kind, prefer `custom_shadow_factors`.
     directional_shadow_factor: f32,
+    /// Per-channel shadow factors for lights with a `CustomShadowChannel` component, use these
+    /// for custom shadow maps. The shadow of every point, spot or directional light whose channel
+    /// is `i` is multiplied by `custom_shadow_factors[i]`, whether or not the light has Bevy
+    /// shadow maps enabled. Like Bevy's shadows, this applies to direct light on shadow receivers
+    /// and to diffuse transmitted light on transmitted shadow receivers. Lights without a
+    /// `CustomShadowChannel` are unaffected. Defaults to 1.0.
+    custom_shadow_factors: vec4<f32>,
 };
 
 /// Creates a PbrInput with default values
@@ -151,6 +160,7 @@ fn pbr_input_new() -> PbrInput {
 
     pbr_input.flags = 0u;
     pbr_input.directional_shadow_factor = 1.0;
+    pbr_input.custom_shadow_factors = vec4<f32>(1.0);
 
     return pbr_input;
 }

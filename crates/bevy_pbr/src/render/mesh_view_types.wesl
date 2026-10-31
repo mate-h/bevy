@@ -22,6 +22,9 @@ const POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT: u32   = 1u << 3u;
 const POINT_LIGHT_FLAGS_CONTACT_SHADOWS_ENABLED_BIT: u32            = 1u << 4u;
 const POINT_LIGHT_FLAGS_SPOT_LIGHT_BIT: u32                         = 1u << 5u;
 const POINT_LIGHT_FLAGS_RECT_LIGHT_BIT: u32                         = 1u << 6u;
+// Bits 8..10 hold `channel + 1` of the light's `CustomShadowChannel`, or 0 if it has none.
+const POINT_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT: u32            = 8u;
+const POINT_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_MASK: u32             = 7u;
 
 struct DirectionalCascade {
     clip_from_world: mat4x4<f32>,
@@ -50,6 +53,9 @@ const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32                  = 1u << 
 const DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT: u32                       = 1u << 1u;
 const DIRECTIONAL_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT: u32 = 1u << 2u;
 const DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_ENABLED_BIT: u32           = 1u << 3u;
+// Bits 8..10 hold `channel + 1` of the light's `CustomShadowChannel`, or 0 if it has none.
+const DIRECTIONAL_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT: u32          = 8u;
+const DIRECTIONAL_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_MASK: u32           = 7u;
 
 struct RectLight {
     color: vec4<f32>,

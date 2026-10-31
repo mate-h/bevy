@@ -42,6 +42,8 @@ pub use probe::{
 };
 pub mod atmosphere;
 pub use atmosphere::Atmosphere;
+mod custom_shadow;
+pub use custom_shadow::{CustomShadowChannel, MAX_CUSTOM_SHADOW_CHANNELS};
 mod volumetric;
 pub use volumetric::{FogVolume, VolumetricFog, VolumetricLight};
 pub mod cascade;
