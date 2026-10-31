@@ -28,6 +28,14 @@ import package::atmosphere::clouds::{
     CLOUD_FIELD_RES_XY,
     CLOUD_FIELD_RES_Z,
     cloud_shadow_xy_to_uv,
+    cloud_field_frame_xz,
+    cloud_possible_footprint,
+    cloud_far_grid_cell,
+    cloud_far_grid_texel,
+    cloud_far_grid_tag,
+    CLOUD_FAR_GRID_RES_XY,
+    CLOUD_FAR_GRID_RES_Z,
+    CLOUD_FAR_GRID_CELL_M,
 };
 
 @group(0) @binding(40) var out_field_init: texture_storage_3d<rgba16float, write>;
@@ -40,6 +48,9 @@ import package::atmosphere::clouds::{
 // Escape probability (r), optical depth to the layer top (g) and bottom (b). Written by escape
 // in the same frame as edt_z, so it shares cloud_field_sdf's build cell.
 @group(0) @binding(46) var out_field_esc: texture_storage_3d<rgba16float, write>;
+// Far empty-space grid (`far_grid`): r = 1 where the cell is certainly clear, g = its world-cell
+// tag (`cloud_far_grid_tag`).
+@group(0) @binding(61) var out_far_grid: texture_storage_3d<rg32uint, write>;
 
 // Squared distances are stored in xy-voxel units (fp16-safe: < 2048 within the windows).
 const BIG: f32 = 60000.0;
@@ -504,4 +515,38 @@ fn diffusion_shift_commit(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(diff_state, vec3(0, 0, 0), vec4(cell.x));
         textureStore(diff_state, vec3(1, 0, 0), vec4(cell.y));
     }
+}
+
+// Far empty-space grid: whether a CLOUD_FAR_GRID_CELL_M cell of one of CLOUD_FAR_GRID_RES_Z slabs
+// of the layer can hold cloud, over CLOUD_FAR_GRID_RES_XY cells around the camera (~190 km), where
+// the SDF field (24 km) does not reach. The view march leaps over clear cells; beyond the field it
+// spent ~35 coarse samples per ray, ~80 % of them in cells this calls clear.
+// A cell is clear when the coarse test over a cell-sized footprint (`cloud_possible_footprint`)
+// fails at its centre and four corners, at the slab's bottom, middle and top: the footprints cover
+// the cell, the scheme's footprint statistics the noise inside them.
+// Dispatch (RES_XY / 8, RES_XY / 8, slabs): slab (z + frame) % RES_Z, i.e. one slab per frame, all
+// of them with RES_Z. Texels wrap (world cell modulo RES_XY), so a built cell stays valid as the
+// window follows the camera; each stores its world cell, and the march ignores mismatches.
+@compute @workgroup_size(8, 8, 1)
+fn far_grid(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id.xy >= vec2(u32(CLOUD_FAR_GRID_RES_XY)))) {
+        return;
+    }
+    let slab = i32((id.z + view.frame_count) % u32(CLOUD_FAR_GRID_RES_Z));
+    // The world cell of this texel in the window [camera cell - RES/2, camera cell + RES/2).
+    let lo = cloud_far_grid_cell(cloud_field_frame_xz(view_position())) - vec2(CLOUD_FAR_GRID_RES_XY / 2);
+    let cell = lo + cloud_far_grid_texel(vec2<i32>(id.xy) - lo);
+    let dz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_FAR_GRID_RES_Z);
+    let r0 = cloud_layer.cloud_layer_start + f32(slab) * dz;
+    var clear = true;
+    for (var k = 0; k < 15 && clear; k++) {
+        let corner = vec2(f32(k % 5 >= 1 && k % 5 <= 2), f32(k % 5 >= 2 && k % 5 <= 3));
+        let uv = select(corner, vec2(0.5), k % 5 == 4);
+        let xz = cloud_field_frame_to_atmosphere_xz((vec2<f32>(cell) + uv) * CLOUD_FAR_GRID_CELL_M);
+        let r = min(r0 + f32(k / 5) * 0.5 * dz, cloud_layer.cloud_layer_end - 0.5);
+        let p = vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y);
+        clear = !cloud_possible_footprint(r, p, CLOUD_FAR_GRID_CELL_M);
+    }
+    let texel = vec3<i32>(cloud_far_grid_texel(cell), slab);
+    textureStore(out_far_grid, texel, vec4(u32(clear), cloud_far_grid_tag(cell), 0u, 0u));
 }

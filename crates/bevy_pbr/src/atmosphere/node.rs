@@ -548,6 +548,38 @@ pub fn atmosphere_luts(
         }
     }
 
+    // Far empty-space grid (`cloud_field.wesl` far_grid): one slab per frame (the shader picks it
+    // from the frame count), all of them into a new texture. Cells are tagged with the world cell
+    // they were built for, so the march ignores a cell not yet rebuilt since the window moved.
+    if let (Some(cloud_layer_uniforms_offset), Some(shadow_bg), Some(pipeline)) = (
+        cloud_layer_uniforms_offset.as_ref(),
+        bind_groups.cloud_shadow_map.as_ref(),
+        pipeline_cache.get_compute_pipeline(pipelines.cloud_far_grid),
+    ) {
+        let grid_id = textures.cloud_far_grid.texture.id();
+        let slabs = if state.far_grid_texture != Some(grid_id) {
+            state.far_grid_texture = Some(grid_id);
+            super::resources::CLOUD_FAR_GRID_RES_Z
+        } else {
+            1
+        };
+        let mut pass = labelled_compute_pass!("cloud_far_grid");
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(
+            0,
+            shadow_bg,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
+            ],
+        );
+        let n = super::resources::CLOUD_FAR_GRID_RES_XY.div_ceil(8);
+        pass.dispatch_workgroups(n, n, slabs);
+    }
+
     // IMPORTANT:
     // We run the cloud shadow *filter* in a separate compute pass so the backend can insert the
     // required resource state transitions (storage-write -> sampled-read) between tracing and filtering.
@@ -1035,6 +1067,8 @@ pub struct ViewLutState {
     /// Cloud-field rebuild stage counter and the SDF texture it was built into.
     field_frame: u32,
     field_texture: Option<bevy_render::render_resource::TextureId>,
+    /// The far empty-space grid texture whose every slab has been built.
+    far_grid_texture: Option<bevy_render::render_resource::TextureId>,
 }
 
 impl PerViewLutState {

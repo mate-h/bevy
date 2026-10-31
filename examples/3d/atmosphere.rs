@@ -5,7 +5,7 @@
 //!   `ATMOSPHERE_SUNSET`, `ATMOSPHERE_TERRAIN`, `ATMOSPHERE_NO_CLOUDS`, `ATMOSPHERE_NO_CIRRUS`,
 //!   `ATMOSPHERE_NO_CUMULUS` (cirrus only), `ATMOSPHERE_WIND=slow|opposing`, `ATMOSPHERE_NO_TAA`,
 //!   `ATMOSPHERE_MESH_PLANE`, `ATMOSPHERE_MSAA=2|4|8`, `ATMOSPHERE_WINDOW=w,h`,
-//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer),
+//!   `ATMOSPHERE_CLOUD_QUALITY=low|medium|high|cinematic`, `ATMOSPHERE_CLOUD_LIGHT_TAPS=<n>`, `ATMOSPHERE_SECOND_THIN=1` (cirrostratus layer),
 //!   `ATMOSPHERE_INFLUENCE=hole|coast` (a world-anchored clear region; a maritime/continental coast), `ATMOSPHERE_CLOUD_STEP_SAMPLES=<n>`,
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
@@ -976,6 +976,10 @@ fn setup_camera_fog(
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(preset.shadow_temporal_alpha),
+                light_taps: std::env::var("ATMOSPHERE_CLOUD_LIGHT_TAPS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(preset.light_taps),
                 step_samples: std::env::var("ATMOSPHERE_CLOUD_STEP_SAMPLES")
                     .ok()
                     .and_then(|v| v.parse().ok())

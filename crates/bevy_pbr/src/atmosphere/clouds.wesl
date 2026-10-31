@@ -487,6 +487,20 @@ fn cloud_scheme_density(world_pos: vec3<f32>, h: f32, p: f32, mip: f32) -> f32 {
     return shell / max(scheme.y, 1e-4) * scheme.z;
 }
 
+/// Whether the cloud scheme can have cloud in a footprint of `footprint` m at `world_pos` (a
+/// sample position, `cloud_sample_pos`) at cloud fraction `p`: `cloud_scheme_density`'s clear-air
+/// test (the coarsest tap's footprint mean and unresolved variance, plus the largest the finer
+/// taps can add) at that footprint.
+fn cloud_scheme_possible(world_pos: vec3<f32>, h: f32, p: f32, footprint: f32) -> bool {
+    let period = max(1.0, cloud_layer.shape_noise_scale);
+    let a = cloud_scheme_tap(world_pos, h, period, 0u, footprint);
+    let r = cloud_bubble_weight();
+    let s = pow(CLOUD_SCHEME_TAP, -CLOUD_SCHEME_H);
+    let bubbles = cloud_bubble_moments();
+    let fine_max = r * (s + s * s) * (bubbles.x + 7.0 * sqrt(bubbles.y));
+    return a.x + r * a.z + fine_max >= cloud_scheme(p).x - 3.0 * sqrt(a.y + r * r * a.w);
+}
+
 /// E[(dm + sigma Z)+], Z standard normal: sigma phi(d) + dm Phi(d), d = dm / sigma (the resolved
 /// max(dm, 0) when sigma -> 0). Beyond 3 sigma below zero it is < 4e-4 sigma: zero, so the
 /// march's empty test (and its return to coarse steps) still sees clear air.
@@ -574,27 +588,78 @@ fn cloud_sample_pos(world_pos: vec3<f32>, r: f32) -> vec3<f32> {
 /// only removes); the bound must carry the same power, or thin low-density-scale clouds, which
 /// the power lifts by orders of magnitude (2e-4 -> 0.08), fall under the empty threshold.
 fn sample_cumulus_shape_coarse(r: f32, world_pos: vec3<f32>) -> f32 {
-    let ctx = cloud_density_context(r, world_pos);
-    let x = saturate(ctx.x * ctx.y);
-    return select(0.0, pow(x, mix(0.3, 0.6, max(1e-4, ctx.y))), x > 0.0) * ctx.w;
+    return cloud_coarse_from_column(cloud_column_at(r, world_pos));
+}
+
+/// Whether there can be cloud within a footprint of `footprint` m around `world_pos`: the coarse
+/// density's weather and profile at the point and, with the physical lookups (whose coarse bound is
+/// 1 wherever the cloud fraction is positive, gaps between cumuli included), the cloud scheme's
+/// clear-air test over the footprint (`cloud_scheme_possible`). Builds the far empty-space grid.
+fn cloud_possible_footprint(r: f32, world_pos: vec3<f32>, footprint: f32) -> bool {
+    if (r < cloud_layer.cloud_layer_start || r > cloud_layer.cloud_layer_end) {
+        return false;
+    }
+    let h = clamp((r - cloud_layer.cloud_layer_start) / max(1.0, cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start), 0.0, 1.0);
+    let sample_pos = cloud_sample_pos(world_pos, r);
+    let column = cloud_column_weather(sample_pos);
+    let profile = cloud_vertical_profile(h, column.x, column.y);
+    if (profile.x <= 0.0 || column.z <= 0.0 || profile.y <= 0.0) {
+        return false;
+    }
+    return cloud_layer.profile_mode != 0u || cloud_scheme_possible(sample_pos, h, profile.x, footprint);
 }
 
 /// Fine density with mip LOD (design.md §1.3 / §1.4).
 fn sample_cumulus_shape_lod(r: f32, world_pos: vec3<f32>, mip: f32) -> f32 {
+    return cloud_shape_from_column(cloud_column_at(r, world_pos), mip);
+}
+
+/// What the coarse and the fine density share at a point: the sample position in the moving
+/// field (wind, shear lean), the height in the layer, the column's weather
+/// (`cloud_column_weather`) and its vertical profile (`cloud_vertical_profile`). Most of the
+/// density's texture fetches, in a chain of dependent ones (weather -> type -> base -> lean ->
+/// weather -> profile). The view march evaluates it once per step for both branches: 32 rays in
+/// lockstep pay for every branch any of them takes, so separate coarse and fine copies made a
+/// step with both kinds of rays pay for it twice.
+struct CloudColumn {
+    sample_pos: vec3<f32>,
+    h: f32,
+    /// (coverage, cloud type, density scale, droplet extinction factor).
+    weather: vec4<f32>,
+    /// (dimensional profile, liquid water / the layer's).
+    vertical: vec2<f32>,
+}
+
+fn cloud_column_at(r: f32, world_pos: vec3<f32>) -> CloudColumn {
     let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
     let height_in_layer = r - cloud_layer.cloud_layer_start;
     let h = clamp(height_in_layer / max(1.0, layer_thickness), 0.0, 1.0);
     let sample_pos = cloud_sample_pos(world_pos, r);
-
     // Nubis detail type (0 wispy, 1 billowy) and density scale: authored weather fields; with
     // the physical profiles the air mass and droplet number of the physical channels.
-    let column = cloud_column_weather(sample_pos);
-    let coverage = column.x;
-    let detail_type = column.y;
-    let density_scale = column.z;
-    let droplets = column.w;
+    let weather = cloud_column_weather(sample_pos);
     // Nubis Evolved (2022) sky model: dimensional_profile = vertical_profile * coverage.
-    let vertical = cloud_vertical_profile(h, coverage, detail_type);
+    let vertical = cloud_vertical_profile(h, weather.x, weather.y);
+    return CloudColumn(sample_pos, h, weather, vertical);
+}
+
+/// `sample_cumulus_shape_coarse` from a column (`cloud_column_at`).
+fn cloud_coarse_from_column(c: CloudColumn) -> f32 {
+    let density_scale = pow(c.weather.z, 4.0);
+    // Lookups: cloud is possible wherever the cloud fraction is positive (`cloud_density_context`).
+    let bound = select(0.0, select(c.vertical.x, 1.0, cloud_layer.profile_mode == 0u), c.vertical.x > 0.0);
+    let x = saturate(bound * density_scale);
+    return select(0.0, pow(x, mix(0.3, 0.6, max(1e-4, density_scale))), x > 0.0) * c.vertical.y;
+}
+
+/// Fine density (`sample_cumulus_shape_lod`) from a column (`cloud_column_at`).
+fn cloud_shape_from_column(c: CloudColumn, mip: f32) -> f32 {
+    let sample_pos = c.sample_pos;
+    let h = c.h;
+    let detail_type = c.weather.y;
+    let density_scale = c.weather.z;
+    let droplets = c.weather.w;
+    let vertical = c.vertical;
     let base_profile = vertical.x;
     if (base_profile <= 0.0) {
         return 0.0;
@@ -953,6 +1018,29 @@ fn cloud_field_voxel_m() -> f32 {
 /// frame, a voxel per rebuild at 180x).
 fn cloud_field_frame_xz(p: vec3<f32>) -> vec2<f32> {
     return p.xz - cloud_layer.noise_offset.xz;
+}
+
+/// Far empty-space grid (`cloud_field.wesl` far_grid): CLOUD_FAR_GRID_RES_XY^2 cells of
+/// CLOUD_FAR_GRID_CELL_M in the cloud frame around the camera (wrapping: a cell's texel is its
+/// world cell index modulo the resolution), CLOUD_FAR_GRID_RES_Z slabs over the layer. Must match
+/// `resources.rs`.
+const CLOUD_FAR_GRID_RES_XY: i32 = 128;
+const CLOUD_FAR_GRID_RES_Z: i32 = 8;
+const CLOUD_FAR_GRID_CELL_M: f32 = 1500.0;
+
+/// World cell of the far grid at a cloud-frame position.
+fn cloud_far_grid_cell(xz: vec2<f32>) -> vec2<i32> {
+    return vec2<i32>(floor(xz / CLOUD_FAR_GRID_CELL_M));
+}
+
+/// Texel of a far-grid world cell (the grid wraps around).
+fn cloud_far_grid_texel(cell: vec2<i32>) -> vec2<i32> {
+    return ((cell % CLOUD_FAR_GRID_RES_XY) + CLOUD_FAR_GRID_RES_XY) % CLOUD_FAR_GRID_RES_XY;
+}
+
+/// The tag a far-grid texel stores for the world cell it was built for.
+fn cloud_far_grid_tag(cell: vec2<i32>) -> u32 {
+    return (u32(cell.x) & 0xffffu) | (u32(cell.y) << 16u);
 }
 
 /// A cloud-frame horizontal position back in atmosphere space (this frame's advection).

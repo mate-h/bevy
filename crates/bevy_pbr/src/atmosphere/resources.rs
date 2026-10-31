@@ -45,6 +45,10 @@ pub const WEATHER_WINDOW_SIZE: u32 = 1024;
 pub(crate) const CLOUD_FIELD_RES_Z: u32 = 32;
 /// Horizontal extent of the cloud field grid (m; `clouds.wesl` CLOUD_FIELD_EXTENT_M).
 pub(crate) const CLOUD_FIELD_EXTENT_M: f32 = 24_000.0;
+/// Far empty-space grid (must match `clouds.wesl` CLOUD_FAR_GRID_*): horizontal cells, vertical
+/// slabs (one rebuilt per frame).
+pub(crate) const CLOUD_FAR_GRID_RES_XY: u32 = 128;
+pub(crate) const CLOUD_FAR_GRID_RES_Z: u32 = 8;
 
 /// Shadow map bind group layout entries
 fn shadow_map_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<4> {
@@ -441,6 +445,14 @@ impl AtmosphereBindGroupLayouts {
                         49,
                         texture_2d(TextureSampleType::Float { filterable: true }),
                     ),
+                    // Far empty-space grid (`cloud_field.wesl` far_grid entry point).
+                    (
+                        61,
+                        texture_storage_3d(
+                            TextureFormat::Rg32Uint,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
                     (
                         13,
                         texture_storage_2d(
@@ -567,6 +579,8 @@ impl AtmosphereBindGroupLayouts {
                         59,
                         texture_3d(TextureSampleType::Float { filterable: true }),
                     ),
+                    // Far empty-space grid (`cloud_field.wesl` far_grid).
+                    (61, texture_3d(TextureSampleType::Uint)),
                 )),
             )
         };
@@ -1140,6 +1154,7 @@ pub(crate) struct AtmosphereLutPipelines {
     pub clouds_raymarch_msaa: CachedComputePipelineId,
     pub clouds_reconstruct: CachedComputePipelineId,
     pub cloud_field_init: CachedComputePipelineId,
+    pub cloud_far_grid: CachedComputePipelineId,
     pub cloud_field_edt_x: CachedComputePipelineId,
     pub cloud_field_edt_y: CachedComputePipelineId,
     pub cloud_field_edt_z: CachedComputePipelineId,
@@ -1320,6 +1335,11 @@ impl FromWorld for AtmosphereLutPipelines {
                 "cloud_field_init_pipeline",
                 &layouts.cloud_shadow_map,
                 "init",
+            ),
+            cloud_far_grid: field(
+                "cloud_far_grid_pipeline",
+                &layouts.cloud_shadow_map,
+                "far_grid",
             ),
             cloud_field_edt_x: field(
                 "cloud_field_edt_x_pipeline",
@@ -1568,6 +1588,8 @@ pub struct AtmosphereTextures {
     pub cloud_field_sdf: CachedTexture,
     pub cloud_field_ext: CachedTexture,
     pub cloud_field_esc: CachedTexture,
+    /// Far empty-space grid (`cloud_field.wesl` far_grid): per cell (occupied, world cell tag).
+    pub cloud_far_grid: CachedTexture,
     /// Weather window around the camera (`weather_window.wesl`): A the art channels (the tiled
     /// map's), B the physical channels. [`WEATHER_WINDOW_SIZE`]^2, recomposed every frame.
     pub weather_window_art: CachedTexture,
@@ -1716,6 +1738,21 @@ pub(super) fn prepare_atmosphere_textures(
             usage: TextureUsages::STORAGE_BINDING
                 | TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let cloud_far_grid = textures.get(TextureDescriptor {
+            label: Some("cloud_far_grid"),
+            size: cloud_extent(Extent3d {
+                width: CLOUD_FAR_GRID_RES_XY,
+                height: CLOUD_FAR_GRID_RES_XY,
+                depth_or_array_layers: CLOUD_FAR_GRID_RES_Z,
+            }),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D3,
+            format: TextureFormat::Rg32Uint,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
@@ -1954,6 +1991,7 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_sdf,
                 cloud_field_ext,
                 cloud_field_esc,
+                cloud_far_grid,
                 weather_window_art,
                 weather_window_physical,
                 cloud_field_diff_src,
@@ -2687,6 +2725,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     (40, &textures.cloud_field_a.default_view),
                     (45, &textures.cloud_field_ext.default_view),
                     (49, &fbm_noise_texture.cirrus.default_view),
+                    (61, &textures.cloud_far_grid.default_view),
                 )),
             )
         });
@@ -2918,6 +2957,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (48, &textures.cloud_field_esc.default_view),
                         (49, &fbm_noise_texture.cirrus.default_view),
                         (59, &textures.cloud_field_diff.default_view),
+                        (61, &textures.cloud_far_grid.default_view),
                     )),
                 )
             });
@@ -3210,6 +3250,7 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_MIP0`: full-resolution cloud noise at any distance.
 /// - `ATM_DBG_OUT_H`: write height-in-layer / profile / depth instead of cloud colour.
 /// - `ATM_DBG_NO_SDF_SKIP`: disable cloud-SDF empty-space skipping.
+/// - `ATM_DBG_NO_FAR_GRID`: disable the far empty-space grid's leaps over clear cells.
 /// - `ATM_DBG_NO_CLOUD_MOTION`: reproject the cloud history without the wind displacement.
 /// - `ATM_DBG_NO_THIN_SHADOW`: no thin-layer (cirrus) shadow in the cloud shadow map's alpha.
 /// - `ATM_DBG_ESC_FALLBACK`: the out-of-field escape/column estimate everywhere (validation).
@@ -3231,6 +3272,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   its escape probability, density) at each pixel's first in-cloud sample instead of cloud colour.
 /// - `ATM_DBG_OUT_SUN_TAU`: write (sun optical depth of the light taps plus the map beyond, the
 ///   cloud shadow map's alone at the sample, the diffusion solution, density) there instead.
+/// - `ATM_DBG_OUT_STEPS`: write the view march's sample counts (coarse, fine, lit, all steps)
+///   instead of cloud colour (cost profiling).
 /// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the
 ///   tracer's bounce (r), flight segment (g) and sun-ray (b) budgets, and that continued past a
 ///   segment's null-collision budget (a, exact).

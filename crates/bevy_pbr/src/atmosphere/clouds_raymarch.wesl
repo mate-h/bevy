@@ -27,6 +27,9 @@ import package::atmosphere::{
         get_cloud_absorption_coeff, cloud_density_context, cloud_layer, cirrus_slant_optical_depth, CIRRUS_SLICES,
         cloud_field_uvw, cloud_field_voxel_m, CLOUD_FIELD_EXTENT_M,
         cloud_profile_lut, CLOUD_PROFILE_TYPE_ROWS, CLOUD_SCHEME_ROW,
+        cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
+        cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
+        CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M,
     },
 };
 
@@ -48,6 +51,34 @@ const CLOUD_SDF_SKIP_MARGIN_VOXELS: f32 = 2.5;
 // Diffuse sunlight of the cloud field per unit sun irradiance, U = 4 pi J_diff / E (r), and its
 // build cell (gb) (cloud_field.wesl diffusion solve).
 @group(0) @binding(59) var cloud_field_diff: texture_3d<f32>;
+// Far empty-space grid (cloud_field.wesl `far_grid`): r = 1 where the cell is clear, g its tag.
+@group(0) @binding(61) var cloud_far_grid: texture_3d<u32>;
+
+/// Distance along the ray from p to where it leaves p's far-grid cell, if that cell is certainly
+/// clear (and was built for this world cell); 0 otherwise. Cells are boxes in the cloud frame's
+/// x/z (a translation of atmosphere space) and spherical slabs of the layer, here planar over a
+/// cell (the shell's curvature lifts it ~0.2 m over 1.5 km).
+fn cloud_far_leap(p: vec3<f32>, r_p: f32, ray_dir: vec3<f32>) -> f32 {
+    let xz = cloud_field_frame_xz(p);
+    let cell = cloud_far_grid_cell(xz);
+    let dz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_FAR_GRID_RES_Z);
+    let slab = clamp(i32(floor((r_p - cloud_layer.cloud_layer_start) / dz)), 0, CLOUD_FAR_GRID_RES_Z - 1);
+    let v = textureLoad(cloud_far_grid, vec3<i32>(cloud_far_grid_texel(cell), slab), 0).rg;
+    if (v.x != 1u || v.y != cloud_far_grid_tag(cell)) {
+        return 0.0;
+    }
+    let d = ray_dir.xz;
+    let lo = vec2<f32>(cell) * CLOUD_FAR_GRID_CELL_M;
+    let to_x = select(lo.x + CLOUD_FAR_GRID_CELL_M, lo.x, d.x < 0.0) - xz.x;
+    let to_z = select(lo.y + CLOUD_FAR_GRID_CELL_M, lo.y, d.y < 0.0) - xz.y;
+    let t_x = select(1e30, to_x / d.x, abs(d.x) > 1e-6);
+    let t_z = select(1e30, to_z / d.y, abs(d.y) > 1e-6);
+    let mu_p = dot(ray_dir, p) / r_p;
+    let r_lo = cloud_layer.cloud_layer_start + f32(slab) * dz;
+    let to_r = select(r_lo + dz, r_lo, mu_p < 0.0) - r_p;
+    let t_r = select(1e30, to_r / mu_p, abs(mu_p) > 1e-6);
+    return max(min(min(t_x, t_z), t_r), 0.0);
+}
 
 /// The cloud field's diffusion solution at p (0 outside the grid).
 fn cloud_field_diffuse(p: vec3<f32>) -> f32 {
@@ -131,6 +162,9 @@ const CLOUD_FINE_EMPTY_TO_COARSE: u32 = 10u;
 const CLOUD_COARSE_DENSITY_EPS: f32 = 0.0005;
 // Grazing rays enter a 1.5-4 km shell ~140-230 km away, so keep the horizon covered.
 const CLOUD_MIN_TRANSMITTANCE: f32 = 0.01;
+// Lit samples recorded per ray for lighting after the march (99 % of rays have at most 6; the
+// march stops below CLOUD_MIN_TRANSMITTANCE); further ones are lit like the last.
+const CLOUD_LIT_SAMPLES: u32 = 6u;
 
 // Short light taps toward the sun for near-surface self-shadowing detail (Nubis3 2:09:52: "the
 // first two samples are taken as before"; the cloud shadow map covers the long range).
@@ -802,6 +836,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
 
     var result = vec4(0.0, 0.0, 0.0, 1.0);
     var weighted_depth = 0.0;
+    // ATM_DBG_OUT_STEPS: (coarse samples, fine samples, lit samples, all steps) of the view march.
+    var dbg_steps = vec4(0.0);
 
     let ray_dir = uv_to_ray_direction(uv);
     let ray_origin = get_view_position();
@@ -886,6 +922,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // Ground-truth march for skip validation: fine samples everywhere, no budget limit.
         @if(ATM_DBG_NO_COARSE) { max_steps = 16384u; }
 
+        // Lit samples of the march: (t, luminance weight, view optical depth, density).
+        var lit_samples: array<vec4<f32>, CLOUD_LIT_SAMPLES>;
+        var n_lit = 0u;
+
         loop {
             if (t >= t_end || step_i >= max_steps || transmittance < CLOUD_MIN_TRANSMITTANCE) {
                 break;
@@ -908,8 +948,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
             let mip = cloud_mip_from_distance(t);
 
             var density = 0.0;
+            @if(ATM_DBG_OUT_STEPS) { dbg_steps.w += 1.0; }
+            // The column (weather, lean, profile) both branches need, once for every ray of the
+            // SIMD group before they diverge (`CloudColumn`).
+            let in_shell = r_p >= cloud_layer.cloud_layer_start && r_p <= cloud_layer.cloud_layer_end;
+            let column = cloud_column_at(r_p, p);
             if (fine_mode) {
-                density = get_cloud_medium_density_lod(r_p, p, mip);
+                @if(ATM_DBG_OUT_STEPS) { dbg_steps.y += 1.0; }
+                if (CLOUD_USE_NOISE_SHAPE) {
+                    density = select(0.0, cloud_shape_from_column(column, mip) * cloud_layer.cloud_density, in_shell);
+                } else {
+                    density = get_cloud_medium_density_lod(r_p, p, mip);
+                }
                 // Long steps: the step's density is the mean of evenly spaced samples across
                 // it, also when the first is empty, which keeps the step's optical depth
                 // unbiased (audit 24). exp of one jittered sample averages too transparent
@@ -939,12 +989,28 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 }
                 fine_empty = 0u;
             } else {
+                // Far empty-space grid: leave a clear cell in one step. The leap is certified
+                // clear, so a hit after it does not step back over it (which would land in the
+                // same cell, leap to the same hit and loop): only the jittered fraction of a step
+                // past the cell's side is uncertain. The jitter keeps the fine runs that start
+                // there from lining up on the world-fixed cell sides (bands).
+                @if(!ATM_DBG_NO_FAR_GRID) {
+                    let leap = cloud_far_leap(p, r_p, ray_dir);
+                    if (leap > dt) {
+                        let past = jitter * dist_step;
+                        t += leap + past;
+                        last_leap = past;
+                        continue;
+                    }
+                }
                 // The fine density's near-camera reshape raises small densities (pow 0.5), so the
                 // bound gets it too, or thin near-camera cloud failed the coarse test (audit 25).
-                let coarse = near_camera_reshape(
-                    get_cloud_medium_density_coarse(r_p, p) / max(cloud_layer.cloud_density, 1e-6),
-                    mip,
-                ) * cloud_layer.cloud_density;
+                @if(ATM_DBG_OUT_STEPS) { dbg_steps.x += 1.0; }
+                var coarse_shape = select(0.0, cloud_coarse_from_column(column), in_shell);
+                if (!CLOUD_USE_NOISE_SHAPE) {
+                    coarse_shape = get_cloud_medium_density_coarse(r_p, p) / max(cloud_layer.cloud_density, 1e-6);
+                }
+                let coarse = near_camera_reshape(coarse_shape, mip) * cloud_layer.cloud_density;
                 if (coarse > CLOUD_COARSE_DENSITY_EPS) {
                     // Step back and enter fine mode (Nubis17).
                     // Undo the leap that landed here (not the current step, which with the
@@ -985,145 +1051,170 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
 
             let sigma_t = density * sigma_t_unit;
             let sigma_s = density * sigma_s_unit;
-            let up = p / r_p;
-            let dens_ctx = cloud_density_context(r_p, p);
-            let esc_col = cloud_escape_and_column(p);
-
-            var direct_sum = vec3(0.0);
-            for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
-                let light = &lights.directional_lights[light_i];
-                let l = (*light).direction_to_light;
-                let mu_light = dot(l, up);
-                let t_atm = sample_transmittance_lut(r_p, mu_light)
-                    * f32(!ray_intersects_ground(r_p, mu_light));
-                // Local light march through the real (fine) density (Nubis/HZD cone march): 6 taps with
-                // doubling step (~1.3 km) + one long tap, so billows self-shadow. The cloud shadow map
-                // (coarse density, 4x4 time-sliced, temporally filtered) is only used for the
-                // occlusion *beyond* the local march; using it at `p` replaced all per-billow detail
-                // with smooth weather-map blobs once it converged.
-                var light_od = 0.0;
-                var tap_t = 0.0;
-                var tap_dt = LIGHT_TAP_STEP_M;
-                var n_taps = settings.cloud_light_taps;
-                var tap_growth = LIGHT_TAP_GROWTH;
-                var tap_lod = LIGHT_TAP_LOD;
-                // Validation: a dense uniform march toward the light (256 x 30 m at the sample's
-                // mip) to test the light taps' quadrature against the reference.
-                @if(ATM_DBG_LIGHT_BRUTE) {
-                    n_taps = 256u;
-                    tap_dt = 30.0;
-                    tap_growth = 1.0;
-                    tap_lod = 0.0;
-                }
-                for (var k = 0u; k < n_taps; k++) {
-                    let pk = p + l * (tap_t + 0.5 * tap_dt);
-                    let dk = get_cloud_medium_density_lod(length(pk), pk, mip + tap_lod * f32(k));
-                    light_od += dk * tap_dt;
-                    tap_t += tap_dt;
-                    tap_dt *= tap_growth;
-                }
-                let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * 0.5);
-                let d_far = get_cloud_medium_density_lod(length(p_far), p_far, mip + 3.0);
-                light_od += d_far * LIGHT_LONG_TAP_M;
-                let light_optical_depth = light_od * sigma_t_unit;
-                let p_beyond = p + l * (tap_t + LIGHT_LONG_TAP_M);
-                var t_far = sample_cloud_shadow_map(p_beyond, l, false);
-                @if(ATM_DBG_NO_FAR_SHADOW) { t_far = 1.0; }
-                let t_local = exp(-light_optical_depth);
-                @if(ATM_DBG_OUT_SUN_OD) {
-                    if (dbg_sun.x < 0.0) { dbg_sun = vec4(light_optical_depth, cloud_field_diffuse(p), esc_col.x, density); }
-                }
-                // ATM_DBG_OUT_SUN_TAU: (sun optical depth, local march + map beyond; the map alone
-                // at p; the field's diffusion solution; density) at the first in-cloud sample.
-                @if(ATM_DBG_OUT_SUN_TAU) {
-                    if (dbg_sun.x < 0.0) {
-                        dbg_sun = vec4(light_optical_depth - log(max(t_far, 1e-6)), -log(max(sample_cloud_shadow_map(p, l, false), 1e-6)), cloud_field_diffuse(p), density);
-                    }
-                }
-                let t_cloud = t_far * t_local;
-                let cos_theta = dot(l, ray_dir);
-                // Nubis Cubed structure (Schneider, Advances 2023, "Direct = Transmittance * Phase +
-                // Multiple Scattering * Secondary Phase") with physically derived terms. Multiple
-                // scattering (orders >= 2), isotropic: E_sun * exp(-(1 - g) tau_sun) * F_ms / 4pi.
-                //  - exp(-(1 - g) tau_sun): diffuse sunlight under similarity scaling (Joseph,
-                //    Wiscombe & Weinman 1976), tau_sun = local march + shadow-map optical depth.
-                //  - F_ms = f_ms / (1 - f_ms), f_ms = albedo (1 - P_esc): Hillaire 2020's transfer
-                //    series with the escape probability on the reduced optical depth (cloud field).
-                // vs MC (validation/sky/ms_models_vs_mc.py, tau <= 5): median error -29..+25 %.
-                var direct = t_local * t_far * cloud_phase(cos_theta);
-                @if(!CLOUD_TERM_S1) {
-                    let tau_sun = light_optical_depth - log(max(t_far, 1e-6));
-                    let albedo = sigma_s_unit / max(sigma_t_unit, 1e-9);
-                    // P_esc of a finite cloud is positive; the escape volume stores it in
-                    // RGBA16F, whose smallest normal (6.1e-5) is the floor kept here, so a thick
-                    // conservative cloud (zero absorption) cannot make 1 - f_ms zero (audit 22).
-                    // Escape probability: the cloud field's (375 m cells; validated for clouds
-                    // larger than that) or, where smaller, a local estimate from the fine density
-                    // along the two directions the march already knows, toward the sun and back
-                    // along the view ray: P_esc ~ mean of exp(-(1 - g) tau) (similarity-reduced,
-                    // as the field's). Small cumuli are much smaller than a field cell, which
-                    // diluted their extinction there: P_esc ~ 1, no multiple scattering, and
-                    // their sunlit sides rendered gray although tau ~ 10-20 across them.
-                    let tau_view = view_od_in_cloud + 0.5 * sigma_t * dt;
-                    let p_esc_local = 0.5 * (exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun)
-                        + exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_view));
-                    var p_esc = min(esc_col.x, p_esc_local);
-                    @if(ATM_DBG_ESC_ZERO) { p_esc = 0.0; }
-                    @if(ATM_DBG_ESC_FIELD_ONLY) { p_esc = esc_col.x; }
-                    let f_ms = albedo * (1.0 - max(p_esc, 6.1035e-5));
-                    var ms_vol = exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun) * f_ms / (1.0 - f_ms);
-                    // Thick cloud: the escape series decays as exp(-(1 - g) tau_sun) and leaves
-                    // the shaded side dark (MC: ~0 below a reduced depth of a few), while the
-                    // diffuse light of a conservative medium falls off linearly through it. The
-                    // delta-Eddington diffusion solution of the vertical slab (the field's
-                    // columns to the layer top and bottom), lit by the sunlight that reaches the
-                    // column (the far shadow map), takes over where it is larger
-                    // (ATM_DBG_MS_DIFFUSION).
-                    // The cloud field's 3D diffusion solve (cloud_field.wesl): the diffuse light of
-                    // the whole cloud around p, lit by the first directional light. The escape
-                    // series stays where it is larger (thin cloud, beyond the grid).
-                    var field_on = light_i == 0u;
-                    @if(ATM_DBG_MS_SERIES_ONLY) { field_on = false; }
-                    if (field_on) {
-                        ms_vol = max(ms_vol, cloud_field_diffuse(p));
-                    }
-                    // Experiment: the vertical-slab solution (lights only the layer top).
-                    @if(ATM_DBG_MS_DIFFUSION) {
-                        if (mu_light > 0.0) {
-                            ms_vol = max(ms_vol, t_far * cloud_diffuse_sun(esc_col.y, esc_col.z, max(mu_light, 0.05)));
-                        }
-                    }
-                    direct += ms_vol * (0.25 / PI);
-                }
-                direct_sum += (*light).color.rgb * t_atm * direct;
-            }
-            // Sunlit ground below this sample (Lambert, albedo): the first directional light's
-            // irradiance through the atmosphere times the mean cloud-shadow visibility of the
-            // ground it sees. After the light loop, not in it: its 16 shadow taps kept their state
-            // live through the multiple-scattering work (register spills, Apple M5).
-            var ground_rad = sky_irr * atmosphere.ground_albedo;
-            if (lights.n_directional_lights > 0u) {
-                let light0 = &lights.directional_lights[0];
-                let l0 = (*light0).direction_to_light;
-                let mu_g = dot(l0, up);
-                let e_sun = (*light0).color.rgb * sample_transmittance_lut(atmosphere.inner_radius, mu_g)
-                    * max(mu_g, 0.0) * ground_sun_visibility(p, l0);
-                ground_rad = atmosphere.ground_albedo * (e_sun / PI + sky_irr);
-            }
-            var ambient = cloud_ambient_term(sky_irr, ground_rad, esc_col.y, esc_col.z);
-            // Validation term toggles (CLOUD_TERMS=s1|sun|amb, see resources.rs).
-            @if(CLOUD_TERM_NO_AMB) { ambient = vec3(0.0); }
-            @if(CLOUD_TERM_NO_SUN) { direct_sum = vec3(0.0); }
-            let scattered = (direct_sum + ambient) * sigma_s;
-
+            @if(ATM_DBG_OUT_STEPS) { dbg_steps.z += 1.0; }
             let step_t = exp(-sigma_t * dt);
-            luminance += transmittance * (scattered - scattered * step_t) / max(sigma_t, 1e-9);
+            // Lit after the march (`lit_samples`): the luminance gains this weight times the
+            // in-scattered radiance per unit sigma_s at t.
+            let lit = vec4(
+                t,
+                transmittance * (1.0 - step_t) / max(sigma_t, 1e-9) * sigma_s,
+                view_od_in_cloud + 0.5 * sigma_t * dt,
+                density,
+            );
+            if (n_lit < CLOUD_LIT_SAMPLES) {
+                lit_samples[n_lit] = lit;
+                n_lit += 1u;
+            } else {
+                // Beyond the list (~1 % of rays): lit like the last kept sample.
+                lit_samples[CLOUD_LIT_SAMPLES - 1u].y += lit.y;
+            }
             let w = transmittance * (1.0 - step_t);
             depth_sum += w * t;
             depth_weight_sum += w;
             transmittance *= step_t;
             view_od_in_cloud += sigma_t * dt;
             t += dt;
+        }
+
+        // Lighting of the recorded samples (sun: light taps, shadow map beyond, multiple
+        // scattering; sky and ground ambient). Outside the march loop: inside it, every step on
+        // which any of a SIMD group's 32 rays was lit ran the whole lighting for the group (about
+        // half the steps for ~1 lit sample per ray), and its registers sized the whole loop.
+        for (var lit_i = 0u; lit_i < n_lit; lit_i++) {
+            let lit = lit_samples[lit_i];
+            let t = lit.x;
+            let tau_view = lit.z;
+            let p = ray_origin + ray_dir * t;
+            let r_p = length(p);
+            let mip = cloud_mip_from_distance(t);
+            let up = p / r_p;
+            let esc_col = cloud_escape_and_column(p);
+
+                var direct_sum = vec3(0.0);
+                for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
+                    let light = &lights.directional_lights[light_i];
+                    let l = (*light).direction_to_light;
+                    let mu_light = dot(l, up);
+                    let t_atm = sample_transmittance_lut(r_p, mu_light)
+                        * f32(!ray_intersects_ground(r_p, mu_light));
+                    // Local light march through the real (fine) density (Nubis/HZD cone march): 6 taps with
+                    // doubling step (~1.3 km) + one long tap, so billows self-shadow. The cloud shadow map
+                    // (coarse density, 4x4 time-sliced, temporally filtered) is only used for the
+                    // occlusion *beyond* the local march; using it at `p` replaced all per-billow detail
+                    // with smooth weather-map blobs once it converged.
+                    var light_od = 0.0;
+                    var tap_t = 0.0;
+                    var tap_dt = LIGHT_TAP_STEP_M;
+                    var n_taps = settings.cloud_light_taps;
+                    var tap_growth = LIGHT_TAP_GROWTH;
+                    var tap_lod = LIGHT_TAP_LOD;
+                    // Validation: a dense uniform march toward the light (256 x 30 m at the sample's
+                    // mip) to test the light taps' quadrature against the reference.
+                    @if(ATM_DBG_LIGHT_BRUTE) {
+                        n_taps = 256u;
+                        tap_dt = 30.0;
+                        tap_growth = 1.0;
+                        tap_lod = 0.0;
+                    }
+                    for (var k = 0u; k < n_taps; k++) {
+                        let pk = p + l * (tap_t + 0.5 * tap_dt);
+                        let dk = get_cloud_medium_density_lod(length(pk), pk, mip + tap_lod * f32(k));
+                        light_od += dk * tap_dt;
+                        tap_t += tap_dt;
+                        tap_dt *= tap_growth;
+                    }
+                    let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * 0.5);
+                    let d_far = get_cloud_medium_density_lod(length(p_far), p_far, mip + 3.0);
+                    light_od += d_far * LIGHT_LONG_TAP_M;
+                    let light_optical_depth = light_od * sigma_t_unit;
+                    let p_beyond = p + l * (tap_t + LIGHT_LONG_TAP_M);
+                    var t_far = sample_cloud_shadow_map(p_beyond, l, false);
+                    @if(ATM_DBG_NO_FAR_SHADOW) { t_far = 1.0; }
+                    let t_local = exp(-light_optical_depth);
+                    @if(ATM_DBG_OUT_SUN_OD) {
+                        if (dbg_sun.x < 0.0) { dbg_sun = vec4(light_optical_depth, cloud_field_diffuse(p), esc_col.x, lit.w); }
+                    }
+                    // ATM_DBG_OUT_SUN_TAU: (sun optical depth, local march + map beyond; the map alone
+                    // at p; the field's diffusion solution; density) at the first in-cloud sample.
+                    @if(ATM_DBG_OUT_SUN_TAU) {
+                        if (dbg_sun.x < 0.0) {
+                            dbg_sun = vec4(light_optical_depth - log(max(t_far, 1e-6)), -log(max(sample_cloud_shadow_map(p, l, false), 1e-6)), cloud_field_diffuse(p), lit.w);
+                        }
+                    }
+                    let t_cloud = t_far * t_local;
+                    let cos_theta = dot(l, ray_dir);
+                    // Nubis Cubed structure (Schneider, Advances 2023, "Direct = Transmittance * Phase +
+                    // Multiple Scattering * Secondary Phase") with physically derived terms. Multiple
+                    // scattering (orders >= 2), isotropic: E_sun * exp(-(1 - g) tau_sun) * F_ms / 4pi.
+                    //  - exp(-(1 - g) tau_sun): diffuse sunlight under similarity scaling (Joseph,
+                    //    Wiscombe & Weinman 1976), tau_sun = local march + shadow-map optical depth.
+                    //  - F_ms = f_ms / (1 - f_ms), f_ms = albedo (1 - P_esc): Hillaire 2020's transfer
+                    //    series with the escape probability on the reduced optical depth (cloud field).
+                    // vs MC (validation/sky/ms_models_vs_mc.py, tau <= 5): median error -29..+25 %.
+                    var direct = t_local * t_far * cloud_phase(cos_theta);
+                    @if(!CLOUD_TERM_S1) {
+                        let tau_sun = light_optical_depth - log(max(t_far, 1e-6));
+                        let albedo = sigma_s_unit / max(sigma_t_unit, 1e-9);
+                        // P_esc of a finite cloud is positive; the escape volume stores it in
+                        // RGBA16F, whose smallest normal (6.1e-5) is the floor kept here, so a thick
+                        // conservative cloud (zero absorption) cannot make 1 - f_ms zero (audit 22).
+                        // Escape probability: the cloud field's (375 m cells; validated for clouds
+                        // larger than that) or, where smaller, a local estimate from the fine density
+                        // along the two directions the march already knows, toward the sun and back
+                        // along the view ray: P_esc ~ mean of exp(-(1 - g) tau) (similarity-reduced,
+                        // as the field's). Small cumuli are much smaller than a field cell, which
+                        // diluted their extinction there: P_esc ~ 1, no multiple scattering, and
+                        // their sunlit sides rendered gray although tau ~ 10-20 across them.
+                        let p_esc_local = 0.5 * (exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun)
+                            + exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_view));
+                        var p_esc = min(esc_col.x, p_esc_local);
+                        @if(ATM_DBG_ESC_ZERO) { p_esc = 0.0; }
+                        @if(ATM_DBG_ESC_FIELD_ONLY) { p_esc = esc_col.x; }
+                        let f_ms = albedo * (1.0 - max(p_esc, 6.1035e-5));
+                        var ms_vol = exp(-(1.0 - CLOUD_MIE_MEAN_COS) * tau_sun) * f_ms / (1.0 - f_ms);
+                        // Thick cloud: the escape series decays as exp(-(1 - g) tau_sun) and leaves
+                        // the shaded side dark (MC: ~0 below a reduced depth of a few), while the
+                        // diffuse light of a conservative medium falls off linearly through it. The
+                        // delta-Eddington diffusion solution of the vertical slab (the field's
+                        // columns to the layer top and bottom), lit by the sunlight that reaches the
+                        // column (the far shadow map), takes over where it is larger
+                        // (ATM_DBG_MS_DIFFUSION).
+                        // The cloud field's 3D diffusion solve (cloud_field.wesl): the diffuse light of
+                        // the whole cloud around p, lit by the first directional light. The escape
+                        // series stays where it is larger (thin cloud, beyond the grid).
+                        var field_on = light_i == 0u;
+                        @if(ATM_DBG_MS_SERIES_ONLY) { field_on = false; }
+                        if (field_on) {
+                            ms_vol = max(ms_vol, cloud_field_diffuse(p));
+                        }
+                        // Experiment: the vertical-slab solution (lights only the layer top).
+                        @if(ATM_DBG_MS_DIFFUSION) {
+                            if (mu_light > 0.0) {
+                                ms_vol = max(ms_vol, t_far * cloud_diffuse_sun(esc_col.y, esc_col.z, max(mu_light, 0.05)));
+                            }
+                        }
+                        direct += ms_vol * (0.25 / PI);
+                    }
+                    direct_sum += (*light).color.rgb * t_atm * direct;
+                }
+                // Sunlit ground below this sample (Lambert, albedo): the first directional light's
+                // irradiance through the atmosphere times the mean cloud-shadow visibility of the
+                // ground it sees. After the light loop, not in it: its 16 shadow taps kept their state
+                // live through the multiple-scattering work (register spills, Apple M5).
+                var ground_rad = sky_irr * atmosphere.ground_albedo;
+                if (lights.n_directional_lights > 0u) {
+                    let light0 = &lights.directional_lights[0];
+                    let l0 = (*light0).direction_to_light;
+                    let mu_g = dot(l0, up);
+                    let e_sun = (*light0).color.rgb * sample_transmittance_lut(atmosphere.inner_radius, mu_g)
+                        * max(mu_g, 0.0) * ground_sun_visibility(p, l0);
+                    ground_rad = atmosphere.ground_albedo * (e_sun / PI + sky_irr);
+                }
+                var ambient = cloud_ambient_term(sky_irr, ground_rad, esc_col.y, esc_col.z);
+                // Validation term toggles (CLOUD_TERMS=s1|sun|amb, see resources.rs).
+                @if(CLOUD_TERM_NO_AMB) { ambient = vec3(0.0); }
+                @if(CLOUD_TERM_NO_SUN) { direct_sum = vec3(0.0); }
+            luminance += lit.y * (direct_sum + ambient);
         }
 
         if (transmittance < CLOUD_MIN_TRANSMITTANCE) {
@@ -1180,6 +1271,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         }
     }
     }
+    @if(ATM_DBG_OUT_STEPS) { result = dbg_steps; }
     textureStore(out_clouds, id.xy, result);
     textureStore(out_clouds_depth, id.xy, vec4(weighted_depth, 0.0, 0.0, 0.0));
 }
