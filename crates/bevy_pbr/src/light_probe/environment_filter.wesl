@@ -170,11 +170,13 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     textureStore(output_texture, coords, face, vec4f(max(radiance, vec3f(0.0)), 1.0));
 }
 
-/// Filtered-importance-sampling LOD (Krivánek–Colbert / glTF-IBL-Sampler).
-/// Matches offline Lambertian prefilters so HDR peaks don't firefly into a bright wrap.
+/// Filtered-importance-sampling LOD (Krivánek–Colbert, Karis footprint).
+/// `0.5 * log2(sample_solid_angle / texel_solid_angle)`, the same convention as
+/// shade-time FIS and the offline prefilter, so HDR peaks don't firefly.
 fn irradiance_sample_lod(pdf: f32, src_width: f32, sample_count: f32, max_lod: f32) -> f32 {
-    let safe_pdf = max(pdf, 1e-6);
-    let lod = 0.5 * log2(6.0 * src_width * src_width / (sample_count * safe_pdf));
+    let sample_solid_angle = 1.0 / (sample_count * max(pdf, 1e-6));
+    let texel_solid_angle = 4.0 * PI / (6.0 * src_width * src_width);
+    let lod = 0.5 * log2(sample_solid_angle / texel_solid_angle);
     return clamp(lod, 0.0, max_lod);
 }
 
