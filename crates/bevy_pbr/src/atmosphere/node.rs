@@ -580,6 +580,29 @@ pub fn atmosphere_luts(
         pass.dispatch_workgroups(n, n, slabs);
     }
 
+    // Ground column map (`cloud_shadow_map.wesl` ground_column), for the haze's ground skylight.
+    if let (Some(cloud_layer_uniforms_offset), Some(column_bg), Some(pipeline)) = (
+        cloud_layer_uniforms_offset.as_ref(),
+        bind_groups.cloud_column_map.as_ref(),
+        pipeline_cache.get_compute_pipeline(pipelines.cloud_column_map),
+    ) {
+        let mut pass = labelled_compute_pass!("cloud_column_map");
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(
+            0,
+            column_bg,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
+            ],
+        );
+        let n = super::resources::CLOUD_COLUMN_MAP_SIZE.div_ceil(8);
+        pass.dispatch_workgroups(n, n, 1);
+    }
+
     // IMPORTANT:
     // We run the cloud shadow *filter* in a separate compute pass so the backend can insert the
     // required resource state transitions (storage-write -> sampled-read) between tracing and filtering.

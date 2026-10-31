@@ -31,13 +31,15 @@ import package::atmosphere::{
         transmittance_lut_r_mu_to_uv, ray_intersects_ground,
         distance_to_top_atmosphere_boundary, distance_to_bottom_atmosphere_boundary
     },
-    shadows::fetch_directional_shadow,
+    shadows::{fetch_directional_shadow, directional_shadow_ray_t_max},
 };
 
 @if(CLOUDS_ENABLED)
 import package::atmosphere::{
     bindings::stbn_texture,
     clouds::{
+        cloud_column_map_origin,
+        CLOUD_COLUMN_MAP_EXTENT_M,
         get_cloud_coverage,
         cloud_field_uvw,
         get_cloud_medium_density,
@@ -49,6 +51,9 @@ import package::atmosphere::{
         cloud_shadow_xy_to_uv, cloud_shadow_lod, pixel_angle, cloud_shadow_surface_footprint,
     },
 };
+
+@if(CLOUD_COLUMN_MAP)
+@group(0) @binding(63) var cloud_column_map: texture_2d<f32>;
 
 // CONSTANTS
 /// 1 / π
@@ -590,7 +595,9 @@ fn cloud_shadow_map_lookup(world_pos: vec3<f32>, xy: vec2<f32>, d_sample: f32, u
 }
 
 /// evaluates L_scat, equation 3 in the paper, which gives the total single-order scattering towards the view at a single point
-fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, world_pos: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {
+/// `mesh_shadow`: whether `world_pos` may lie inside the directional shadow cascades
+/// (`directional_shadow_ray_t_max`); otherwise the shadow map lookup is skipped.
+fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, world_pos: vec3<f32>, pixel_coords: vec2<f32>, mesh_shadow: bool) -> vec3<f32> {
     let local_r = length(world_pos);
     let local_up = normalize(world_pos);
     var inscattering = vec3(0.0);
@@ -664,7 +671,7 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
         // Pipelines without shadow map bindings (e.g. the clouds environment probe) set
         // ATMOSPHERE_NO_SHADOW_MAPS to compile the shadow map lookup out.
         @if(!ATMOSPHERE_NO_SHADOW_MAPS && !ATM_DBG_NOSHADOW) {
-            if (settings.shadows_enabled != 0u) {
+            if (mesh_shadow && settings.shadows_enabled != 0u) {
                 shadow_map_factor = fetch_directional_shadow(light_i, vec4(world_pos, 1.0), vec3(0.0));
             }
         }
@@ -1036,7 +1043,7 @@ fn raymarch_atmosphere(
             optical_depth += sample_optical_depth;
             let sample_transmittance = exp(-sample_optical_depth);
 
-            let inscattering = sample_local_inscattering(scattering, ray_dir, p, pixel_coords);
+            let inscattering = sample_local_inscattering(scattering, ray_dir, p, pixel_coords, true);
             let s_int = (inscattering - inscattering * sample_transmittance) / max(extinction, MIN_EXTINCTION);
             result.inscattering += result.transmittance * s_int;
             result.transmittance *= sample_transmittance;
@@ -1060,6 +1067,10 @@ fn raymarch_atmosphere(
     var jitter_frame = view.frame_count % 64u;
     @if(SKY_VIEW_LUT_PASS) { jitter_frame = 0u; }
     let jitter0 = interleaved_gradient_noise(pixel_coords, jitter_frame);
+    var mesh_shadow_t_max = -1.0;
+    @if(!ATMOSPHERE_NO_SHADOW_MAPS) {
+        mesh_shadow_t_max = directional_shadow_ray_t_max(pos, ray_dir);
+    }
     for (var s = 0u; s < n_steps; s += 1u) {
         let jitter = fract(jitter0 + f32(s) * 0.618033988749895); // [0, 1]
         let u0 = f32(s) / f32(n_steps);
@@ -1080,7 +1091,7 @@ fn raymarch_atmosphere(
         optical_depth += sample_optical_depth;
         let sample_transmittance = exp(-sample_optical_depth);
 
-        let inscattering = sample_local_inscattering(scattering, ray_dir, sample_pos, pixel_coords);
+        let inscattering = sample_local_inscattering(scattering, ray_dir, sample_pos, pixel_coords, t_i < mesh_shadow_t_max);
         let s_int = (inscattering - inscattering * sample_transmittance) / max(extinction, MIN_EXTINCTION);
         result.inscattering += result.transmittance * s_int;
         result.transmittance *= sample_transmittance;
@@ -1186,6 +1197,15 @@ fn ground_sky_irradiance_clouds(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f
 /// field's edge (a dark/light shadow junction along a square).
 @if(CLOUDS_ENABLED)
 fn cloud_column_march_optical_depth(p: vec3<f32>) -> f32 {
+    // The column map holds this march per ground texel (`cloud_shadow_map.wesl` ground_column).
+    @if(CLOUD_COLUMN_MAP) {
+        let camera_xz = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xz;
+        let uv = (p.xz - cloud_column_map_origin(camera_xz)) / (2.0 * CLOUD_COLUMN_MAP_EXTENT_M);
+        if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
+            // -log(1e-6), the march's floor below.
+            return min(textureSampleLevel(cloud_column_map, atmosphere_lut_sampler, uv, 0.0).r, 13.8155);
+        }
+    }
     return -log(max(cloud_far_transmittance(p, normalize(p), true), 1e-6));
 }
 
@@ -1230,7 +1250,7 @@ fn ground_sky_irradiance(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {
             let scattering = sample_density_lut(rq, SCATTERING_DENSITY);
             let extinction = sample_density_lut(rq, ABSORPTION_DENSITY) + scattering;
             let st_i = exp(-extinction * (tb - ta));
-            let ins = sample_local_inscattering(scattering, d, q, pixel_coords);
+            let ins = sample_local_inscattering(scattering, d, q, pixel_coords, true);
             l += tr * (ins - ins * st_i) / max(extinction, MIN_EXTINCTION);
             tr *= st_i;
         }

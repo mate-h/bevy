@@ -1028,6 +1028,19 @@ const CLOUD_FAR_GRID_RES_XY: i32 = 128;
 const CLOUD_FAR_GRID_RES_Z: i32 = 8;
 const CLOUD_FAR_GRID_CELL_M: f32 = 1500.0;
 
+/// Ground column map (`cloud_shadow_map.wesl` ground_column): the vertical cloud optical depth
+/// above the ground, CLOUD_COLUMN_MAP_SIZE^2 texels over +-CLOUD_COLUMN_MAP_EXTENT_M in
+/// atmosphere-space x and z, centred on the camera snapped to whole texels (so that a moving
+/// camera does not resample the clouds). Must match `resources.rs`.
+const CLOUD_COLUMN_MAP_SIZE: u32 = 256u;
+const CLOUD_COLUMN_MAP_EXTENT_M: f32 = 40000.0;
+
+/// Atmosphere-space x, z of the column map's corner, for the camera at `camera_xz`.
+fn cloud_column_map_origin(camera_xz: vec2<f32>) -> vec2<f32> {
+    let texel = 2.0 * CLOUD_COLUMN_MAP_EXTENT_M / f32(CLOUD_COLUMN_MAP_SIZE);
+    return floor(camera_xz / texel) * texel - CLOUD_COLUMN_MAP_EXTENT_M;
+}
+
 /// World cell of the far grid at a cloud-frame position.
 fn cloud_far_grid_cell(xz: vec2<f32>) -> vec2<i32> {
     return vec2<i32>(floor(xz / CLOUD_FAR_GRID_CELL_M));

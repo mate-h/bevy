@@ -1,6 +1,7 @@
 import package::{
     atmosphere::{
         bindings::{settings, view},
+        shadows::directional_shadow_ray_t_max,
         functions::{
             sample_density_lut, sample_local_inscattering, uv_to_ray_direction, get_view_position,
             MIDPOINT_RATIO, MIN_EXTINCTION, ABSORPTION_DENSITY, SCATTERING_DENSITY,
@@ -34,6 +35,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     var total_inscattering = vec3(0.0);
     var throughput = vec3(1.0);
 
+    let mesh_shadow_t_max = directional_shadow_ray_t_max(world_pos, ray_dir);
     let num_z = f32(settings.aerial_view_lut_size.z);
     let num_s = f32(settings.aerial_view_lut_samples);
     for (var slice_i: u32 = 0; slice_i < settings.aerial_view_lut_size.z; slice_i++) {
@@ -58,7 +60,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             let sample_transmittance = exp(-sample_optical_depth);
 
             // evaluate one segment of the integral
-            var inscattering = sample_local_inscattering(scattering, ray_dir, sample_pos, pixel_coords);
+            var inscattering = sample_local_inscattering(scattering, ray_dir, sample_pos, pixel_coords, t_i < mesh_shadow_t_max);
 
             // Analytical integration of the single scattering term in the radiance transfer equation
             let s_int = (inscattering - inscattering * sample_transmittance) / max(extinction, MIN_EXTINCTION);

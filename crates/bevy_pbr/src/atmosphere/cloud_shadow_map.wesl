@@ -19,6 +19,9 @@ import package::atmosphere::clouds::{
     cloud_layer,
     cirrus_slant_optical_depth,
     CIRRUS_SLICES,
+    cloud_column_map_origin,
+    CLOUD_COLUMN_MAP_SIZE,
+    CLOUD_COLUMN_MAP_EXTENT_M,
 };
 
 @group(0) @binding(25) var stbn_texture: texture_2d_array<f32>;
@@ -291,4 +294,32 @@ fn main(@builtin(global_invocation_id) thread_id: vec3<u32>) {
     textureStore(out_cloud_shadow_map, vec2<i32>(gid.xy), vec4(front_depth * 0.001, out_mean_ext, out_max_od, thin_layer_shadow_od(thin_shadow_point(ray_origin, trace_dir, half_depth), trace_dir, uv, xy, extent, size)));
 }
 
-
+/// The column map (`clouds.wesl`): per ground texel, the vertical cloud optical depth that
+/// `cloud_column_march_optical_depth` marched per direction and ground pixel (2 taps at mip 3,
+/// as `cloud_far_transmittance`). The cloud-occluded ground skylight took 6 of those marches per
+/// ground pixel, 2.3 ms of the haze pass looking down from 1 km.
+@compute @workgroup_size(8, 8, 1)
+fn ground_column(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (any(gid.xy >= vec2(CLOUD_COLUMN_MAP_SIZE))) {
+        return;
+    }
+    let camera = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xyz;
+    let texel = 2.0 * CLOUD_COLUMN_MAP_EXTENT_M / f32(CLOUD_COLUMN_MAP_SIZE);
+    let xz = cloud_column_map_origin(camera.xz) + (vec2<f32>(gid.xy) + 0.5) * texel;
+    let up = normalize(vec3(xz.x, atmosphere.inner_radius, xz.y));
+    let p = up * (atmosphere.inner_radius + EPSILON_M);
+    var od = 0.0;
+    let seg = cloud_layer_segment(p, up);
+    if (seg.z > 0.5) {
+        let t0 = max(seg.x, 0.0);
+        let t1 = min(seg.y, t0 + 80000.0);
+        let dt = 0.5 * (t1 - t0);
+        let sigma_t = get_cloud_scattering_coeff() + get_cloud_absorption_coeff();
+        for (var i = 0u; i < 2u; i++) {
+            let q = p + up * (t0 + (f32(i) + 0.5) * dt);
+            od += get_cloud_medium_density_lod(length(q), q, 3.0) * sigma_t * dt;
+        }
+    }
+    od *= settings.cloud_shadow_map_strength;
+    textureStore(out_cloud_shadow_map, vec2<i32>(gid.xy), vec4(od, 0.0, 0.0, 0.0));
+}
