@@ -114,6 +114,11 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @if(ENVIRONMENT_MAP)
 @group(1) @binding(2) var environment_map_sampler: sampler;
 
+// Sources extracted from each environment map, by binding index. Zero for maps
+// without `EnvironmentMapSourceOutput::Shading`.
+@if(ENVIRONMENT_MAP && MULTIPLE_LIGHT_PROBES_IN_ARRAY)
+@group(1) @binding(8) var<storage> environment_map_sources: array<types::EnvironmentMapSources, 8u>;
+
 @if(IRRADIANCE_VOLUME && MULTIPLE_LIGHT_PROBES_IN_ARRAY)
 @group(1) @binding(3) var irradiance_volumes: binding_array<texture_3d<f32>, 8u>;
 @if(IRRADIANCE_VOLUME && !MULTIPLE_LIGHT_PROBES_IN_ARRAY)

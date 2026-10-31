@@ -1,9 +1,10 @@
 import package::render::{
+    mesh_view_types,
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
     mesh_view_bindings as view_bindings,
     shadow_sampling::{
         SPOT_SHADOW_TEXEL_SIZE, sample_shadow_cubemap, sample_shadow_cubemap_pcss,
-        sample_shadow_map, sample_shadow_map_pcss,
+        sample_shadow_map, sample_shadow_map_pcss, sample_shadow_map_pcss_angular,
     }
 };
 
@@ -207,6 +208,25 @@ fn sample_directional_cascade(
             frag_coord_xy,
             texel_size,
             (*light).soft_shadow_size,
+        );
+    }
+
+    // Soft shadows from the light's angular size. The cascade is orthographic,
+    // so its depth row scales NDC depth to world distance along the light.
+    if (((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_ANGULAR_SOFT_SHADOWS_BIT) != 0u) {
+        let depth_row = vec3(
+            (*cascade).clip_from_world[0].z,
+            (*cascade).clip_from_world[1].z,
+            (*cascade).clip_from_world[2].z,
+        );
+        return sample_shadow_map_pcss_angular(
+            light_local.xy,
+            light_local.z,
+            array_index,
+            frag_coord_xy,
+            texel_size,
+            (*light).sin_angular_radius / max((*light).cos_angular_radius, 1e-4),
+            1.0 / max(length(depth_row), 1e-12),
         );
     }
 

@@ -310,6 +310,34 @@ fn sample_shadow_map_pcss(
         light_local, depth, array_index, frag_coord_xy, texel_size, blur_size, false);
 }
 
+/// PCSS for a distant disk light of angular radius `atan(tan_r)`: the penumbra
+/// is the blocker-to-receiver distance times `2 tan r`, in world units.
+/// `depth_range` converts shadow map depth to world distance along the light.
+fn sample_shadow_map_pcss_angular(
+    light_local: vec2<f32>,
+    depth: f32,
+    array_index: i32,
+    frag_coord_xy: vec2<f32>,
+    texel_size: f32,
+    tan_r: f32,
+    depth_range: f32,
+) -> f32 {
+    // Search as far as a blocker at the near plane could spread the penumbra,
+    // capped at 32 texels.
+    let max_penumbra = min(depth * depth_range * 2.0 * tan_r, 32.0 * texel_size);
+    let z_blocker = search_for_blockers_in_shadow_map(
+        light_local, depth, array_index, texel_size, max(max_penumbra, texel_size));
+    // Reversed Z: blockers are nearer the light, so their depth is larger.
+    let penumbra = max(z_blocker - depth, 0.0) * depth_range * 2.0 * tan_r;
+    let blur_size = max(penumbra / texel_size, 0.5);
+    @if(SHADOW_FILTER_METHOD_TEMPORAL)
+    return sample_shadow_map_jimenez_fourteen(
+        light_local, depth, array_index, frag_coord_xy, texel_size, blur_size, true);
+    @else   // SHADOW_FILTER_METHOD_TEMPORAL
+    return sample_shadow_map_jimenez_fourteen(
+        light_local, depth, array_index, frag_coord_xy, texel_size, blur_size, false);
+}
+
 // NOTE: Due to the non-uniform control flow in `shadows::fetch_point_shadow`,
 // we must use the Level variant of textureSampleCompare to avoid undefined
 // behavior due to some of the fragments in a quad (2x2 fragments) being

@@ -50,7 +50,14 @@
 //! `extract_sources.py`) spawns the extracted lights for the raster pass, with
 //! `IBL_STRESS` set to the residual map and `IBL_REFERENCE_STRESS` to the original
 //! map the pathtracer sees. `IBL_FILTER=ms IBL_EXTRACT=1` extracts the sources on
-//! the GPU with `EnvironmentMapSourceExtraction` instead.
+//! the GPU with `EnvironmentMapSourceExtraction` instead; `IBL_EXTRACT=shading`
+//! shades them inside the environment map lookup, and `IBL_LOCAL_PROBE=1` moves the
+//! generated map and its extraction onto a local light probe around the sphere.
+//!
+//! Materials: `IBL_METALLIC` (default 1; 0 measures diffuse) and
+//! `IBL_CLEARCOAT=<roughness>`. `IBL_IRRADIANCE=sampled` uses the generator's old
+//! Monte Carlo irradiance instead of spherical harmonics. `IBL_FILTER=stretch` is
+//! the experimental view-dependent split sum (`IBL_STRETCH_SCALE`, default 1).
 //!
 //! Reflection probes don't work on WebGL 2 or WebGPU.
 //! The pathtracer mode requires a GPU with ray-query support (`bevy_solari`).
@@ -71,7 +78,8 @@ use bevy::{
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     image::TextureFormatPixelInfo,
     light::{
-        EnvironmentMapSourceExtraction, EnvironmentMapSourceLight, ParallaxCorrection, Skybox,
+        EnvironmentMapSourceExtraction, EnvironmentMapSourceLight, EnvironmentMapSourceOutput,
+        ParallaxCorrection, Skybox,
     },
     mesh::Indices,
     pbr::generate::generate_environment_map_light,
@@ -161,6 +169,58 @@ struct Cubemaps {
 
     // The specular cubemap mip chain that reflects both the world and the cubes.
     specular_reflection_probe: Handle<Image>,
+}
+
+/// `IBL_IRRADIANCE=sampled` makes the runtime generator's irradiance use the old
+/// 1024-sample estimator instead of spherical harmonics.
+fn configure_irradiance_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
+    if *configured || std::env::var("IBL_IRRADIANCE").ok().as_deref() != Some("sampled") {
+        return;
+    }
+    for (_, shader) in shaders.iter_mut() {
+        if shader.path.ends_with("light_probe/environment_filter.wesl")
+            && let bevy::shader::Source::Wesl(source) = &mut shader.source
+            && source.contains("const IRRADIANCE_SH: bool = true;")
+        {
+            info!("Generated irradiance uses Monte Carlo samples");
+            *configured = true;
+            *source = source
+                .replace(
+                    "const IRRADIANCE_SH: bool = true;",
+                    "const IRRADIANCE_SH: bool = false;",
+                )
+                .into();
+        }
+    }
+}
+
+/// `IBL_FILTER=stretch` uses the experimental view-dependent split sum, with
+/// `IBL_STRETCH_SCALE` (default 1) as the lobe width per unit of roughness.
+fn configure_stretch_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
+    if *configured || std::env::var("IBL_FILTER").ok().as_deref() != Some("stretch") {
+        return;
+    }
+    let scale = std::env::var("IBL_STRETCH_SCALE").unwrap_or_else(|_| "1.0".into());
+    let scale: f32 = scale.parse().expect("IBL_STRETCH_SCALE must be a number");
+    for (_, shader) in shaders.iter_mut() {
+        if shader.path.ends_with("light_probe/environment_map.wesl")
+            && let bevy::shader::Source::Wesl(source) = &mut shader.source
+            && source.contains("const STRETCHED_SPLIT_SUM: bool = false;")
+        {
+            info!("Enabled stretched split sum (scale {scale})");
+            *configured = true;
+            *source = source
+                .replace(
+                    "const STRETCHED_SPLIT_SUM: bool = false;",
+                    "const STRETCHED_SPLIT_SUM: bool = true;",
+                )
+                .replace(
+                    "const STRETCH_LOBE_SCALE: f32 = 1.0;",
+                    &format!("const STRETCH_LOBE_SCALE: f32 = {scale:?};"),
+                )
+                .into();
+        }
+    }
 }
 
 /// `IBL_SUN_METHOD=rep` shades disk-shaped directional lights with the representative
@@ -254,7 +314,16 @@ fn main() {
         .init_resource::<MeasureReadbacks>()
         .init_resource::<PathtracerErrorMeasure>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (configure_fis_shader, configure_sun_shader))
+        .add_systems(
+            Update,
+            (
+                configure_fis_shader,
+                configure_sun_shader,
+                configure_stretch_shader,
+                configure_irradiance_shader,
+                profile_generated_environment_map,
+            ),
+        )
         .add_systems(PreUpdate, add_environment_map_to_camera)
         .add_systems(
             Update,
@@ -298,7 +367,7 @@ fn setup(
     app_status: Res<AppStatus>,
     _cubemaps: Res<Cubemaps>,
 ) {
-    spawn_camera(&mut commands);
+    spawn_camera(&mut commands, &mut images);
     spawn_measure_camera(&mut commands, &mut images);
     spawn_error_overlay(&mut commands, &mut images);
     spawn_sphere(&mut commands, &mut meshes, &mut materials, &app_status);
@@ -335,15 +404,21 @@ fn spawn_scene(commands: &mut Commands, asset_server: &AssetServer) {
 }
 
 // Spawns the camera.
-fn spawn_camera(commands: &mut Commands) {
+fn spawn_camera(commands: &mut Commands, images: &mut Assets<Image>) {
     // `IBL_VIEW=back` looks away from the disc, the view where the narrow-source skirt shows up.
     let translation = if std::env::var("IBL_VIEW").ok().as_deref() == Some("back") {
         Vec3::new(2.737, 0.325, 3.916)
     } else {
         Vec3::new(-3.883, 0.325, 2.781)
     };
+    let profiling = std::env::var_os("IBL_PROFILE").is_some();
     commands.spawn((
         Camera3d::default(),
+        // Profiling uses only the offscreen camera below.
+        Camera {
+            is_active: !profiling,
+            ..default()
+        },
         Hdr,
         Exposure { ev100: 11.0 },
         Tonemapping::AcesFitted,
@@ -352,6 +427,26 @@ fn spawn_camera(commands: &mut Commands) {
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         Msaa::Off,
     ));
+    // Profiling renders offscreen at a fixed 640²: an occluded window stops
+    // presenting, and its view would then never render.
+    if profiling {
+        let image = images.add(Image::new_target_texture(
+            640,
+            640,
+            TextureFormat::Rgba16Float,
+            None,
+        ));
+        commands.spawn((
+            Camera3d::default(),
+            Hdr,
+            Exposure { ev100: 11.0 },
+            Tonemapping::AcesFitted,
+            Transform::from_translation(translation).looking_at(Vec3::ZERO, Vec3::Y),
+            CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
+            Msaa::Off,
+            RenderTarget::Image(image.into()),
+        ));
+    }
 }
 
 /// Hidden HDR camera. Press M renders the environment map, then the pathtracer, and
@@ -419,12 +514,28 @@ fn spawn_sphere(
     commands.spawn((
         Mesh3d(sphere_mesh.clone()),
         RaytracingMesh3d(sphere_mesh),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Srgba::hex("#ffffff").unwrap().into(),
-            metallic: 1.0,
-            perceptual_roughness: app_status.sphere_roughness,
-            ..StandardMaterial::default()
-        })),
+        MeshMaterial3d(
+            materials.add(StandardMaterial {
+                base_color: Srgba::hex("#ffffff").unwrap().into(),
+                // `IBL_METALLIC=0` gives a white dielectric, to measure diffuse.
+                metallic: std::env::var("IBL_METALLIC")
+                    .ok()
+                    .map(|value| value.parse().expect("IBL_METALLIC must be a number"))
+                    .unwrap_or(1.0),
+                perceptual_roughness: app_status.sphere_roughness,
+                // `IBL_CLEARCOAT=<roughness>` adds a full-strength clearcoat.
+                clearcoat: if std::env::var_os("IBL_CLEARCOAT").is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
+                clearcoat_perceptual_roughness: std::env::var("IBL_CLEARCOAT")
+                    .ok()
+                    .map(|value| value.parse().expect("IBL_CLEARCOAT must be a roughness"))
+                    .unwrap_or(0.5),
+                ..StandardMaterial::default()
+            }),
+        ),
         SphereMaterial,
     ));
 }
@@ -529,6 +640,45 @@ fn add_environment_map_to_camera(
                 brightness: env_map_intensity(),
                 ..default()
             });
+    }
+}
+
+/// With `IBL_PROFILE=1 IBL_FILTER=ms`, light the window camera with the runtime
+/// generator (and `IBL_EXTRACT`, as in measurement) so profiling covers its passes.
+fn profile_generated_environment_map(
+    mut commands: Commands,
+    cubemaps: Res<Cubemaps>,
+    cameras: Query<Entity, (With<Camera3d>, Without<MeasureCamera>)>,
+    mut done: Local<bool>,
+) {
+    if *done
+        || std::env::var_os("IBL_PROFILE").is_none()
+        || !ibl_filter_is_manson_sloan()
+        || cubemaps.specular_mip0 == Handle::default()
+    {
+        return;
+    }
+    for entity in &cameras {
+        let mut camera = commands.entity(entity);
+        camera
+            .remove::<EnvironmentMapLight>()
+            .insert(GeneratedEnvironmentMapLight {
+                environment_map: cubemaps.specular_mip0.clone(),
+                intensity: env_map_intensity(),
+                ..default()
+            });
+        if let Some(extract) = std::env::var_os("IBL_EXTRACT") {
+            camera.insert(EnvironmentMapSourceExtraction {
+                output: if extract == "shading" {
+                    EnvironmentMapSourceOutput::Shading
+                } else {
+                    EnvironmentMapSourceOutput::DirectionalLights
+                },
+                ..default()
+            });
+        }
+        info!("Profiling the generated environment map");
+        *done = true;
     }
 }
 
@@ -1527,14 +1677,37 @@ fn start_pathtracer_error_measure(
                     ..default()
                 },
             ));
-        // `IBL_EXTRACT=1` moves bright sources into directional lights on the GPU.
-        if std::env::var_os("IBL_EXTRACT").is_some() {
-            commands
-                .entity(entity)
-                .insert(EnvironmentMapSourceExtraction {
-                    smoothing: 0.0,
-                    ..default()
-                });
+        // `IBL_EXTRACT=1` moves bright sources into directional lights on the GPU;
+        // `IBL_EXTRACT=shading` shades them inside the environment map lookup.
+        if let Some(extract) = std::env::var_os("IBL_EXTRACT") {
+            let extraction = EnvironmentMapSourceExtraction {
+                smoothing: 0.0,
+                output: if extract == "shading" {
+                    EnvironmentMapSourceOutput::Shading
+                } else {
+                    EnvironmentMapSourceOutput::DirectionalLights
+                },
+                ..default()
+            };
+            // `IBL_LOCAL_PROBE=1` lights the sphere from a local light probe instead.
+            if std::env::var_os("IBL_LOCAL_PROBE").is_some() {
+                commands
+                    .entity(entity)
+                    .remove::<(GeneratedEnvironmentMapLight, EnvironmentMapLight)>();
+                commands.spawn((
+                    LightProbe::default(),
+                    GeneratedEnvironmentMapLight {
+                        environment_map: cubemaps.specular_mip0.clone(),
+                        intensity: env_map_intensity(),
+                        ..default()
+                    },
+                    extraction,
+                    Transform::from_scale(Vec3::splat(4.0)),
+                    ParallaxCorrection::None,
+                ));
+            } else {
+                commands.entity(entity).insert(extraction);
+            }
         }
     } else {
         commands.entity(entity).remove::<Pathtracer>().insert((
@@ -1621,6 +1794,14 @@ fn finish_measure(
     } else {
         AppExit::error()
     });
+    // Teardown occasionally hangs after the window closes. Every result is already
+    // written, so automated runs exit regardless.
+    if std::env::var_os("IBL_MEASURE").is_some() {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(if success { 0 } else { 1 });
+        });
+    }
 }
 
 fn sphere_error_report(

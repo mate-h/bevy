@@ -38,7 +38,8 @@ mod probe;
 pub use probe::{
     automatically_add_parallax_correction_components, AtmosphereEnvironmentMapLight,
     EnvironmentMapLight, EnvironmentMapSourceExtraction, EnvironmentMapSourceLight,
-    GeneratedEnvironmentMapLight, IrradianceVolume, LightProbe, ParallaxCorrection, Skybox,
+    EnvironmentMapSourceOutput, GeneratedEnvironmentMapLight, IrradianceVolume, LightProbe,
+    ParallaxCorrection, Skybox,
 };
 pub mod atmosphere;
 pub use atmosphere::Atmosphere;

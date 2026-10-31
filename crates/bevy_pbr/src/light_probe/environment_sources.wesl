@@ -50,6 +50,8 @@ struct Cell {
     solid_angle: f32,
     kept: u32,
     _pad: u32,
+    /// The four neighboring cells, across face seams.
+    neighbors: vec4<u32>,
     /// Σ min(Y, t_k) Ω for every threshold candidate.
     clamped: array<f32, CANDIDATES>,
 }
@@ -127,152 +129,249 @@ fn cell_span() -> u32 {
     return params.base_size / params.grid;
 }
 
+/// Threads per cell in the per-cell passes: one workgroup per cell, the cell's
+/// texels spread over its threads, then reduced in workgroup memory.
+const CELL_THREADS: u32 = 64u;
+
+var<workgroup> stats_partial: array<vec3<f32>, CELL_THREADS>;
+
 @compute
 @workgroup_size(64, 1, 1)
-fn cell_stats(@builtin(global_invocation_id) id: vec3<u32>) {
-    let index = id.x;
-    if index >= cell_count() {
-        return;
-    }
+fn cell_stats(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(local_invocation_index) thread: u32,
+) {
+    let index = workgroup.x;
     let coords = cell_coords(index);
     let span = cell_span();
-    var luminance_sum = 0.0;
-    var solid_angle_sum = 0.0;
-    var max_luminance = 0.0;
-    for (var y = 0u; y < span; y++) {
-        for (var x = 0u; x < span; x++) {
-            let texel = coords.xy * span + vec2(x, y);
-            let L = textureLoad(source_cubemap, texel, coords.z, 0).rgb;
-            let omega = texel_solid_angle(texel, params.base_size);
-            let Y = luminance(max(L, vec3(0.0)));
-            luminance_sum += Y * omega;
-            solid_angle_sum += omega;
-            max_luminance = max(max_luminance, Y);
-        }
+    // Σ Y Ω, Σ Ω and max Y.
+    var partial = vec3(0.0);
+    for (var t = thread; t < span * span; t += CELL_THREADS) {
+        let texel = coords.xy * span + vec2(t % span, t / span);
+        let L = textureLoad(source_cubemap, texel, coords.z, 0).rgb;
+        let omega = texel_solid_angle(texel, params.base_size);
+        let Y = luminance(max(L, vec3(0.0)));
+        partial = vec3(partial.x + Y * omega, partial.y + omega, max(partial.z, Y));
     }
-    cells[index].luminance = luminance_sum;
-    cells[index].solid_angle = solid_angle_sum;
-    cells[index].max_luminance = max_luminance;
-}
-
-var<workgroup> reduce_a: array<f32, SELECT_THREADS>;
-var<workgroup> reduce_b: array<f32, SELECT_THREADS>;
-
-@compute
-@workgroup_size(256, 1, 1)
-fn global_stats(@builtin(local_invocation_index) thread: u32) {
-    var max_luminance = 0.0;
-    var luminance_sum = 0.0;
-    for (var index = thread; index < cell_count(); index += SELECT_THREADS) {
-        max_luminance = max(max_luminance, cells[index].max_luminance);
-        luminance_sum += cells[index].luminance;
-    }
-    reduce_a[thread] = max_luminance;
-    reduce_b[thread] = luminance_sum;
+    stats_partial[thread] = partial;
     workgroupBarrier();
-    for (var stride = SELECT_THREADS / 2u; stride > 0u; stride /= 2u) {
+    for (var stride = CELL_THREADS / 2u; stride > 0u; stride /= 2u) {
         if thread < stride {
-            reduce_a[thread] = max(reduce_a[thread], reduce_a[thread + stride]);
-            reduce_b[thread] += reduce_b[thread + stride];
+            let other = stats_partial[thread + stride];
+            let mine = stats_partial[thread];
+            stats_partial[thread] = vec3(mine.x + other.x, mine.y + other.y, max(mine.z, other.z));
         }
         workgroupBarrier();
     }
     if thread == 0u {
-        globals.max_luminance = reduce_a[0];
-        globals.mean_luminance = reduce_b[0] / (4.0 * PI);
+        cells[index].luminance = stats_partial[0].x;
+        cells[index].solid_angle = stats_partial[0].y;
+        cells[index].max_luminance = stats_partial[0].z;
+        cells[index].neighbors = vec4(
+            cell_neighbor(index, vec2(1, 0)),
+            cell_neighbor(index, vec2(-1, 0)),
+            cell_neighbor(index, vec2(0, 1)),
+            cell_neighbor(index, vec2(0, -1)),
+        );
     }
 }
 
-fn candidate_threshold(k: u32) -> f32 {
-    return globals.max_luminance * exp2(-0.5 * f32(k));
+var<workgroup> reduce_a: array<f32, SELECT_THREADS>;
+var<workgroup> reduce_b: array<f32, SELECT_THREADS>;
+var<workgroup> peak_luminance: f32;
+
+/// The largest luminance over all cells, the same in every invocation.
+fn workgroup_peak_luminance(thread: u32, threads: u32) -> f32 {
+    var peak = 0.0;
+    for (var index = thread; index < cell_count(); index += threads) {
+        peak = max(peak, cells[index].max_luminance);
+    }
+    reduce_a[thread] = peak;
+    workgroupBarrier();
+    for (var stride = threads / 2u; stride > 0u; stride /= 2u) {
+        if thread < stride {
+            reduce_a[thread] = max(reduce_a[thread], reduce_a[thread + stride]);
+        }
+        workgroupBarrier();
+    }
+    if thread == 0u {
+        peak_luminance = reduce_a[0];
+    }
+    return workgroupUniformLoad(&peak_luminance);
 }
 
+fn candidate_threshold(peak: f32, k: u32) -> f32 {
+    return peak * exp2(-0.5 * f32(k));
+}
+
+var<workgroup> texel_bin: array<u32, CELL_THREADS>;
+var<workgroup> texel_luminance: array<f32, CELL_THREADS>;
+var<workgroup> texel_solid_angles: array<f32, CELL_THREADS>;
+var<workgroup> bin_luminance: array<f32, CANDIDATES>;
+var<workgroup> bin_solid_angle: array<f32, CANDIDATES>;
+
+/// Σ min(Y, t_k) Ω of each cell, for every threshold candidate, from a histogram:
+/// a texel in bin `j` (`t_{j+1} < Y ≤ t_j`) contributes `Y Ω` to the candidates
+/// `k ≤ j` and `t_k Ω` to the rest, so
+/// `Σ min(Y, t_k) Ω = Σ_{j ≥ k} (Σ Y Ω)_j + t_k Σ_{j < k} (Σ Ω)_j` exactly.
 @compute
 @workgroup_size(64, 1, 1)
-fn cell_clamped(@builtin(global_invocation_id) id: vec3<u32>) {
-    let index = id.x;
-    if index >= cell_count() {
-        return;
-    }
+fn cell_clamped(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(local_invocation_index) thread: u32,
+) {
+    let index = workgroup.x;
+    let peak = workgroup_peak_luminance(thread, CELL_THREADS);
     let coords = cell_coords(index);
     let span = cell_span();
-    var sums: array<f32, CANDIDATES>;
-    for (var y = 0u; y < span; y++) {
-        for (var x = 0u; x < span; x++) {
-            let texel = coords.xy * span + vec2(x, y);
-            let L = textureLoad(source_cubemap, texel, coords.z, 0).rgb;
-            let omega = texel_solid_angle(texel, params.base_size);
-            let Y = luminance(max(L, vec3(0.0)));
-            for (var k = 0u; k < CANDIDATES; k++) {
-                sums[k] += min(Y, candidate_threshold(k)) * omega;
+    var luminance_sum = 0.0;
+    var solid_angle_sum = 0.0;
+    for (var first = 0u; first < span * span; first += CELL_THREADS) {
+        let t = first + thread;
+        var bin = CANDIDATES;
+        var weighted = 0.0;
+        var omega = 0.0;
+        if t < span * span {
+            let texel = coords.xy * span + vec2(t % span, t / span);
+            let Y = luminance(max(textureLoad(source_cubemap, texel, coords.z, 0).rgb, vec3(0.0)));
+            omega = texel_solid_angle(texel, params.base_size);
+            weighted = Y * omega;
+            // Texels darker than every candidate go in the last bin: min is Y for all.
+            bin = select(
+                CANDIDATES - 1u,
+                u32(clamp(floor(-2.0 * log2(Y / peak)), 0.0, f32(CANDIDATES - 1u))),
+                Y > 0.0 && peak > 0.0,
+            );
+        }
+        texel_bin[thread] = bin;
+        texel_luminance[thread] = weighted;
+        texel_solid_angles[thread] = omega;
+        workgroupBarrier();
+        if thread < CANDIDATES {
+            for (var i = 0u; i < CELL_THREADS; i++) {
+                if texel_bin[i] == thread {
+                    luminance_sum += texel_luminance[i];
+                    solid_angle_sum += texel_solid_angles[i];
+                }
             }
         }
+        workgroupBarrier();
     }
-    cells[index].clamped = sums;
+    if thread < CANDIDATES {
+        bin_luminance[thread] = luminance_sum;
+        bin_solid_angle[thread] = solid_angle_sum;
+    }
+    workgroupBarrier();
+    if thread < CANDIDATES {
+        var clamped = 0.0;
+        for (var j = 0u; j < CANDIDATES; j++) {
+            clamped += select(candidate_threshold(peak, thread) * bin_solid_angle[j], bin_luminance[j], j >= thread);
+        }
+        cells[index].clamped[thread] = clamped;
+    }
 }
 
 /// Largest candidate threshold whose clamped map has `peak / mean ≤ dynamic_range`.
 /// Infinite when the map already meets the target; 0 (extract everything bright)
 /// when no candidate does, as for an emitter on a black background.
+///
+/// Thread `t` sums candidate `t % 32` over every eighth cell, then the 8 partial
+/// sums of each candidate are added up.
 @compute
-@workgroup_size(32, 1, 1)
-fn choose_threshold(@builtin(local_invocation_index) k: u32) {
-    var sum = 0.0;
-    for (var index = 0u; index < cell_count(); index++) {
-        sum += cells[index].clamped[k];
+@workgroup_size(256, 1, 1)
+fn choose_threshold(@builtin(local_invocation_index) thread: u32) {
+    let peak = workgroup_peak_luminance(thread, SELECT_THREADS);
+    let k = thread % CANDIDATES;
+    let group = thread / CANDIDATES;
+    var clamped = 0.0;
+    var total = 0.0;
+    for (var index = group; index < cell_count(); index += SELECT_THREADS / CANDIDATES) {
+        clamped += cells[index].clamped[k];
+        if k == 0u {
+            total += cells[index].luminance;
+        }
     }
-    reduce_a[k] = candidate_threshold(k) / max(sum / (4.0 * PI), 1e-30);
+    reduce_a[thread] = clamped;
+    reduce_b[thread] = total;
     workgroupBarrier();
-    if k == 0u {
+    if thread < CANDIDATES {
+        var sum = 0.0;
+        for (var g = 0u; g < SELECT_THREADS / CANDIDATES; g++) {
+            sum += reduce_a[g * CANDIDATES + thread];
+        }
+        reduce_a[thread] = candidate_threshold(peak, thread) / max(sum / (4.0 * PI), 1e-30);
+    }
+    if thread == 0u {
+        var sum = 0.0;
+        for (var g = 0u; g < SELECT_THREADS / CANDIDATES; g++) {
+            sum += reduce_b[g * CANDIDATES];
+        }
+        reduce_b[0] = sum;
+    }
+    workgroupBarrier();
+    if thread == 0u {
+        let mean = reduce_b[0] / (4.0 * PI);
         var threshold = 0.0;
-        if globals.max_luminance <= 0.0
-            || globals.max_luminance <= params.dynamic_range * globals.mean_luminance {
+        if peak <= 0.0 || peak <= params.dynamic_range * mean {
             threshold = 3.0e38;
         } else {
             for (var i = 0u; i < CANDIDATES; i++) {
                 if reduce_a[i] <= params.dynamic_range {
-                    threshold = candidate_threshold(i);
+                    threshold = candidate_threshold(peak, i);
                     break;
                 }
             }
         }
+        globals.max_luminance = peak;
+        globals.mean_luminance = mean;
         globals.threshold = threshold;
     }
 }
 
+var<workgroup> excess_partial: array<vec4<f32>, CELL_THREADS>;
+var<workgroup> moment_partial: array<vec4<f32>, CELL_THREADS>;
+
 @compute
 @workgroup_size(64, 1, 1)
-fn cell_excess(@builtin(global_invocation_id) id: vec3<u32>) {
-    let index = id.x;
-    if index >= cell_count() {
-        return;
-    }
+fn cell_excess(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(local_invocation_index) thread: u32,
+) {
+    let index = workgroup.x;
     let coords = cell_coords(index);
     let span = cell_span();
     let threshold = globals.threshold;
-    var energy = vec3(0.0);
-    var weight = 0.0;
-    var moment = vec3(0.0);
-    for (var y = 0u; y < span; y++) {
-        for (var x = 0u; x < span; x++) {
-            let texel = coords.xy * span + vec2(x, y);
-            let L = max(textureLoad(source_cubemap, texel, coords.z, 0).rgb, vec3(0.0));
-            let Y = luminance(L);
-            if Y <= threshold {
-                continue;
-            }
-            let omega = texel_solid_angle(texel, params.base_size);
-            let e = L * (1.0 - threshold / Y);
-            let w = luminance(e) * omega;
-            energy += e * omega;
-            weight += w;
-            moment += w * texel_direction(texel, coords.z, params.base_size);
+    var energy_weight = vec4(0.0);
+    var moment = vec4(0.0);
+    for (var t = thread; t < span * span; t += CELL_THREADS) {
+        let texel = coords.xy * span + vec2(t % span, t / span);
+        let L = max(textureLoad(source_cubemap, texel, coords.z, 0).rgb, vec3(0.0));
+        let Y = luminance(L);
+        if Y <= threshold {
+            continue;
         }
+        let omega = texel_solid_angle(texel, params.base_size);
+        let e = L * (1.0 - threshold / Y);
+        let w = luminance(e) * omega;
+        energy_weight += vec4(e * omega, w);
+        moment += vec4(w * texel_direction(texel, coords.z, params.base_size), 0.0);
     }
-    cells[index].energy = energy;
-    cells[index].weight = weight;
-    cells[index].moment = moment;
-    cells[index].kept = 0u;
+    excess_partial[thread] = energy_weight;
+    moment_partial[thread] = moment;
+    workgroupBarrier();
+    for (var stride = CELL_THREADS / 2u; stride > 0u; stride /= 2u) {
+        if thread < stride {
+            excess_partial[thread] += excess_partial[thread + stride];
+            moment_partial[thread] += moment_partial[thread + stride];
+        }
+        workgroupBarrier();
+    }
+    if thread == 0u {
+        cells[index].energy = excess_partial[0].xyz;
+        cells[index].weight = excess_partial[0].w;
+        cells[index].moment = moment_partial[0].xyz;
+        cells[index].kept = 0u;
+    }
 }
 
 var<workgroup> labels: array<u32, MAX_CELLS>;
@@ -365,10 +464,11 @@ fn select_sources(@builtin(local_invocation_index) thread: u32) {
                 if index >= count || labels[index] != UNLABELED || cells[index].weight <= 0.0 {
                     continue;
                 }
-                if labels[cell_neighbor(index, vec2(1, 0))] == attempt
-                    || labels[cell_neighbor(index, vec2(-1, 0))] == attempt
-                    || labels[cell_neighbor(index, vec2(0, 1))] == attempt
-                    || labels[cell_neighbor(index, vec2(0, -1))] == attempt {
+                let neighbors = cells[index].neighbors;
+                if labels[neighbors.x] == attempt
+                    || labels[neighbors.y] == attempt
+                    || labels[neighbors.z] == attempt
+                    || labels[neighbors.w] == attempt {
                     labels[index] = attempt;
                     atomicStore(&changed, 1u);
                 }

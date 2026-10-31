@@ -22,6 +22,8 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_light::{EnvironmentMapLight, IrradianceVolume};
+
+use crate::light_probe::sources::{EnvironmentMapSourcesFallback, ViewEnvironmentMapSources};
 use bevy_math::Vec4;
 use bevy_platform::sync::Arc;
 use bevy_render::{
@@ -278,6 +280,7 @@ fn layout_entries(
         irradiance_volume_entries,
         clustered_decal_entries,
         is_oit_supported,
+        environment_map_sources_are_usable,
     }: &MeshPipelineViewLayoutParams,
 ) -> [Vec<BindGroupLayoutEntry>; 2] {
     let mut entries = DynamicBindGroupLayoutEntries::new_with_indices(
@@ -518,6 +521,11 @@ fn layout_entries(
             (1, environment_map_entries[1]),
             (2, environment_map_entries[2]),
         ));
+        // Sources extracted from the environment maps, shaded as disk lights.
+        if environment_map_sources_are_usable {
+            binding_array_entries = binding_array_entries
+                .extend_with_indices(((8, storage_buffer_read_only_sized(false, None)),));
+        }
     }
 
     if layout_key.contains(MeshPipelineViewLayoutKey::IRRADIANCE_VOLUME) {
@@ -549,6 +557,9 @@ struct MeshPipelineViewLayoutParams {
     irradiance_volume_entries: [BindGroupLayoutEntryBuilder; 2],
     clustered_decal_entries: Option<[BindGroupLayoutEntryBuilder; 3]>,
     is_oit_supported: bool,
+    /// Whether `environment_map_sources` is bound: wherever binding arrays are,
+    /// matching `MULTIPLE_LIGHT_PROBES_IN_ARRAY` in the shader.
+    environment_map_sources_are_usable: bool,
 }
 
 /// Stores the view layouts entries for creating bind group layouts of pipeline keys.
@@ -588,10 +599,15 @@ pub fn init_mesh_pipeline_view_layouts(
                 &render_device,
                 false,
             ),
+            environment_map_sources_are_usable: crate::light_probe::binding_arrays_are_usable(
+                &render_device,
+                &render_adapter,
+            ),
         }),
     };
 
     commands.insert_resource(res);
+    commands.insert_resource(EnvironmentMapSourcesFallback::new(&render_device));
 }
 
 impl MeshPipelineViewLayouts {
@@ -675,6 +691,7 @@ pub fn prepare_mesh_view_bind_groups(
         (
             Option<&RenderViewLightProbes<EnvironmentMapLight>>,
             Option<&RenderViewLightProbes<IrradianceVolume>>,
+            Option<&ViewEnvironmentMapSources>,
         ),
         Has<ExtractedAtmosphere>,
         (
@@ -709,7 +726,10 @@ pub fn prepare_mesh_view_bind_groups(
         Res<AreaLightLuts>,
         Res<DfgLut>,
     ),
-    linear_sampler: Res<LinearSampler>,
+    (linear_sampler, environment_map_sources_fallback): (
+        Res<LinearSampler>,
+        Res<EnvironmentMapSourcesFallback>,
+    ),
     // TODO: Figure out how to reuse the memory. `BindGroupEntry` is non-send on wasm with atomics.
     #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
     mut entries_cache: bevy_ecs::system::Local<Vec<BindGroupEntry>>,
@@ -745,7 +765,7 @@ pub fn prepare_mesh_view_bind_groups(
             atmosphere_textures,
             atmosphere_buffer,
             tonemapping,
-            (render_view_environment_maps, render_view_irradiance_volumes),
+            (render_view_environment_maps, render_view_irradiance_volumes, view_sources),
             has_atmosphere,
             (
                 view_uniform_offset,
@@ -952,6 +972,14 @@ pub fn prepare_mesh_view_bind_groups(
                         (0, diffuse_texture_views.as_slice()),
                         (1, specular_texture_views.as_slice()),
                         (2, sampler),
+                        // `environment_map_sources`
+                        (
+                            8,
+                            view_sources
+                                .map(|sources| &sources.0)
+                                .unwrap_or(&environment_map_sources_fallback.0)
+                                .as_entire_binding(),
+                        ),
                     ));
                 }
                 None => {}

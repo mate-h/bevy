@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Profile a warmed 640² IBL sphere with xctrace, retaining JSON, deleting traces.
 
-Build first: cargo build --example reflection_probes --features bevy_solari --offline
+Build first: cargo build --example reflection_probes --features bevy_solari,debug --offline
+(`debug` keeps render pass labels, which the opaque-pass timing needs.)
 Run: python tools/ibl_profile.py --output /tmp/ibl-gpu.json
 The opaque pass includes the sphere and skybox. Durations are GPU intervals,
 not CPU encoding time, frame time, or latency from submission to execution.
@@ -17,6 +18,20 @@ import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+
+
+def ktraces():
+    """xctrace leaves a raw instruments*.ktrace (0.5-4 GB) in TMPDIR per recording."""
+    return set(Path(tempfile.gettempdir()).glob("instruments*.ktrace"))
+
+
+def delete_new_ktraces(before):
+    # A failed or interrupted recording can still be writing its ktrace, so look twice.
+    for attempt in range(2):
+        for path in ktraces() - before:
+            path.unlink(missing_ok=True)
+        if attempt == 0:
+            time.sleep(3)
 
 
 def summarize(values):
@@ -85,6 +100,15 @@ def extract_gpu_timings(xml_path, pid):
 
 
 def record(repo, variant, samples, seconds):
+    before = ktraces()
+    try:
+        return _record(repo, variant, samples, seconds)
+    finally:
+        # The trace and its raw ktrace are deleted once their data is extracted.
+        delete_new_ktraces(before)
+
+
+def _record(repo, variant, samples, seconds):
     # TemporaryDirectory removes the trace, XML export, and logs even on failure.
     with tempfile.TemporaryDirectory(prefix="bevy-ibl-gpu-") as temporary:
         directory = Path(temporary)

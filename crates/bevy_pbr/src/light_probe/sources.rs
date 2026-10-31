@@ -3,7 +3,9 @@
 //! The generator writes the extracted sources of a [`GeneratedEnvironmentMapLight`]
 //! into a small storage buffer (see `environment_sources.wesl`). That buffer is read
 //! back every frame, and the sources drive [`DirectionalLight`]s with an angular
-//! size, matched to the previous frame's lights by direction and smoothed.
+//! size, matched to the previous frame's lights by direction and smoothed. With
+//! [`EnvironmentMapSourceOutput::Shading`] there is no readback: the render world
+//! copies the buffer into the view's `environment_map_sources` binding instead.
 
 use bevy_asset::{Assets, Handle, RenderAssetUsages};
 use bevy_color::{Color, ColorToComponents, LinearRgba};
@@ -12,21 +14,44 @@ use bevy_ecs::{
     entity::Entity,
     observer::On,
     query::{With, Without},
+    resource::Resource,
     system::{Commands, Query, ResMut},
 };
 use bevy_light::{
     DirectionalLight, EnvironmentMapSourceExtraction, EnvironmentMapSourceLight,
-    GeneratedEnvironmentMapLight,
+    EnvironmentMapSourceOutput, GeneratedEnvironmentMapLight,
 };
 use bevy_math::Vec3;
 use bevy_render::{
     gpu_readback::{Readback, ReadbackComplete},
+    render_resource::{Buffer, BufferDescriptor, BufferUsages},
+    renderer::RenderDevice,
     storage::ShaderBuffer,
 };
 use bevy_transform::components::Transform;
 
 /// `Sources` in `environment_sources.wesl`: a 16-byte header and 4 sources of 32 bytes.
-const SOURCES_BYTES: u64 = 16 + 4 * 32;
+pub const SOURCES_BYTES: u64 = 16 + 4 * 32;
+
+/// Zeroed sources for every binding slot, bound to views without sources of their
+/// own (`environment_map_sources` in `mesh_view_bindings.wesl`).
+#[derive(Resource)]
+pub struct EnvironmentMapSourcesFallback(pub Buffer);
+
+impl EnvironmentMapSourcesFallback {
+    pub fn new(render_device: &RenderDevice) -> Self {
+        Self(render_device.create_buffer(&BufferDescriptor {
+            label: Some("environment_map_sources_fallback"),
+            size: super::MAX_VIEW_LIGHT_PROBES as u64 * SOURCES_BYTES,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }))
+    }
+}
+
+/// A view's sources, one [`SOURCES_BYTES`] slot per environment map binding index.
+#[derive(Component)]
+pub struct ViewEnvironmentMapSources(pub Buffer);
 
 /// Two lights whose directions are closer than this are the same source.
 const MATCH_COS: f32 = 0.94; // ~20°
@@ -59,25 +84,21 @@ struct SourceReadbackOwner(Entity);
 pub fn prepare_environment_map_source_extraction(
     mut commands: Commands,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
-    new: Query<
-        Entity,
-        (
-            With<EnvironmentMapSourceExtraction>,
-            Without<EnvironmentMapSourceBuffer>,
-        ),
-    >,
+    new: Query<(Entity, &EnvironmentMapSourceExtraction), Without<EnvironmentMapSourceBuffer>>,
 ) {
-    for entity in &new {
+    for (entity, settings) in &new {
         let mut buffer = ShaderBuffer::with_size(SOURCES_BYTES, RenderAssetUsages::RENDER_WORLD);
         buffer.label = "environment_map_sources".into();
+        buffer.buffer_usage |= BufferUsages::COPY_SRC;
         let buffer = buffers.add(buffer);
-        let readback = commands
-            .spawn((
-                Readback::buffer(buffer.clone()),
-                SourceReadbackOwner(entity),
-            ))
-            .observe(store_source_readback)
-            .id();
+        // Shading reads the buffer on the GPU, so only lights need a readback.
+        let mut readback = commands.spawn(SourceReadbackOwner(entity));
+        if settings.output == EnvironmentMapSourceOutput::DirectionalLights {
+            readback
+                .insert(Readback::buffer(buffer.clone()))
+                .observe(store_source_readback);
+        }
+        let readback = readback.id();
         commands.entity(entity).insert((
             EnvironmentMapSourceBuffer { buffer, readback },
             EnvironmentMapSourceState::default(),

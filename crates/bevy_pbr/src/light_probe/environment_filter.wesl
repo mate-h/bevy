@@ -180,9 +180,106 @@ fn irradiance_sample_lod(pdf: f32, src_width: f32, sample_count: f32, max_lod: f
     return clamp(lod, 0.0, max_lod);
 }
 
+/// Irradiance from a 9-coefficient spherical harmonic projection (Ramamoorthi &
+/// Hanrahan 2001) instead of Monte Carlo samples: deterministic, and exact for
+/// the cosine lobe up to the truncation of the lighting to two bands.
+const IRRADIANCE_SH: bool = true;
+/// Face size of the level projected onto spherical harmonics.
+const IRRADIANCE_SH_SOURCE_SIZE: u32 = 32u;
+
+var<workgroup> sh_partial: array<vec3f, 64>;
+
+fn sh9_basis(d: vec3f) -> array<f32, 9> {
+    return array<f32, 9>(
+        0.282095,
+        0.488603 * d.y,
+        0.488603 * d.z,
+        0.488603 * d.x,
+        1.092548 * d.x * d.y,
+        1.092548 * d.y * d.z,
+        0.315392 * (3.0 * d.z * d.z - 1.0),
+        1.092548 * d.x * d.z,
+        0.546274 * (d.x * d.x - d.y * d.y),
+    );
+}
+
+fn texel_corner(x: f32, y: f32) -> f32 {
+    return atan2(x * y, sqrt(1.0 + x * x + y * y));
+}
+
+/// Projects the environment onto 9 SH coefficients, cosine-convolved and divided
+/// by π, so `dot(coefficients, Y(n))` is the white Lambertian radiance at `n`.
+/// Every invocation of the workgroup gets the full result.
+fn project_irradiance_sh(local_index: u32) -> array<vec3f, 9> {
+    let base_size = textureDimensions(input_texture).x;
+    let size = min(IRRADIANCE_SH_SOURCE_SIZE, base_size);
+    let level = u32(round(log2(f32(base_size) / f32(size))));
+    let texels = 6u * size * size;
+
+    var partial: array<vec3f, 9>;
+    for (var t = local_index; t < texels; t += 64u) {
+        let face = t / (size * size);
+        let rem = t - face * size * size;
+        let coords = vec2u(rem % size, rem / size);
+        let inv = 2.0 / f32(size);
+        let lo = vec2f(coords) * inv - 1.0;
+        let hi = lo + inv;
+        let solid_angle = texel_corner(hi.x, hi.y) - texel_corner(lo.x, hi.y)
+            - texel_corner(hi.x, lo.y) + texel_corner(lo.x, lo.y);
+        let uv = (vec2f(coords) + 0.5) / f32(size);
+        let direction = output_texel_world_dir(uv, face);
+        let radiance = textureLoad(input_texture, coords, face, level).rgb * solid_angle;
+        let basis = sh9_basis(direction);
+        for (var i = 0u; i < 9u; i++) {
+            partial[i] += radiance * basis[i];
+        }
+    }
+
+    // Cosine lobe convolution over π: 1, 2/3 and 1/4 for bands 0, 1 and 2.
+    let band_scale = array<f32, 9>(1.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.25, 0.25, 0.25, 0.25, 0.25);
+    var result: array<vec3f, 9>;
+    for (var i = 0u; i < 9u; i++) {
+        sh_partial[local_index] = partial[i];
+        workgroupBarrier();
+        for (var stride = 32u; stride > 0u; stride /= 2u) {
+            if local_index < stride {
+                sh_partial[local_index] += sh_partial[local_index + stride];
+            }
+            workgroupBarrier();
+        }
+        result[i] = sh_partial[0] * band_scale[i];
+        workgroupBarrier();
+    }
+    return result;
+}
+
 @compute
 @workgroup_size(8, 8, 1)
-fn generate_irradiance_map(@builtin(global_invocation_id) global_id: vec3u) {
+fn generate_irradiance_map(
+    @builtin(global_invocation_id) global_id: vec3u,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    if IRRADIANCE_SH {
+        // Every workgroup projects the same coefficients, then writes its tile.
+        let coefficients = project_irradiance_sh(local_index);
+        let size = max(constants.output_size, vec2u(1u));
+        if any(global_id.xy >= size) {
+            return;
+        }
+        let uv = (vec2f(global_id.xy) + 0.5) / vec2f(size);
+        let basis = sh9_basis(output_texel_world_dir(uv, global_id.z));
+        var irradiance = vec3f(0.0);
+        for (var i = 0u; i < 9u; i++) {
+            irradiance += coefficients[i] * basis[i];
+        }
+        // Two bands can ring below zero around bright, small sources.
+        textureStore(output_texture, global_id.xy, global_id.z, vec4f(max(irradiance, vec3f(0.0)), 1.0));
+        return;
+    }
+    generate_irradiance_map_sampled(global_id);
+}
+
+fn generate_irradiance_map_sampled(global_id: vec3u) {
     let size = max(constants.output_size, vec2u(1u));
     let inv_size = 1.0 / vec2f(size);
 

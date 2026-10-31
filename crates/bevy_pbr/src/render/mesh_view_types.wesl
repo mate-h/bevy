@@ -52,6 +52,27 @@ const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32                  = 1u << 
 const DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT: u32                       = 1u << 1u;
 const DIRECTIONAL_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT: u32 = 1u << 2u;
 const DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_ENABLED_BIT: u32           = 1u << 3u;
+const DIRECTIONAL_LIGHT_FLAGS_ANGULAR_SOFT_SHADOWS_BIT: u32              = 1u << 4u;
+
+/// A bright source extracted from a generated environment map, shaded as a disk
+/// light inside the light probe loop. See `environment_sources.wesl`.
+struct EnvironmentMapSource {
+    /// Toward the light, in the probe's space (`compute_cubemap_sample_dir`
+    /// without the z flip).
+    direction: vec3<f32>,
+    angular_size: f32,
+    /// Normal-incidence illuminance, in environment map radiance units.
+    illuminance: vec3<f32>,
+    isotropy: f32,
+};
+
+struct EnvironmentMapSources {
+    count: u32,
+    threshold: f32,
+    extracted_fraction: f32,
+    _pad: f32,
+    sources: array<EnvironmentMapSource, 4>,
+};
 
 struct RectLight {
     color: vec4<f32>,

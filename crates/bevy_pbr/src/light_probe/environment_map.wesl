@@ -5,7 +5,7 @@ import package::render::mesh_view_types::{
     LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, LIGHT_PROBE_FLAG_PARALLAX_CORRECT,
     LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL
 };
-import package::render::pbr_lighting::{D_GGX, V_SmithGGXCorrelated, sample_visible_ggx, ggx_vndf_pdf, F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT};
+import package::render::pbr_lighting::{D_GGX, V_SmithGGXCorrelated, sample_visible_ggx, ggx_vndf_pdf, F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT, Fd_Burley, derive_lighting_input, directional_disk_diffuse_cosine, directional_disk_specular};
 import package::render::clustered_forward::ClusterableObjectIndexRanges;
 import bevy_render::maths::quat_rotate;
 
@@ -28,6 +28,65 @@ struct EnvironmentMapRadiances {
 // when it binds an ordinary box-filtered radiance pyramid, never a GGX chain.
 const SHADE_TIME_FIS: bool = false;
 const FIS_SAMPLES: u32 = 64u;
+
+// Experimental view-dependent split sum. At grazing views the reflected GGX lobe
+// keeps its width in the plane of incidence but narrows by about N⋅V across it,
+// while a prefiltered mip is round. This reads the mip that matches the narrow
+// width and adds taps along the plane of incidence to restore the wide one. The
+// reflection_probes harness enables it with `IBL_FILTER=stretch`.
+const STRETCHED_SPLIT_SUM: bool = false;
+const STRETCH_TAPS: u32 = 5u;
+/// Angular standard deviation of the reflected lobe, per unit of roughness α.
+const STRETCH_LOBE_SCALE: f32 = 1.0;
+
+fn stretched_split_sum_radiance(
+    map: texture_cube<f32>,
+    input: LayerLightingInput,
+    max_specular_mip: f32,
+    world_position: vec3<f32>,
+    light_from_world: mat4x4<f32>,
+    bounds: vec3<f32>,
+    parallax_correct: bool,
+    rotation: vec4<f32>,
+) -> vec3<f32> {
+    let N = input.N;
+    let alpha = input.roughness;
+    let NdotV = clamp(input.NdotV, 1e-4, 1.0);
+    let center = radiance_sample_direction_ggx_split_sum(N, input.R, alpha);
+
+    // In the plane of N and the lookup direction, perpendicular to the lookup.
+    let toward_normal = N - dot(N, center) * center;
+    let toward_normal_length_squared = dot(toward_normal, toward_normal);
+
+    let sigma_wide = STRETCH_LOBE_SCALE * alpha;
+    let sigma_narrow = sigma_wide * NdotV;
+    let spread = sqrt(max(sigma_wide * sigma_wide - sigma_narrow * sigma_narrow, 0.0));
+    // The mip must also blur at least half the tap spacing, or the taps band.
+    // Taps span ±2 standard deviations with Gaussian weights.
+    let spacing = 4.0 * spread / f32(STRETCH_TAPS - 1u);
+    let level_alpha = max(sigma_narrow, 0.5 * spacing) / STRETCH_LOBE_SCALE;
+    let level = clamp(sqrt(level_alpha) * max_specular_mip, 0.0, max_specular_mip);
+
+    if toward_normal_length_squared < 1e-8 || spread < 1e-4 {
+        let direction = compute_cubemap_sample_dir(
+            world_position, center, light_from_world, bounds, parallax_correct, rotation);
+        return textureSampleLevel(map, bindings::environment_map_sampler, direction,
+            specular_radiance_level(input.perceptual_roughness, max_specular_mip)).rgb;
+    }
+    let tangent = toward_normal * inverseSqrt(toward_normal_length_squared);
+
+    var sum = vec3(0.0);
+    var weight_sum = 0.0;
+    for (var i = 0u; i < STRETCH_TAPS; i++) {
+        let u = (f32(i) / f32(STRETCH_TAPS - 1u) * 2.0 - 1.0) * 2.0 * spread;
+        let weight = exp(-0.5 * u * u / max(spread * spread, 1e-12));
+        let direction = compute_cubemap_sample_dir(world_position, normalize(center + u * tangent),
+            light_from_world, bounds, parallax_correct, rotation);
+        sum += weight * textureSampleLevel(map, bindings::environment_map_sampler, direction, level).rgb;
+        weight_sum += weight;
+    }
+    return sum / weight_sum;
+}
 
 // Integrate both Schlick coefficients so Fresnel remains inside the integral.
 // Bounded visible-normal sampling and its matching reflected-direction PDF are
@@ -286,6 +345,20 @@ fn compute_radiances(
                 radiance_sample_dir,
                 radiance_level).rgb * query_result.intensity * query_result.weight;
 
+        if STRETCHED_SPLIT_SUM {
+            // Replace the round lookup above with the stretched one.
+            radiances.radiance -= textureSampleLevel(
+                bindings::specular_environment_maps[query_result.texture_index],
+                bindings::environment_map_sampler,
+                radiance_sample_dir,
+                radiance_level).rgb * query_result.intensity * query_result.weight;
+            radiances.radiance += stretched_split_sum_radiance(
+                bindings::specular_environment_maps[query_result.texture_index], input,
+                max_specular_mip, world_position, query_result.light_from_world,
+                query_result.parallax_correction_bounds, parallax_correct, view_rotation)
+                * query_result.intensity * query_result.weight;
+        }
+
         if SHADE_TIME_FIS {
             let filtered = filtered_importance_radiance(
                 bindings::specular_environment_maps[query_result.texture_index], input,
@@ -377,6 +450,14 @@ fn compute_radiances(
         radiance_sample_dir,
         radiance_level).rgb * intensity;
 
+    if STRETCHED_SPLIT_SUM {
+        radiances.radiance = stretched_split_sum_radiance(bindings::specular_environment_map,
+            input, max_specular_mip, world_position, mat4x4<f32>(
+                vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0),
+                vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)),
+            vec3(0.0), false, light_probes.view_rotation) * intensity;
+    }
+
     if SHADE_TIME_FIS {
         let filtered = filtered_importance_radiance(bindings::specular_environment_map,
             input, world_position, mat4x4<f32>(
@@ -387,6 +468,79 @@ fn compute_radiances(
         radiances.fresnel_radiance = filtered[1] * intensity;
     }
     return radiances;
+}
+
+/// Disk lights extracted from the environment maps
+/// (`EnvironmentMapSourceOutput::Shading`), weighted like the maps they came
+/// from. Their directions are in each probe's space, so they are taken back to
+/// world space through the probe's rotation; parallax correction does not
+/// apply, since the sources are distant.
+@if(MULTIPLE_LIGHT_PROBES_IN_ARRAY && AREA_LIGHT_LUTS)
+fn environment_map_sources_light(
+    input: ptr<function, LightingInput>,
+    clusterable_object_index_ranges: ptr<function, ClusterableObjectIndexRanges>,
+    enable_diffuse: bool,
+) -> vec3<f32> {
+    let N = (*input).layers[LAYER_BASE].N;
+    let V = (*input).V;
+    var iterator = light_probe_iterator_new(
+        (*input).P,
+        /*is_irradiance_volume=*/ false,
+        clusterable_object_index_ranges,
+    );
+    var total_weight = 0.0;
+    var light = vec3(0.0);
+    while (true) {
+        var query_result = light_probe_iterator_next(&iterator);
+        var view_rotation = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        var light_from_world = query_result.light_from_world;
+        if (query_result.texture_index < 0 && total_weight < 0.9999) {
+            query_result.texture_index = light_probes.view_cubemap_index;
+            query_result.intensity = light_probes.intensity_for_view;
+            view_rotation = light_probes.view_rotation;
+            light_from_world = mat4x4(
+                vec4(1.0, 0.0, 0.0, 0.0),
+                vec4(0.0, 1.0, 0.0, 0.0),
+                vec4(0.0, 0.0, 1.0, 0.0),
+                vec4(0.0, 0.0, 0.0, 1.0)
+            );
+            query_result.weight = 1.0 - total_weight;
+        }
+        if (query_result.texture_index < 0) {
+            break;
+        }
+        total_weight += query_result.weight;
+
+        let probe_sources = &bindings::environment_map_sources[query_result.texture_index];
+        let count = min((*probe_sources).count, 4u);
+        // `compute_cubemap_sample_dir` maps world to probe space as
+        // `rotate(view_rotation, light_from_world * d)`; invert that.
+        let world_from_light = transpose(mat3x3(
+            normalize(light_from_world[0].xyz),
+            normalize(light_from_world[1].xyz),
+            normalize(light_from_world[2].xyz),
+        ));
+        let inverse_view_rotation = vec4(-view_rotation.xyz, view_rotation.w);
+        for (var i = 0u; i < count; i++) {
+            let source = (*probe_sources).sources[i];
+            let L = normalize(world_from_light * quat_rotate(inverse_view_rotation, source.direction));
+            let radius = 0.5 * source.angular_size;
+            let cos_r = cos(radius);
+            let sin_r = max(sin(radius), 1e-4);
+            let illuminance = source.illuminance * query_result.intensity * query_result.weight;
+            var color = directional_disk_specular(input, LAYER_BASE, L, cos_r, sin_r);
+            if enable_diffuse {
+                var derived = derive_lighting_input(N, V, L);
+                color += (*input).diffuse_color * Fd_Burley(input, &derived)
+                    * directional_disk_diffuse_cosine(dot(N, L), sin_r);
+            }
+            light += color * illuminance;
+        }
+    }
+    if total_weight != 0.0 {
+        light /= total_weight;
+    }
+    return light;
 }
 
 @if(STANDARD_MATERIAL_CLEARCOAT)
@@ -451,9 +605,14 @@ fn environment_map_light(
         found_diffuse_indirect,
     );
 
+    var sources_light = vec3(0.0);
+    @if(MULTIPLE_LIGHT_PROBES_IN_ARRAY && AREA_LIGHT_LUTS)
+    sources_light = environment_map_sources_light(input, clusterable_object_index_ranges, !found_diffuse_indirect);
+
+    // A residual can be black once every source is extracted.
     if (all(radiances.irradiance == vec3(0.0)) && all(radiances.radiance == vec3(0.0))) {
         out.diffuse = vec3(0.0);
-        out.specular = vec3(0.0);
+        out.specular = sources_light;
         return out;
     }
 
@@ -485,6 +644,10 @@ fn environment_map_light(
     } else {
         out.diffuse = vec3(0.0);
     }
+
+    // Extracted sources: full BRDF, so they go straight into the specular term,
+    // below the clearcoat like the rest of the environment.
+    out.specular += sources_light;
 
     @if(STANDARD_MATERIAL_CLEARCOAT)
     environment_map_light_clearcoat(

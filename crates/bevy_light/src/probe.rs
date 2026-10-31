@@ -342,8 +342,29 @@ pub struct EnvironmentMapSourceExtraction {
     /// Fraction of the previous frame's light parameters kept each frame, from
     /// `0.0` (no smoothing) to just below `1.0`.
     pub smoothing: f32,
-    /// Whether the brightest extracted light casts shadows.
+    /// Whether the brightest extracted light casts shadows. Only for
+    /// [`EnvironmentMapSourceOutput::DirectionalLights`].
     pub shadows_enabled: bool,
+    /// How the extracted sources are rendered.
+    pub output: EnvironmentMapSourceOutput,
+}
+
+/// How [`EnvironmentMapSourceExtraction`] renders the sources it extracts.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Reflect)]
+#[reflect(Default, Clone, Debug, PartialEq)]
+pub enum EnvironmentMapSourceOutput {
+    /// Spawn [`DirectionalLight`](crate::DirectionalLight)s with an angular size,
+    /// tagged [`EnvironmentMapSourceLight`]. They light the whole scene and can cast
+    /// shadows, but come back from the GPU a few frames late. Best for the view's
+    /// environment map.
+    #[default]
+    DirectionalLights,
+    /// Shade the sources as disk lights inside the environment map lookup, from a
+    /// GPU buffer written in the same frame as the residual map. They follow the
+    /// light probe's influence and blending, so they suit local [`LightProbe`]s,
+    /// but cast no shadows. Needs binding arrays and the area light LUTs; elsewhere
+    /// the sources are dropped from the lighting.
+    Shading,
 }
 
 impl Default for EnvironmentMapSourceExtraction {
@@ -355,6 +376,7 @@ impl Default for EnvironmentMapSourceExtraction {
             min_energy_fraction: 0.01,
             smoothing: 0.8,
             shadows_enabled: false,
+            output: EnvironmentMapSourceOutput::DirectionalLights,
         }
     }
 }

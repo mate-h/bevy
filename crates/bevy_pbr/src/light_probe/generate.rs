@@ -44,9 +44,12 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
+use bevy_asset::AssetId;
 use bevy_light::{
-    EnvironmentMapLight, EnvironmentMapSourceExtraction, GeneratedEnvironmentMapLight,
+    EnvironmentMapLight, EnvironmentMapSourceExtraction, EnvironmentMapSourceOutput,
+    GeneratedEnvironmentMapLight,
 };
+use bevy_platform::collections::HashMap;
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_shader::ShaderDefVal;
 use tracing::info;
@@ -87,9 +90,8 @@ pub struct GeneratorPipelines {
 }
 
 /// Entry points of `environment_sources.wesl`, in dispatch order.
-const SOURCE_PASSES: [&str; 7] = [
+const SOURCE_PASSES: [&str; 6] = [
     "cell_stats",
-    "global_stats",
     "cell_clamped",
     "choose_threshold",
     "cell_excess",
@@ -99,8 +101,8 @@ const SOURCE_PASSES: [&str; 7] = [
 
 /// Cells per face edge for source extraction (`MAX_GRID` in the shader).
 const SOURCE_GRID: u32 = 16;
-/// `Cell` in `environment_sources.wesl`: 3 vec4s and 32 threshold sums.
-const SOURCE_CELL_BYTES: u64 = 176;
+/// `Cell` in `environment_sources.wesl`: 4 vec4s and 32 threshold sums.
+const SOURCE_CELL_BYTES: u64 = 192;
 
 /// Uniforms for source extraction, `SourceParams` in `environment_sources.wesl`.
 #[derive(Clone, Copy, ShaderType)]
@@ -214,12 +216,17 @@ impl Plugin for EnvironmentMapGenerationPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                     prepare_generated_environment_map_intermediate_textures
                         .in_set(RenderSystems::PrepareResources),
-                    (downsampling_system, filtering_system)
+                    (
+                        downsampling_system,
+                        filtering_system,
+                        copy_environment_map_sources_to_views,
+                    )
                         .chain()
                         .after(RenderSystems::PrepareBindGroups)
                         .before(RenderSystems::Render),
                 ),
             )
+            .init_resource::<EnvironmentMapSourceShadingBuffers>()
             .add_systems(
                 RenderStartup,
                 initialize_generated_environment_map_resources,
@@ -483,7 +490,9 @@ pub fn extract_generated_environment_map_entities(
     mut commands: Commands,
     render_images: Res<RenderAssets<GpuImage>>,
     render_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    mut shading_buffers: ResMut<EnvironmentMapSourceShadingBuffers>,
 ) {
+    shading_buffers.0.clear();
     for (entity, filtered_env_map, env_map_light, extraction) in query.iter() {
         let Some(env_map) = render_images.get(&filtered_env_map.environment_map) else {
             continue;
@@ -509,12 +518,18 @@ pub fn extract_generated_environment_map_entities(
             affects_lightmapped_mesh_diffuse: filtered_env_map.affects_lightmapped_mesh_diffuse,
             temporal_blend: filtered_env_map.temporal_blend,
             sources: extraction.and_then(|(settings, buffer)| {
+                let output = render_buffers.get(&buffer.buffer)?.buffer.clone();
+                if settings.output == EnvironmentMapSourceOutput::Shading {
+                    shading_buffers
+                        .0
+                        .insert(env_map_light.specular_map.id(), output.clone());
+                }
                 Some(RenderEnvironmentMapSources {
                     max_sources: settings.max_sources.min(4),
                     dynamic_range: settings.dynamic_range,
                     min_isotropy: settings.min_isotropy,
                     min_energy_fraction: settings.min_energy_fraction,
-                    output: render_buffers.get(&buffer.buffer)?.buffer.clone(),
+                    output,
                 })
             }),
         };
@@ -547,6 +562,60 @@ pub struct RenderEnvironmentMapSources {
     pub min_isotropy: f32,
     pub min_energy_fraction: f32,
     pub output: Buffer,
+}
+
+/// The sources buffers of generated environment maps with
+/// [`EnvironmentMapSourceOutput::Shading`], by their specular map.
+#[derive(Resource, Default)]
+pub struct EnvironmentMapSourceShadingBuffers(pub HashMap<AssetId<Image>, Buffer>);
+
+/// Copies the shaded sources of every environment map a view binds into the
+/// view's `environment_map_sources` buffer, at the map's binding index, after
+/// this frame's extraction. Other slots are cleared.
+pub fn copy_environment_map_sources_to_views(
+    mut commands: Commands,
+    views: Query<(
+        Entity,
+        &super::RenderViewLightProbes<EnvironmentMapLight>,
+        Option<&sources::ViewEnvironmentMapSources>,
+    )>,
+    shading_buffers: Res<EnvironmentMapSourceShadingBuffers>,
+    render_device: Res<RenderDevice>,
+    mut ctx: RenderContext,
+) {
+    for (entity, light_probes, view_sources) in &views {
+        let Some(view_sources) = view_sources else {
+            // Bound from the next frame on; the fallback is bound until then.
+            let buffer = render_device.create_buffer(&BufferDescriptor {
+                label: Some("view_environment_map_sources"),
+                size: super::MAX_VIEW_LIGHT_PROBES as u64 * sources::SOURCES_BYTES,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            commands
+                .entity(entity)
+                .insert(sources::ViewEnvironmentMapSources(buffer));
+            continue;
+        };
+        let encoder = ctx.command_encoder();
+        for slot in 0..super::MAX_VIEW_LIGHT_PROBES {
+            let offset = slot as u64 * sources::SOURCES_BYTES;
+            match light_probes
+                .binding_index_to_textures
+                .get(slot)
+                .and_then(|ids| shading_buffers.0.get(&ids.specular))
+            {
+                Some(source) => encoder.copy_buffer_to_buffer(
+                    source,
+                    0,
+                    &view_sources.0,
+                    offset,
+                    sources::SOURCES_BYTES,
+                ),
+                None => encoder.clear_buffer(&view_sources.0, offset, Some(sources::SOURCES_BYTES)),
+            }
+        }
+    }
 }
 
 /// Scratch buffers of the source extraction passes.
@@ -1029,12 +1098,13 @@ pub fn downsampling_system(
 
             let size = env_map_light.environment_map.texture_descriptor.size.width;
             let grid = SOURCE_GRID.min(size);
-            let cell_workgroups = (6 * grid * grid).div_ceil(64);
+            // One workgroup per cell.
+            let cell_workgroups = 6 * grid * grid;
             let texel_workgroups = size.div_ceil(8);
             for (pipeline, entry_point) in source_pipelines.iter().zip(SOURCE_PASSES) {
                 compute_pass.set_pipeline(pipeline);
                 match entry_point {
-                    "global_stats" | "choose_threshold" | "select_sources" => {
+                    "choose_threshold" | "select_sources" => {
                         compute_pass.dispatch_workgroups(1, 1, 1);
                     }
                     "write_residual" => {

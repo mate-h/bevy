@@ -184,6 +184,8 @@ bitflags::bitflags! {
         const VOLUMETRIC                        = 1 << 1;
         const AFFECTS_LIGHTMAPPED_MESH_DIFFUSE  = 1 << 2;
         const CONTACT_SHADOWS_ENABLED           = 1 << 3;
+        /// Soft shadows with the penumbra of the light's angular size.
+        const ANGULAR_SOFT_SHADOWS              = 1 << 4;
         const NONE                              = 0;
         const UNINITIALIZED                     = 0xFFFF;
     }
@@ -1811,6 +1813,14 @@ pub fn prepare_lights(
 
             if light.affects_lightmapped_mesh_diffuse {
                 flags |= DirectionalLightFlags::AFFECTS_LIGHTMAPPED_MESH_DIFFUSE;
+            }
+            // With soft shadows available, a light with an angular size and no
+            // explicit `soft_shadow_size` gets the penumbra of its disk.
+            if cfg!(feature = "experimental_pbr_pcss")
+                && light.soft_shadow_size.is_none()
+                && light.angular_size > 0.0
+            {
+                flags |= DirectionalLightFlags::ANGULAR_SOFT_SHADOWS;
             }
 
             gpu_directional_lights[index] = GpuDirectionalLight {
