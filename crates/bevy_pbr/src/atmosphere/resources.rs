@@ -240,6 +240,8 @@ pub(crate) struct RenderSkyBindGroupLayouts {
     pub render_sky_clouds: BindGroupLayoutDescriptor,
     /// The half-res haze prepass (`haze` entry point) of views with clouds.
     pub render_sky_haze: BindGroupLayoutDescriptor,
+    /// The haze resolve (`haze_resolve`): this frame's checkerboard march + the history.
+    pub render_sky_haze_resolve: BindGroupLayoutDescriptor,
     pub render_sky_msaa_clouds: BindGroupLayoutDescriptor,
     pub render_sky_no_clouds: BindGroupLayoutDescriptor,
     pub render_sky_msaa_no_clouds: BindGroupLayoutDescriptor,
@@ -1096,6 +1098,16 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                 .extend_with_indices(cloud_layout_entries())
                 .extend_with_indices(haze_entries()),
         );
+        // - haze resolve: base + haze history (2) + this frame's checkerboard march (2) = 12
+        let render_sky_haze_resolve = BindGroupLayoutDescriptor::new(
+            "render_sky_haze_resolve_bind_group_layout",
+            &base_entries(texture_2d(TextureSampleType::Depth))
+                .extend_with_indices(haze_entries())
+                .extend_with_indices((
+                    (53, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (54, texture_2d(TextureSampleType::Float { filterable: true })),
+                )),
+        );
         let render_sky_msaa_clouds = BindGroupLayoutDescriptor::new(
             "render_sky_msaa_bind_group_layout_clouds",
             &base_entries(texture_2d_multisampled(TextureSampleType::Depth))
@@ -1106,6 +1118,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
         Self {
             render_sky_clouds,
             render_sky_haze,
+            render_sky_haze_resolve,
             render_sky_msaa_clouds,
             render_sky_no_clouds,
             render_sky_msaa_no_clouds,
@@ -1410,6 +1423,8 @@ pub(crate) struct RenderSkyPipelineKey {
     pub clouds_enabled: bool,
     /// The half-resolution haze prepass (`haze` entry point) instead of the full-res pass.
     pub haze_prepass: bool,
+    /// With `haze_prepass`: its resolve (`haze_resolve`) instead of the checkerboard march.
+    pub haze_resolve: bool,
 }
 
 impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
@@ -1452,14 +1467,24 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
                 blend: None,
                 write_mask: ColorWrites::ALL,
             });
+            let (label, layout, entry_point) = if key.haze_resolve {
+                shader_defs.push("SKY_HAZE_RESOLVE".into());
+                (
+                    "render_sky_haze_resolve_pipeline",
+                    self.render_sky_haze_resolve.clone(),
+                    "haze_resolve",
+                )
+            } else {
+                ("render_sky_haze_pipeline", self.render_sky_haze.clone(), "haze")
+            };
             return RenderPipelineDescriptor {
-                label: Some("render_sky_haze_pipeline".into()),
-                layout: vec![self.render_sky_haze.clone()],
+                label: Some(label.into()),
+                layout: vec![layout],
                 vertex: self.fullscreen_shader.to_vertex_state(),
                 fragment: Some(FragmentState {
                     shader: self.fragment_shader.clone(),
                     shader_defs,
-                    entry_point: Some("haze".into()),
+                    entry_point: Some(entry_point.into()),
                     targets: vec![target.clone(), target],
                     ..default()
                 }),
@@ -1529,32 +1554,36 @@ pub(super) fn queue_render_sky_pipelines(
                     .contains(WgpuFeatures::DUAL_SOURCE_BLENDING),
                 clouds_enabled: cloud_layer.is_some(),
                 haze_prepass: false,
+                haze_resolve: false,
             },
         );
         commands.entity(entity).insert(RenderSkyPipelineId(id));
         if cloud_layer.is_some() && msaa.samples() == 1 {
-            let haze = specializer.specialize(
-                &pipeline_cache,
-                &layouts,
-                RenderSkyPipelineKey {
-                    msaa_samples: 1,
-                    dual_source_blending: false,
-                    clouds_enabled: true,
-                    haze_prepass: true,
-                },
-            );
+            let haze_key = |haze_resolve| RenderSkyPipelineKey {
+                msaa_samples: 1,
+                dual_source_blending: false,
+                clouds_enabled: true,
+                haze_prepass: true,
+                haze_resolve,
+            };
+            let march = specializer.specialize(&pipeline_cache, &layouts, haze_key(false));
+            let resolve = specializer.specialize(&pipeline_cache, &layouts, haze_key(true));
             commands
                 .entity(entity)
-                .insert(RenderSkyHazePipelineId(haze));
+                .insert(RenderSkyHazePipelineId { march, resolve });
         } else {
             commands.entity(entity).remove::<RenderSkyHazePipelineId>();
         }
     }
 }
 
-/// The render_sky half-resolution haze prepass pipeline (views with clouds, no MSAA).
+/// The render_sky half-resolution haze prepass pipelines (views with clouds, no MSAA): the
+/// checkerboard march and its resolve.
 #[derive(Component)]
-pub struct RenderSkyHazePipelineId(pub CachedRenderPipelineId);
+pub struct RenderSkyHazePipelineId {
+    pub march: CachedRenderPipelineId,
+    pub resolve: CachedRenderPipelineId,
+}
 
 #[derive(Component)]
 pub struct AtmosphereTextures {
@@ -1574,6 +1603,9 @@ pub struct AtmosphereTextures {
     /// Previous frame's haze (ping-pong), the prepass's temporal history.
     pub haze_history_inscattering: CachedTexture,
     pub haze_history_transmittance: CachedTexture,
+    /// This frame's checkerboard haze march (half the haze width), the resolve's input.
+    pub haze_sparse_inscattering: CachedTexture,
+    pub haze_sparse_transmittance: CachedTexture,
     /// Low-res transmittance-weighted cloud distance (m).
     pub clouds_depth: CachedTexture,
     /// Previous frame's [`Self::clouds`] / [`Self::clouds_depth`] (ping-pong by frame parity).
@@ -1954,6 +1986,19 @@ pub(super) fn prepare_atmosphere_textures(
         } else {
             (haze_l_b, haze_l_a, haze_t_b, haze_t_a)
         };
+        let haze_sparse_size = UVec2::new(clouds_size.x.div_ceil(2), clouds_size.y);
+        let haze_sparse_inscattering = get(
+            "haze_sparse_inscattering",
+            TextureFormat::Rgba16Float,
+            haze_sparse_size,
+            haze_usage,
+        );
+        let haze_sparse_transmittance = get(
+            "haze_sparse_transmittance",
+            TextureFormat::Rgba16Float,
+            haze_sparse_size,
+            haze_usage,
+        );
         let clouds_trace = get(
             "clouds_trace",
             TextureFormat::Rgba16Float,
@@ -1981,6 +2026,8 @@ pub(super) fn prepare_atmosphere_textures(
                 haze_transmittance,
                 haze_history_inscattering,
                 haze_history_transmittance,
+                haze_sparse_inscattering,
+                haze_sparse_transmittance,
                 clouds_depth,
                 clouds_history,
                 clouds_depth_history,
@@ -2202,6 +2249,8 @@ pub(crate) struct AtmosphereBindGroups {
     pub render_sky_clouds: Option<BindGroup>,
     /// `render_sky_clouds` with placeholders in the haze slots, for the haze prepass.
     pub render_sky_haze: Option<BindGroup>,
+    /// The haze resolve: the history, and this frame's checkerboard march.
+    pub render_sky_haze_resolve: Option<BindGroup>,
     pub render_sky_no_clouds: BindGroup,
     /// `clouds_raymarch` pass (views with a `VolumetricCloudLayer`).
     pub clouds_raymarch: Option<BindGroup>,
@@ -2914,6 +2963,25 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 )
             });
 
+        let render_sky_haze_resolve = render_sky_haze
+            .is_some()
+            .then_some(haze_params.clone())
+            .flatten()
+            .map(|haze_params| {
+                render_device.create_bind_group(
+                    "render_sky_haze_resolve_bind_group",
+                    &pipeline_cache
+                        .get_bind_group_layout(&render_sky_layouts.render_sky_haze_resolve),
+                    &base_sky_entries().extend_with_indices((
+                        (50, &textures.haze_history_inscattering.default_view),
+                        (51, &textures.haze_history_transmittance.default_view),
+                        (52, haze_params),
+                        (53, &textures.haze_sparse_inscattering.default_view),
+                        (54, &textures.haze_sparse_transmittance.default_view),
+                    )),
+                )
+            });
+
         let clouds_raymarch = cloud_layer_binding
             .as_ref()
             .filter(|_| cloud_layer.is_some())
@@ -3138,6 +3206,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             cloud_shadow_temporal,
             render_sky_clouds,
             render_sky_haze,
+            render_sky_haze_resolve,
             render_sky_no_clouds,
             clouds_raymarch,
             clouds_raymarch_multisampled: *msaa != Msaa::Off,
@@ -3242,6 +3311,7 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_NOSHADOW`: no cloud shadow on the atmosphere in-scatter.
 /// - `ATM_DBG_NOMS`: no atmosphere multiple scattering (single scatter only).
 /// - `ATM_DBG_NO_HAZE_HISTORY`: no temporal accumulation of the half-resolution haze.
+/// - `ATM_DBG_NO_HAZE_CLAMP`: no clamp of the haze history to this frame's nearby samples.
 /// - `ATM_DBG_GROUND_SKY_FIXED`: one fixed set of ground-skylight directions (no per-pixel/frame
 ///   jitter), to measure the jitter's temporal noise.
 /// - `ATM_DBG_AP_BAL`: ballistic (non-similarity) aerial-perspective transmittance.

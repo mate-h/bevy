@@ -69,22 +69,41 @@ struct HazeOutput {
     @location(1) transmittance: vec4<f32>,
 }
 
-/// Half-resolution haze prepass: the per-pixel atmosphere raymarch (or LUT lookup) at one
-/// full-res texel of each 2x2 block, the farthest one (the background, as the cloud pass), plus
-/// its ray length as the upsampling depth key. The march is the dominant cost of render_sky at
-/// full resolution (16 shadowed samples per pixel); the haze is smooth except at silhouettes,
-/// which the depth-aware upsample in `main` handles.
-@if(SKY_HAZE_HALF_RES)
-@fragment
-fn haze(in: FullscreenVertexOutput) -> HazeOutput {
+// This frame's checkerboard march (the `haze` pass), read by `haze_resolve`: texel (i, y) holds
+// haze texel (2i + ((y + frame) & 1), y).
+@if(SKY_HAZE_RESOLVE)
+@group(0) @binding(53) var haze_sparse_inscattering: texture_2d<f32>;
+@if(SKY_HAZE_RESOLVE)
+@group(0) @binding(54) var haze_sparse_transmittance: texture_2d<f32>;
+
+// Weight of a neighbour estimate in the history of a texel not marched this frame: keeps it
+// responsive between its own marches without spreading the neighbours' noise into it.
+const HAZE_FILL_WEIGHT: f32 = 0.1;
+
+// Column of the haze texel row `y` marched this frame at checkerboard index `i`.
+fn haze_marched_x(i: i32, y: i32) -> i32 {
+    return 2 * i + ((y + i32(view.frame_count & 1u)) & 1);
+}
+
+struct HazeTexelRay {
+    uv: vec2<f32>,
+    // Farthest depth of the texel's full-res footprint (0 = sky).
+    depth: f32,
+    // Ray length (m): to that depth, or through the atmosphere for the sky.
+    t: f32,
+}
+
+/// The ray of haze texel `texel` (of a `dims` target): through the texel's centre (2h + 1
+/// full-res pixels), where the history and the bilinear upsample in `main` expect its sample,
+/// with the block's farthest depth (the background, as the cloud pass). Tracing through the
+/// farthest pixel itself put the sample a quarter texel off the centre (bottom right when all
+/// four depths tie, e.g. sky): every frame's reprojection then read its history shifted by that
+/// quarter texel, a recursive one-directional blur even with a still camera.
+fn haze_texel_ray(texel: vec2<f32>, dims: vec2<f32>) -> HazeTexelRay {
     // The haze targets cover the camera's viewport; the depth texture covers the whole render
     // target, so its texels are offset by the viewport origin.
     let full = max(vec2<i32>(view.viewport.zw), vec2(1));
-    // The haze targets are half the viewport or smaller (the cloud buffers' size cap,
-    // `VolumetricCloudSettings::max_render_size`); the history bound here has this target's size.
-    let dims = vec2<f32>(max(textureDimensions(haze_inscattering), vec2(1u)));
     let scale = vec2<f32>(full) / dims;
-    let texel = floor(in.position.xy);
     let base = vec2<i32>(floor(texel * scale));
     let footprint = vec2<i32>(ceil((texel + 1.0) * scale)) - base;
     var depth = 1.0;
@@ -97,12 +116,34 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
             }
         }
     }
-    // The ray goes through this texel's centre (2h + 1 full-res pixels), where the history and
-    // the bilinear upsample in `main` expect its sample, with the block's farthest depth. Tracing
-    // through the farthest pixel itself put the sample a quarter texel off the centre (bottom
-    // right when all four depths tie, e.g. sky): every frame's reprojection then read its history
-    // shifted by that quarter texel, a recursive one-directional blur even with a still camera.
-    let uv = in.position.xy / dims;
+    let uv = (texel + 0.5) / dims;
+    let world_pos = get_view_position();
+    let ray_dir_ws = uv_to_ray_direction(uv);
+    var t = sky_ray_length(length(world_pos), dot(ray_dir_ws, normalize(world_pos)));
+    if depth != 0.0 {
+        t = ndc_to_camera_dist(vec3(uv_to_ndc(uv), depth));
+    }
+    return HazeTexelRay(uv, depth, t);
+}
+
+/// Haze march, half of the haze texels per frame (a checkerboard alternating each frame,
+/// compacted to a half-width target so every SIMD group marches): the per-pixel atmosphere
+/// raymarch (or LUT lookup) at one full-res texel of each 2x2 block, plus its ray length as the
+/// upsampling depth key. `haze_resolve` merges it with the history. The march is the dominant
+/// cost of render_sky at full resolution (16 shadowed samples per pixel); the haze is smooth
+/// except at silhouettes, which the depth-aware upsample in `main` handles.
+@if(SKY_HAZE_HALF_RES)
+@fragment
+fn haze(in: FullscreenVertexOutput) -> HazeOutput {
+    // The haze targets are half the viewport or smaller (the cloud buffers' size cap,
+    // `VolumetricCloudSettings::max_render_size`); the history bound here has the full haze size.
+    let dims = vec2<f32>(max(textureDimensions(haze_inscattering), vec2(1u)));
+    let row = i32(in.position.y);
+    let texel = vec2(f32(haze_marched_x(i32(in.position.x), row)), floor(in.position.y));
+    let ray = haze_texel_ray(texel, dims);
+    let uv = ray.uv;
+    let depth = ray.depth;
+    let t = ray.t;
     let samples = settings.sky_max_samples * HAZE_SAMPLE_SCALE;
     // The march's `uv` only drives its jitter noise (uv x full-res viewport = noise pixel). At
     // half resolution that read every other texel of the blue-noise tile, which loses its
@@ -112,11 +153,9 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
     let world_pos = get_view_position();
     let r = length(world_pos);
     let mu = dot(ray_dir_ws, normalize(world_pos));
-    var t: f32;
     var inscattering: vec3<f32>;
     var transmittance: vec3<f32>;
     if depth == 0.0 {
-        t = sky_ray_length(r, mu);
         transmittance = sample_transmittance_lut(r, mu);
         inscattering = sample_sky_view_lut(r, direction_world_to_atmosphere(ray_dir_ws));
         if settings.rendering_method == 1u {
@@ -125,7 +164,6 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
             transmittance = result.transmittance;
         }
     } else {
-        t = ndc_to_camera_dist(vec3(uv_to_ndc(uv), depth));
         inscattering = sample_aerial_view_lut(uv, t);
         transmittance = sample_transmittance_lut_segment(r, mu, t);
         if settings.rendering_method == 1u {
@@ -134,22 +172,115 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
             transmittance = result.transmittance;
         }
     }
+    return HazeOutput(vec4(inscattering, 0.0), vec4(transmittance, t * 0.001));
+}
+
+/// Merges this frame's checkerboard march with the haze history at every haze texel.
+/// - Marched texels blend their new sample into the history.
+/// - The others keep their history, nudged toward a depth-weighted average of their four
+///   marched neighbours (left, right, above, below).
+/// - Where the history is rejected (disocclusion, off screen), texels take their new sample or
+///   that average.
+/// The history is clamped to the range of this frame's nearby samples at the same depth (the
+/// texel's own and its four nearest marched neighbours), as the cloud reconstruction does: with
+/// the light turning 0.3 deg per frame the haze lagged the march by tens of frames (25 dB from
+/// the unaccumulated march at the end of a sweep), the sky staying lit after sunset.
+@if(SKY_HAZE_RESOLVE)
+@fragment
+fn haze_resolve(in: FullscreenVertexOutput) -> HazeOutput {
+    let dims_u = max(textureDimensions(haze_inscattering), vec2(1u));
+    let dims = vec2<f32>(dims_u);
+    let sparse_dims = vec2<i32>(textureDimensions(haze_sparse_inscattering));
+    let p = vec2<i32>(in.position.xy);
+    let ray = haze_texel_ray(floor(in.position.xy), dims);
+    let t_km = ray.t * 0.001;
+    let marched = haze_marched_x(p.x >> 1u, p.y) == p.x;
+
+    // The nearest marched texels: for a marched texel, its four diagonals (the other row parity
+    // and the other column); otherwise left, right (this row's parity) and above, below (the
+    // other row parity, this column).
+    var l = vec3(0.0);
+    var tr = vec3(0.0);
+    var w_sum = 0.0;
+    var best = 1e30;
+    var best_l = vec3(0.0);
+    var best_tr = vec3(1.0);
+    var l_min = vec3(1e30);
+    var l_max = vec3(0.0);
+    var t_min = vec3(1.0);
+    var t_max = vec3(0.0);
+    for (var k = 0; k < 5; k++) {
+        var o: vec2<i32>;
+        if (k == 4) {
+            o = vec2(0);
+        } else if (marched) {
+            o = vec2(select(-1, 1, (k & 1) == 1), select(-1, 1, k >= 2));
+        } else {
+            o = select(select(vec2(0, 1), vec2(0, -1), k == 2), select(vec2(1, 0), vec2(-1, 0), k == 0), k < 2);
+        }
+        let n = clamp(p + o, vec2(0), vec2<i32>(dims_u) - 1);
+        // Clamped at the border, a neighbour may land on a texel not marched this frame.
+        if (haze_marched_x(n.x >> 1u, n.y) != n.x) {
+            continue;
+        }
+        let q = clamp(vec2(n.x >> 1u, n.y), vec2(0), sparse_dims - 1);
+        let tap_l = textureLoad(haze_sparse_inscattering, q, 0).rgb;
+        let tap = textureLoad(haze_sparse_transmittance, q, 0);
+        let rel = abs(tap.a - t_km) / max(t_km, 1e-3);
+        if (k < 4 && !marched) {
+            let w = exp(-rel / 0.1);
+            l += w * tap_l;
+            tr += w * tap.rgb;
+            w_sum += w;
+            if (rel < best) {
+                best = rel;
+                best_l = tap_l;
+                best_tr = tap.rgb;
+            }
+        }
+        if (k == 4) {
+            l = tap_l;
+            tr = tap.rgb;
+        }
+        if (rel < HAZE_DEPTH_TOLERANCE) {
+            l_min = min(l_min, tap_l);
+            l_max = max(l_max, tap_l);
+            t_min = min(t_min, tap.rgb);
+            t_max = max(t_max, tap.rgb);
+        }
+    }
+    var inscattering = l;
+    var transmittance = tr;
+    if (!marched) {
+        inscattering = select(best_l, l / max(w_sum, 1e-6), w_sum >= 1e-3);
+        transmittance = select(best_tr, tr / max(w_sum, 1e-6), w_sum >= 1e-3);
+    }
+
     // Temporal accumulation: reproject the previous frame's haze at the point this ray's haze
     // ends (scene point, or the ray's far end for the sky; rotation dominates for those) and
     // blend, unless the history's ray length disagrees (disocclusion) or it is off screen.
-    let t_km = t * 0.001;
     var use_history = haze_temporal.history_valid != 0u;
     @if(ATM_DBG_NO_HAZE_HISTORY) { use_history = false; }
     if (use_history) {
-        let p_world = (atmosphere.atmosphere_to_world * vec4(world_pos + ray_dir_ws * t, 1.0)).xyz;
+        let world_pos = get_view_position();
+        let ray_dir_ws = uv_to_ray_direction(ray.uv);
+        let p_world = (atmosphere.atmosphere_to_world * vec4(world_pos + ray_dir_ws * ray.t, 1.0)).xyz;
         let prev_clip = haze_temporal.prev_clip_from_world * vec4(p_world, 1.0);
         let prev_uv = (prev_clip.xy / prev_clip.w) * vec2(0.5, -0.5) + vec2(0.5);
         if (prev_clip.w > 0.0 && all(prev_uv >= vec2(0.0)) && all(prev_uv <= vec2(1.0))) {
-            let hist_l = textureSampleLevel(haze_inscattering, atmosphere_lut_sampler, prev_uv, 0.0).rgb;
+            var hist_l = textureSampleLevel(haze_inscattering, atmosphere_lut_sampler, prev_uv, 0.0).rgb;
             let hist_t = textureSampleLevel(haze_transmittance, atmosphere_lut_sampler, prev_uv, 0.0);
             if (abs(hist_t.a - t_km) < HAZE_DEPTH_TOLERANCE * max(t_km, 1e-3)) {
-                inscattering = mix(hist_l, inscattering, HAZE_NEW_SAMPLE_WEIGHT);
-                transmittance = mix(hist_t.rgb, transmittance, HAZE_NEW_SAMPLE_WEIGHT);
+                var hist_tr = hist_t.rgb;
+                @if(!ATM_DBG_NO_HAZE_CLAMP) {
+                if (all(l_max >= l_min)) {
+                    hist_l = clamp(hist_l, l_min, l_max);
+                    hist_tr = clamp(hist_tr, t_min, t_max);
+                }
+                }
+                let w = select(HAZE_FILL_WEIGHT, HAZE_NEW_SAMPLE_WEIGHT, marched);
+                inscattering = mix(hist_l, inscattering, w);
+                transmittance = mix(hist_tr, transmittance, w);
             }
         }
     }
@@ -296,7 +427,18 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
         let c = textureLoad(cloud_texture, p, 0);
         let d = textureLoad(cloud_depth_texture, p, 0).r;
         // Cloud taps behind the scene (upsampling across a silhouette) count as clear sky.
-        let valid = d < scene_t;
+        var valid = d < scene_t;
+        @if(SKY_HAZE_HALF_RES) {
+        // A tap whose march stopped at this pixel's surface holds only cloud in front of it,
+        // whatever its mean depth: the haze texel at the same position (the same size and
+        // footprint as the cloud texel) stores that bound, the farthest scene depth of the
+        // texel. Where a cloud wraps around an object its mean depth lies at the surface, and
+        // the depth test alone kept or dropped whole low-res texels (blocks and pinholes of
+        // cloud on a tower through the layer). Past a silhouette the bound is the background's
+        // and the depth test decides.
+        let bound = textureLoad(haze_transmittance, p, 0).a * 1000.0;
+        valid = valid || bound <= scene_t * (1.0 + HAZE_DEPTH_TOLERANCE);
+        }
         let c_eff = select(vec4(0.0, 0.0, 0.0, 1.0), c, valid);
         clouds += c_eff * bw;
         let opacity = 1.0 - c_eff.a;
@@ -317,7 +459,10 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     @if(!DUAL_SOURCE_BLENDING)
     return RenderSkyOutput(vec4(ref_c.rgb + sun_term, ref_c.a));
     }
-    if clouds.a < 0.999 && cloud_t > 0.0 && cloud_t < scene_t {
+    // Taps behind this pixel's surface were dropped above; the mean depth of those kept may
+    // still lie a little behind it (cloud cut off at the surface), which is no reason to drop
+    // them all (single-pixel holes in cloud in front of geometry).
+    if clouds.a < 0.999 && cloud_t > 0.0 {
         // The cloud pass already applied the (cloud-shadowed) aerial perspective in front of
         // the cloud: clouds.rgb = T_ap * L_c + (1 - T_c) * L_ap.
         let t_c = clouds.a;

@@ -1022,8 +1022,8 @@ fn setup_camera_fog(
         camera.insert(TemporalAntiAliasing::default());
     }
     // `ATMOSPHERE_IBL=1`: the atmosphere drives reflections and ambient lighting (IBL) for this
-    // view (off by default while debugging the clouds).
-    let ibl = std::env::var("ATMOSPHERE_IBL").is_ok();
+    // view (off by default while debugging the clouds; on with `ATMOSPHERE_OBJECTS`).
+    let ibl = std::env::var("ATMOSPHERE_IBL").is_ok() || std::env::var("ATMOSPHERE_OBJECTS").is_ok();
     if ibl {
         camera.insert(AtmosphereEnvironmentMapLight::default());
     }
@@ -1183,6 +1183,62 @@ fn setup_terrain_scene(
                 ..default()
             })),
             Transform::from_xyz(-20_000.0, 2.0, 0.0),
+        ));
+    }
+
+    // `ATMOSPHERE_OBJECTS=1`: meshes to check that clouds sort against geometry and that it is
+    // lit by the sky (turns on `ATMOSPHERE_IBL`): props in front of the default camera, towers
+    // through the cloud layer (base 1.5 km, tops 4 km) and a 3.5 km mountain 22 km away.
+    if std::env::var("ATMOSPHERE_OBJECTS").is_ok() {
+        let material = |color: Color, metallic: f32, roughness: f32| StandardMaterial {
+            base_color: color,
+            metallic,
+            perceptual_roughness: roughness,
+            // The example's default is deferred; the camera has no deferred prepass.
+            opaque_render_method: bevy::material::OpaqueRendererMethod::Forward,
+            ..default()
+        };
+        let props = [
+            (
+                meshes.add(Cuboid::from_length(1.0)),
+                material(Color::srgb(0.8, 0.8, 0.8), 0.0, 0.6),
+                Vec3::new(3.0, 0.5, -1.0),
+            ),
+            (
+                meshes.add(Sphere::new(0.6)),
+                material(Color::srgb(0.8, 0.3, 0.2), 0.0, 0.4),
+                Vec3::new(4.0, 0.6, 1.2),
+            ),
+            (
+                meshes.add(Sphere::new(0.4)),
+                material(Color::srgb(0.9, 0.9, 0.9), 1.0, 0.15),
+                Vec3::new(2.5, 0.4, 0.4),
+            ),
+        ];
+        let tower = meshes.add(Cylinder::new(150.0, 6000.0));
+        let tower_material = std_materials.add(material(Color::srgb(0.5, 0.5, 0.55), 0.0, 0.8));
+        for (mesh, material, position) in props {
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(std_materials.add(material)),
+                Transform::from_translation(position),
+            ));
+        }
+        for position in [
+            Vec3::new(4_000.0, 3_000.0, -1_500.0),
+            Vec3::new(9_000.0, 3_000.0, 2_500.0),
+            Vec3::new(15_000.0, 3_000.0, -4_000.0),
+        ] {
+            commands.spawn((
+                Mesh3d(tower.clone()),
+                MeshMaterial3d(tower_material.clone()),
+                Transform::from_translation(position),
+            ));
+        }
+        commands.spawn((
+            Mesh3d(meshes.add(Cone::new(7_000.0, 3_500.0))),
+            MeshMaterial3d(std_materials.add(material(Color::srgb(0.35, 0.33, 0.3), 0.0, 1.0))),
+            Transform::from_xyz(20_000.0, 1_750.0, 9_000.0),
         ));
     }
 

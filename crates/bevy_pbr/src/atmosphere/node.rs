@@ -916,14 +916,16 @@ pub fn render_sky(
         }
     }
 
-    // Half-resolution haze prepass (render_sky.wesl `haze`): the per-pixel atmosphere march at
-    // half resolution, upsampled depth-aware by render_sky. Same bind group layout as render_sky
-    // (cloud and geometry shadows), with placeholders in the haze slots it writes.
-    if let (Some(haze_id), Some(haze_bg), Some(cloud_offset)) = (
+    // Half-resolution haze prepass (render_sky.wesl `haze`, `haze_resolve`): the per-pixel
+    // atmosphere march at half resolution, half of its texels per frame (checkerboard), merged
+    // with the history by the resolve; upsampled depth-aware by render_sky.
+    if let (Some(haze_id), Some(haze_bg), Some(resolve_bg), Some(cloud_offset)) = (
         haze_pipeline_id,
         atmosphere_bind_groups.render_sky_haze.as_ref(),
+        atmosphere_bind_groups.render_sky_haze_resolve.as_ref(),
         cloud_layer_uniforms_offset.as_ref(),
-    ) && let Some(haze_pipeline) = pipeline_cache.get_render_pipeline(haze_id.0)
+    ) && let Some(haze_pipeline) = pipeline_cache.get_render_pipeline(haze_id.march)
+        && let Some(resolve_pipeline) = pipeline_cache.get_render_pipeline(haze_id.resolve)
     {
         fn attachment(
             view: &bevy_render::render_resource::TextureView,
@@ -941,8 +943,8 @@ pub fn render_sky(
         let mut haze_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("render_sky_haze"),
             color_attachments: &[
-                attachment(&textures.haze_inscattering.default_view),
-                attachment(&textures.haze_transmittance.default_view),
+                attachment(&textures.haze_sparse_inscattering.default_view),
+                attachment(&textures.haze_sparse_transmittance.default_view),
             ],
             depth_stencil_attachment: None,
             timestamp_writes: super::gpu_timing::render(&timing_device, "render_sky_haze"),
@@ -964,6 +966,31 @@ pub fn render_sky(
         );
         haze_pass.draw(0..3, 0..1);
         drop(haze_pass);
+        let mut resolve_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("render_sky_haze_resolve"),
+            color_attachments: &[
+                attachment(&textures.haze_inscattering.default_view),
+                attachment(&textures.haze_transmittance.default_view),
+            ],
+            depth_stencil_attachment: None,
+            timestamp_writes: super::gpu_timing::render(&timing_device, "render_sky_haze_resolve"),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        resolve_pass.set_pipeline(resolve_pipeline);
+        resolve_pass.set_bind_group(
+            0,
+            resolve_bg,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+            ],
+        );
+        resolve_pass.draw(0..3, 0..1);
+        drop(resolve_pass);
         haze_written = Some(textures.haze_inscattering.texture.id());
     }
     history_writes.record(

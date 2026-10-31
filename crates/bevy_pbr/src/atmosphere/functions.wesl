@@ -619,8 +619,15 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
         var cloud_sun_t = 1.0;
         @if(CLOUDS_ENABLED && !ATM_DBG_NOSHADOW) {
         // Compute volumetric shadow from clouds via the cloud shadow map (stable at grazing angles).
-        cloud_sun_t = sample_cloud_shadow_map(world_pos, (*light).direction_to_light, false);
-        shadow_factor *= cloud_sun_t;
+        // Above every cloud layer with the light above the horizon, nothing lies between the
+        // point and the light. Most samples of a sky ray are up there (quadratic spacing), and
+        // each lookup was a 4-tap shadow-map read, or a density march off the map.
+        let above_clouds = mu_light >= 0.0
+            && local_r > max(cloud_layer.cloud_layer_end, settings.cloud_thin_shadow_max_radius);
+        if (!above_clouds) {
+            cloud_sun_t = sample_cloud_shadow_map(world_pos, (*light).direction_to_light, false);
+            shadow_factor *= cloud_sun_t;
+        }
         }
 
         // With CLOUD_PASS (render_sky), clouds are integrated by the dedicated low-res
