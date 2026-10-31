@@ -9,6 +9,7 @@ struct FilteringConstants {
     sample_count: u32,
     roughness: f32,
     noise_size_bits: vec2u,
+    face_offset: u32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d_array<f32>;
@@ -60,7 +61,7 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     let invSize = 1.0 / vec2f(size);
 
     let coords = vec2u(global_id.xy);
-    let face = global_id.z;
+    let face = global_id.z + constants.face_offset;
 
     if (any(coords >= size)) {
         return;
@@ -148,7 +149,7 @@ fn generate_irradiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     let invSize = 1.0 / vec2f(size);
 
     let coords = vec2u(global_id.xy);
-    let face = global_id.z;
+    let face = global_id.z + constants.face_offset;
 
     if (any(coords >= size)) {
         return;

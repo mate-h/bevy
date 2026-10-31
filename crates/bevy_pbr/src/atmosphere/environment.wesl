@@ -19,11 +19,17 @@ import package::{
 @group(0) @binding(13) var output: texture_storage_2d_array<rgba16float, write>;
 
 @compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+) {
     let dimensions = textureDimensions(output);
-    let slice_index = global_id.z;
-    
-    if (global_id.x >= dimensions.x || global_id.y >= dimensions.y || slice_index >= 6u) {
+    // Each frame renders `num_workgroups.z` of the six faces, cycling through them. These are the
+    // faces the environment map filter takes next frame (`EnvironmentMapFilterSlicing`): it runs
+    // before this pass.
+    let slice_index = ((view.frame_count + 1u) * num_workgroups.z + global_id.z) % 6u;
+
+    if (global_id.x >= dimensions.x || global_id.y >= dimensions.y || global_id.z >= 6u) {
         return;
     }
     

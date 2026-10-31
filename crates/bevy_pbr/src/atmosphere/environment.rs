@@ -38,14 +38,25 @@ use bevy_utils::default;
 use tracing::warn;
 
 use crate::detail_noise::DetailNoiseTexture;
+use crate::generate::EnvironmentMapFilterSlicing;
 use crate::fbm_noise::FbmNoiseTexture;
 use crate::perlin_worley_noise::PerlinWorleyNoiseTexture;
 use crate::GpuScatteringMedium;
 
+/// How many of the six cubemap faces the atmosphere environment map renders each frame. The
+/// raymarched sky and clouds are the bulk of the probe's cost and change slowly, so the faces are
+/// spread over frames, and so is their filtering ([`EnvironmentMapFilterSlicing`]). Must divide 6.
+const ENVIRONMENT_FACES_PER_FRAME: u32 = 1;
+
 // Render world representation of an environment map light for the atmosphere
 #[derive(Component, ExtractComponent, Clone, FromTemplate)]
 #[extract_app(RenderApp)]
-#[extract_component_sync_target((Self, AtmosphereProbeTextures, AtmosphereProbeBindGroups))]
+#[extract_component_sync_target((
+    Self,
+    AtmosphereProbeTextures,
+    AtmosphereProbeBindGroups,
+    EnvironmentMapFilterSlicing
+))]
 pub struct AtmosphereEnvironmentMap {
     pub environment_map: Handle<Image>,
     pub size: UVec2,
@@ -404,6 +415,10 @@ pub(super) fn prepare_probe_textures(
             weather_window_art: view_textures.weather_window_art.clone(),
             weather_window_physical: view_textures.weather_window_physical.clone(),
         });
+        // Filter the faces at the pace they are rendered.
+        commands.entity(probe).insert(EnvironmentMapFilterSlicing {
+            faces_per_frame: ENVIRONMENT_FACES_PER_FRAME,
+        });
     }
 }
 
@@ -630,7 +645,7 @@ pub fn atmosphere_environment(
         pass.dispatch_workgroups(
             env_map_light.size.x / 8,
             env_map_light.size.y / 8,
-            6, // 6 cubemap faces
+            ENVIRONMENT_FACES_PER_FRAME,
         );
     }
 

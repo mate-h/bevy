@@ -62,6 +62,7 @@ use bevy_render::{
 
 use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight};
 use bevy_shader::ShaderDefVal;
+use bevy_diagnostic::FrameCount;
 use core::cmp::min;
 use tracing::info;
 
@@ -453,6 +454,24 @@ pub struct FilteringConstants {
     sample_count: u32,
     roughness: f32,
     noise_size_bits: UVec2,
+    /// The first cubemap face this frame's dispatches filter ([`EnvironmentMapFilterSlicing`]).
+    face_offset: u32,
+}
+
+/// Spreads the filtering of a generated environment map over frames: each frame filters
+/// `faces_per_frame` of the six faces, cycling through them, instead of all six.
+///
+/// For a source cubemap that is itself rendered a few faces per frame and changes slowly, such as
+/// the atmosphere's. Render world only. `faces_per_frame` must divide 6.
+#[derive(Component, Clone, Copy)]
+pub struct EnvironmentMapFilterSlicing {
+    pub faces_per_frame: u32,
+}
+
+impl EnvironmentMapFilterSlicing {
+    fn faces(slicing: Option<&Self>) -> u32 {
+        slicing.map_or(6, |slicing| slicing.faces_per_frame)
+    }
 }
 
 /// Stores bind groups for the environment map generation pipelines
@@ -467,7 +486,13 @@ pub struct GeneratorBindGroups {
 
 /// Prepares bind groups for environment map generation pipelines
 pub fn prepare_generated_environment_map_bind_groups(
-    light_probes: Query<(Entity, &IntermediateTextures, &RenderEnvironmentMap)>,
+    light_probes: Query<(
+        Entity,
+        &IntermediateTextures,
+        &RenderEnvironmentMap,
+        Option<&EnvironmentMapFilterSlicing>,
+    )>,
+    frame_count: Res<FrameCount>,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
@@ -495,7 +520,9 @@ pub fn prepare_generated_environment_map_bind_groups(
         stbn_texture.texture_descriptor.size.height.trailing_zeros(),
     );
 
-    for (entity, textures, env_map_light) in &light_probes {
+    for (entity, textures, env_map_light, slicing) in &light_probes {
+        let face_offset = (frame_count.0 * EnvironmentMapFilterSlicing::faces(slicing)) % 6;
+
         // Determine mip chain based on input size
         let base_size = env_map_light.environment_map.texture_descriptor.size.width;
         let mip_count = compute_mip_count(base_size);
@@ -627,6 +654,7 @@ pub fn prepare_generated_environment_map_bind_groups(
                 sample_count,
                 roughness,
                 noise_size_bits,
+                face_offset,
             };
 
             let mut radiance_constants_buffer = UniformBuffer::from(radiance_constants);
@@ -659,6 +687,7 @@ pub fn prepare_generated_environment_map_bind_groups(
             sample_count: 1024,
             roughness: 1.0,
             noise_size_bits,
+            face_offset,
         };
 
         let mut irradiance_constants_buffer = UniformBuffer::from(irradiance_constants);
@@ -850,7 +879,11 @@ pub fn downsampling_system(
 }
 
 pub fn filtering_system(
-    query: Query<(&GeneratorBindGroups, &RenderEnvironmentMap)>,
+    query: Query<(
+        &GeneratorBindGroups,
+        &RenderEnvironmentMap,
+        Option<&EnvironmentMapFilterSlicing>,
+    )>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Option<Res<GeneratorPipelines>>,
     mut ctx: RenderContext,
@@ -870,7 +903,9 @@ pub fn filtering_system(
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
 
-    for (bind_groups, env_map_light) in &query {
+    for (bind_groups, env_map_light, slicing) in &query {
+        let faces = EnvironmentMapFilterSlicing::faces(slicing);
+
         // Radiance convolution pass
         {
             let mut compute_pass =
@@ -894,8 +929,7 @@ pub fn filtering_system(
                 let mip_size = base_size >> mip;
                 let workgroup_count = mip_size.div_ceil(8);
 
-                // Dispatch for all 6 faces
-                compute_pass.dispatch_workgroups(workgroup_count, workgroup_count, 6);
+                compute_pass.dispatch_workgroups(workgroup_count, workgroup_count, faces);
             }
 
             pass_span.end(&mut compute_pass);
@@ -916,8 +950,8 @@ pub fn filtering_system(
             compute_pass.set_pipeline(irradiance_pipeline);
             compute_pass.set_bind_group(0, &bind_groups.irradiance, &[]);
 
-            // 32×32 texture processed with 8×8 workgroups for all 6 faces
-            compute_pass.dispatch_workgroups(4, 4, 6);
+            // 32×32 texture processed with 8×8 workgroups
+            compute_pass.dispatch_workgroups(4, 4, faces);
 
             irr_span.end(&mut compute_pass);
         }
