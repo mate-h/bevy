@@ -129,6 +129,8 @@ pub struct ExtractedDirectionalLight {
     pub occlusion_culling: bool,
     pub sun_disk_angular_size: f32,
     pub sun_disk_intensity: f32,
+    /// Angular diameter of the light in radians. See [`DirectionalLight::angular_size`].
+    pub angular_size: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wesl!
@@ -169,6 +171,9 @@ pub struct GpuDirectionalLight {
     decal_index: u32,
     sun_disk_angular_size: f32,
     sun_disk_intensity: f32,
+    /// Cosine and sine of the angular radius (half the angular size).
+    cos_angular_radius: f32,
+    sin_angular_radius: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wesl!
@@ -871,6 +876,7 @@ pub fn extract_lights(
             occlusion_culling,
             sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
             sun_disk_intensity: sun_disk.unwrap_or_default().intensity,
+            angular_size: directional_light.angular_size,
         };
 
         let mut entity_commands = commands
@@ -1824,6 +1830,8 @@ pub fn prepare_lights(
                 depth_texture_base_index: num_directional_cascades_enabled_for_this_view as u32,
                 sun_disk_angular_size: light.sun_disk_angular_size,
                 sun_disk_intensity: light.sun_disk_intensity,
+                cos_angular_radius: ops::cos(light.angular_size.max(0.0) * 0.5),
+                sin_angular_radius: ops::sin(light.angular_size.max(0.0) * 0.5),
                 decal_index: decals
                     .as_ref()
                     .and_then(|decals| decals.get(*light_entity))

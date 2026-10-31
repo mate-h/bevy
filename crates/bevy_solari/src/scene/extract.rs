@@ -13,9 +13,7 @@ use bevy_ecs::{
     system::{Commands, Query, Res, ResMut},
 };
 use bevy_image::Image;
-use bevy_light::{
-    DirectionalLight, EnvironmentMapLight, PointLight, RectLight, SpotLight, SunDisk,
-};
+use bevy_light::{DirectionalLight, EnvironmentMapLight, PointLight, RectLight, SpotLight};
 use bevy_math::{ops::cos, Quat, Vec3};
 use bevy_pbr::{MeshMaterial3d, PreviousGlobalTransform, StandardMaterial};
 use bevy_platform::collections::HashMap;
@@ -179,7 +177,7 @@ pub fn extract_raytracing_material_assets(
 pub struct ExtractedRaytracingDirectionalLight {
     pub direction_to_light: Vec3,
     pub illuminance: Vec3,
-    pub sun_disk_angular_size: f32,
+    pub angular_size: f32,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
@@ -243,22 +241,11 @@ pub fn extract_raytracing_directional_lights(
                 &DirectionalLight,
                 &GlobalTransform,
                 &InheritedVisibility,
-                Option<&SunDisk>,
             ),
-            Or<(ChangedLightFilter<DirectionalLight>, Changed<SunDisk>)>,
+            ChangedLightFilter<DirectionalLight>,
         >,
     >,
-    directional_lights: Extract<
-        Query<(
-            RenderEntity,
-            &DirectionalLight,
-            &GlobalTransform,
-            &InheritedVisibility,
-            Option<&SunDisk>,
-        )>,
-    >,
     mut removed_directional_lights: Extract<RemovedComponents<DirectionalLight>>,
-    mut removed_sun_disks: Extract<RemovedComponents<SunDisk>>,
     render_entities: Extract<Query<RenderEntity>>,
     mut commands: Commands,
 ) {
@@ -271,15 +258,7 @@ pub fn extract_raytracing_directional_lights(
         }
     }
 
-    // Removing a light's SunDisk changes its angular size back to the default, but no change
-    // filter fires for a component that no longer exists, so re-extract those lights too
-    let sun_disk_removed = removed_sun_disks
-        .read()
-        .filter_map(|main_entity| directional_lights.get(main_entity).ok());
-
-    for (render_entity, directional_light, transform, visibility, sun_disk) in
-        changed_directional_lights.iter().chain(sun_disk_removed)
-    {
+    for (render_entity, directional_light, transform, visibility) in &changed_directional_lights {
         let mut entity_commands = commands.entity(render_entity);
         if !visibility.get() {
             entity_commands.remove::<ExtractedRaytracingDirectionalLight>();
@@ -290,7 +269,7 @@ pub fn extract_raytracing_directional_lights(
             direction_to_light: transform.back().into(),
             illuminance: LinearRgba::from(directional_light.color).to_vec3()
                 * directional_light.illuminance,
-            sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
+            angular_size: directional_light.angular_size,
         });
     }
 }

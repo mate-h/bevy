@@ -85,6 +85,18 @@ pub struct DirectionalLight {
     /// The default is [`light_consts::lux::AMBIENT_DAYLIGHT`] = 10,000.
     pub illuminance: f32,
 
+    /// The angular diameter of the light source in radians, as seen from the
+    /// scene.
+    ///
+    /// A non-zero size shades the light as a uniformly bright disk, which
+    /// widens and softens specular highlights on smooth surfaces. The
+    /// [`illuminance`](Self::illuminance) is unchanged, so the total light
+    /// stays the same. Use [`DirectionalLight::SUN_ANGULAR_SIZE`] for the sun
+    /// as seen from Earth.
+    ///
+    /// The default is `0.0`, an infinitely small light.
+    pub angular_size: f32,
+
     /// Whether this light casts shadows.
     ///
     /// Note that shadows are rather expensive and become more so with every
@@ -149,6 +161,7 @@ impl Default for DirectionalLight {
         DirectionalLight {
             color: Color::WHITE,
             illuminance: light_consts::lux::AMBIENT_DAYLIGHT,
+            angular_size: 0.0,
             shadow_maps_enabled: false,
             contact_shadows_enabled: false,
             shadow_depth_bias: Self::DEFAULT_SHADOW_DEPTH_BIAS,
@@ -165,6 +178,9 @@ impl DirectionalLight {
     pub const DEFAULT_SHADOW_DEPTH_BIAS: f32 = 0.02;
     /// The default value of [`DirectionalLight::shadow_normal_bias`].
     pub const DEFAULT_SHADOW_NORMAL_BIAS: f32 = 1.8;
+    /// The mean angular diameter of the sun seen from Earth (~32 arcminutes),
+    /// in radians. Matches [`SunDisk::EARTH`].
+    pub const SUN_ANGULAR_SIZE: f32 = 0.00930842;
 }
 
 /// Add to a [`DirectionalLight`] to add a light texture effect.

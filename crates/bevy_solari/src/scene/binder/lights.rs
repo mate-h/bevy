@@ -10,7 +10,10 @@ use bevy_render::render_resource::{AtomicSparseBufferVec, BufferUsages};
 use bevy_render::{impl_atomic_pod, render_resource::AtomicPod};
 use bytemuck::{Pod, Zeroable};
 use core::sync::atomic::{AtomicBool, Ordering};
-use core::{f32::consts::TAU, hash::Hash};
+use core::{
+    f32::consts::{PI, TAU},
+    hash::Hash,
+};
 
 const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 
@@ -165,11 +168,17 @@ impl_atomic_pod!(GpuRectLight, GpuRectLightBlob);
 
 impl GpuDirectionalLight {
     fn new(directional_light: &ExtractedRaytracingDirectionalLight) -> Self {
-        let cos_theta_max = cos(directional_light.sun_disk_angular_size / 2.0);
+        let cos_theta_max = cos(directional_light.angular_size / 2.0);
         let solid_angle = TAU * (1.0 - cos_theta_max);
 
+        // `illuminance` is measured at normal incidence. A uniform disk of angular
+        // radius r gives E = L π sin²(r), slightly less than L × solid angle.
+        let sin_squared = 1.0 - cos_theta_max * cos_theta_max;
         let (luminance, inverse_pdf) = if solid_angle > 0.0 {
-            (directional_light.illuminance / solid_angle, solid_angle)
+            (
+                directional_light.illuminance / (PI * sin_squared),
+                solid_angle,
+            )
         } else {
             (directional_light.illuminance, 1.0)
         };
