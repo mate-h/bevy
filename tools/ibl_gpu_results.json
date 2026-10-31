@@ -1,0 +1,180 @@
+{
+  "gpu": "Apple M5 / Metal",
+  "resolution": [
+    640,
+    640
+  ],
+  "case": "narrow_back_r50",
+  "method": "xctrace Metal System Trace; warmed 8\u201312 seconds; opaque pass including sphere and skybox; central 80% of complete encoder executions; two runs in reversed order",
+  "trace_seconds": 3,
+  "runs": [
+    {
+      "filter": "karis",
+      "samples": 0,
+      "repeat": 1,
+      "envelope_ms": {
+        "observations": 208,
+        "mean_ms": 0.2420176346153846,
+        "median_ms": 0.240188,
+        "p95_ms": 0.264167
+      },
+      "fragment_active_ms": {
+        "observations": 208,
+        "mean_ms": 0.22159819230769232,
+        "median_ms": 0.219625,
+        "p95_ms": 0.243584
+      },
+      "vertex_active_ms": {
+        "observations": 208,
+        "mean_ms": 0.019883,
+        "median_ms": 0.019708,
+        "p95_ms": 0.021125
+      },
+      "warmup_seconds": 8
+    },
+    {
+      "filter": "fis",
+      "samples": 64,
+      "repeat": 1,
+      "envelope_ms": {
+        "observations": 204,
+        "mean_ms": 3.2021768921568627,
+        "median_ms": 3.193083,
+        "p95_ms": 3.572542
+      },
+      "fragment_active_ms": {
+        "observations": 204,
+        "mean_ms": 3.181637882352941,
+        "median_ms": 3.1727914999999998,
+        "p95_ms": 3.55225
+      },
+      "vertex_active_ms": {
+        "observations": 204,
+        "mean_ms": 0.02006471568627451,
+        "median_ms": 0.0198125,
+        "p95_ms": 0.021291
+      },
+      "warmup_seconds": 8
+    },
+    {
+      "filter": "fis",
+      "samples": 256,
+      "repeat": 1,
+      "warmup_seconds": 12,
+      "envelope_ms": {
+        "observations": 145,
+        "mean_ms": 3.4034358896551726,
+        "median_ms": 3.183958,
+        "p95_ms": 6.221375
+      },
+      "fragment_active_ms": {
+        "observations": 145,
+        "mean_ms": 3.3969424413793106,
+        "median_ms": 3.178416,
+        "p95_ms": 6.214583
+      },
+      "vertex_active_ms": {
+        "observations": 145,
+        "mean_ms": 0.006177006896551724,
+        "median_ms": 0.005792,
+        "p95_ms": 0.00675
+      },
+      "adapter": "Apple M5"
+    },
+    {
+      "filter": "fis",
+      "samples": 256,
+      "repeat": 2,
+      "warmup_seconds": 12,
+      "envelope_ms": {
+        "observations": 187,
+        "mean_ms": 7.919176946524064,
+        "median_ms": 7.917291,
+        "p95_ms": 9.619458
+      },
+      "fragment_active_ms": {
+        "observations": 187,
+        "mean_ms": 7.896532304812834,
+        "median_ms": 7.905791,
+        "p95_ms": 9.604833
+      },
+      "vertex_active_ms": {
+        "observations": 187,
+        "mean_ms": 0.013276085561497326,
+        "median_ms": 0.014042,
+        "p95_ms": 0.01475
+      },
+      "adapter": "Apple M5"
+    },
+    {
+      "filter": "fis",
+      "samples": 64,
+      "repeat": 2,
+      "warmup_seconds": 12,
+      "envelope_ms": {
+        "observations": 208,
+        "mean_ms": 3.1743736153846154,
+        "median_ms": 3.1583125,
+        "p95_ms": 3.554916
+      },
+      "fragment_active_ms": {
+        "observations": 208,
+        "mean_ms": 3.153491971153846,
+        "median_ms": 3.137875,
+        "p95_ms": 3.534125
+      },
+      "vertex_active_ms": {
+        "observations": 208,
+        "mean_ms": 0.019972,
+        "median_ms": 0.019792,
+        "p95_ms": 0.021083
+      },
+      "adapter": "Apple M5"
+    },
+    {
+      "filter": "karis",
+      "samples": 0,
+      "repeat": 2,
+      "warmup_seconds": 12,
+      "envelope_ms": {
+        "observations": 203,
+        "mean_ms": 0.2447197684729064,
+        "median_ms": 0.2415,
+        "p95_ms": 0.266167
+      },
+      "fragment_active_ms": {
+        "observations": 203,
+        "mean_ms": 0.22411899014778325,
+        "median_ms": 0.220916,
+        "p95_ms": 0.2455
+      },
+      "vertex_active_ms": {
+        "observations": 203,
+        "mean_ms": 0.019690433497536946,
+        "median_ms": 0.019666,
+        "p95_ms": 0.020042
+      },
+      "adapter": "Apple M5"
+    }
+  ],
+  "limitations": [
+    "Single narrow/back/roughness 0.5 scene at 640\u00d7640 on Apple M5; not a full-screen material benchmark.",
+    "GPU clocks are not fixed. The 256-sample timings vary substantially alongside vertex timings; these runs do not establish a precise sample-count scaling ratio.",
+    "GPU encoder envelopes and active fragment intervals exclude CPU encoding time, submission latency, and whole-frame presentation time."
+  ],
+  "median_gpu_envelope_ms_by_variant": {
+    "karis_0": [
+      0.240188,
+      0.2415
+    ],
+    "fis_64": [
+      3.193083,
+      3.1583125
+    ],
+    "fis_256": [
+      3.183958,
+      7.917291
+    ]
+  },
+  "trace_cleanup": "All trace bundles and raw XML exports deleted; only compact timing summaries retained."
+}

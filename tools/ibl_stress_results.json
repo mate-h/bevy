@@ -1,0 +1,192 @@
+{
+  "gpu": "Apple M5 / Metal",
+  "source_face_size": 256,
+  "fis_samples": 64,
+  "pathtracer_samples": 512,
+  "measurement": "Linear exposed light, tonemapping off, sphere pixels, existing 2% lit / 20% core thresholds. Bias = (pathtracer - candidate) / candidate. Existing Karis and Manson-Sloan logs reused. Masks depend on candidate peak.",
+  "fis_radiance_mips": "Box averages of sharp mip 0, RGB9E5, MipMajor",
+  "cases": [
+    {
+      "case": "furnace_back_r50",
+      "karis": {
+        "lit_relative_rmse": 0.0119,
+        "block4_relative_rmse": 0.0071,
+        "luminance_bias": -0.0001,
+        "core_bias": -0.0,
+        "skirt_bias": null
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.0119,
+        "block4_relative_rmse": 0.0071,
+        "luminance_bias": 0.0009,
+        "core_bias": 0.001,
+        "skirt_bias": null
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.0149,
+        "block4_relative_rmse": 0.0116,
+        "luminance_bias": -0.0078,
+        "core_bias": -0.008,
+        "skirt_bias": null
+      }
+    },
+    {
+      "case": "wide_front_r20",
+      "karis": {
+        "lit_relative_rmse": 0.0509,
+        "block4_relative_rmse": 0.0467,
+        "luminance_bias": 0.0056,
+        "core_bias": 0.021,
+        "skirt_bias": -0.326
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.0436,
+        "block4_relative_rmse": 0.0393,
+        "luminance_bias": 0.0043,
+        "core_bias": 0.009,
+        "skirt_bias": -0.22
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.0177,
+        "block4_relative_rmse": 0.0096,
+        "luminance_bias": 0.0021,
+        "core_bias": 0.003,
+        "skirt_bias": -0.013
+      }
+    },
+    {
+      "case": "wide_front_r50",
+      "karis": {
+        "lit_relative_rmse": 0.1278,
+        "block4_relative_rmse": 0.1316,
+        "luminance_bias": 0.0364,
+        "core_bias": 0.034,
+        "skirt_bias": 0.031
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.1345,
+        "block4_relative_rmse": 0.1388,
+        "luminance_bias": 0.0449,
+        "core_bias": 0.033,
+        "skirt_bias": 0.115
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.0637,
+        "block4_relative_rmse": 0.0456,
+        "luminance_bias": -0.0064,
+        "core_bias": 0.0,
+        "skirt_bias": -0.031
+      }
+    },
+    {
+      "case": "wide_back_r50",
+      "karis": {
+        "lit_relative_rmse": 0.2126,
+        "block4_relative_rmse": 0.2163,
+        "luminance_bias": -0.098,
+        "core_bias": -0.054,
+        "skirt_bias": -0.353
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.2155,
+        "block4_relative_rmse": 0.2183,
+        "luminance_bias": -0.0819,
+        "core_bias": -0.054,
+        "skirt_bias": -0.286
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.0598,
+        "block4_relative_rmse": 0.032,
+        "luminance_bias": 0.0181,
+        "core_bias": 0.017,
+        "skirt_bias": 0.022
+      }
+    },
+    {
+      "case": "narrow_front_r20",
+      "karis": {
+        "lit_relative_rmse": 0.1864,
+        "block4_relative_rmse": 0.1605,
+        "luminance_bias": -0.0192,
+        "core_bias": 0.059,
+        "skirt_bias": -0.212
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.1546,
+        "block4_relative_rmse": 0.1349,
+        "luminance_bias": -0.0169,
+        "core_bias": 0.017,
+        "skirt_bias": -0.234
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.0537,
+        "block4_relative_rmse": 0.0189,
+        "luminance_bias": -0.0193,
+        "core_bias": -0.008,
+        "skirt_bias": -0.002
+      }
+    },
+    {
+      "case": "narrow_front_r50",
+      "karis": {
+        "lit_relative_rmse": 0.4148,
+        "block4_relative_rmse": 0.3473,
+        "luminance_bias": 0.0043,
+        "core_bias": 0.042,
+        "skirt_bias": -0.055
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.4428,
+        "block4_relative_rmse": 0.3986,
+        "luminance_bias": -0.1344,
+        "core_bias": -0.148,
+        "skirt_bias": -0.103
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.2492,
+        "block4_relative_rmse": 0.1305,
+        "luminance_bias": -0.0943,
+        "core_bias": -0.043,
+        "skirt_bias": -0.113
+      }
+    },
+    {
+      "case": "narrow_back_r50",
+      "karis": {
+        "lit_relative_rmse": 0.8768,
+        "block4_relative_rmse": 0.8374,
+        "luminance_bias": -0.2451,
+        "core_bias": 0.072,
+        "skirt_bias": -0.748
+      },
+      "manson_sloan": {
+        "lit_relative_rmse": 0.7576,
+        "block4_relative_rmse": 0.7273,
+        "luminance_bias": -0.354,
+        "core_bias": -0.159,
+        "skirt_bias": -0.79
+      },
+      "fis_64": {
+        "lit_relative_rmse": 0.2304,
+        "block4_relative_rmse": 0.2009,
+        "luminance_bias": -0.1341,
+        "core_bias": -0.041,
+        "skirt_bias": -0.098
+      }
+    }
+  ],
+  "convergence_check": {
+    "case": "narrow_back_r50",
+    "samples": 256,
+    "lit_relative_rmse": 0.2131,
+    "block4_relative_rmse": 0.1755,
+    "luminance_bias": -0.0381,
+    "core_bias": -0.015,
+    "skirt_bias": -0.016
+  },
+  "limitations": [
+    "GPU execution time measured separately for narrow/back/0.5 at 640\u00d7640; see ibl_gpu_results.json. Other stress cases have image-error measurements only.",
+    "64 samples slightly worsen furnace error and narrow/front/0.5 skirt bias; this remains opt-in.",
+    "Convergence check covers narrow/back/0.5 only; clearcoat and parallax probes are not in this stress set."
+  ]
+}

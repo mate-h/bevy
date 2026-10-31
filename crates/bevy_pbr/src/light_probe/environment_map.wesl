@@ -5,7 +5,7 @@ import package::render::mesh_view_types::{
     LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, LIGHT_PROBE_FLAG_PARALLAX_CORRECT,
     LIGHT_PROBE_FLAG_MANSON_SLOAN_ENVIRONMENT_IBL
 };
-import package::render::pbr_lighting::{F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT};
+import package::render::pbr_lighting::{D_GGX, V_SmithGGXCorrelated, sample_visible_ggx, ggx_vndf_pdf, F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT};
 import package::render::clustered_forward::ClusterableObjectIndexRanges;
 import bevy_render::maths::quat_rotate;
 
@@ -20,12 +20,71 @@ struct EnvironmentMapLight {
 struct EnvironmentMapRadiances {
     irradiance: vec3<f32>,
     radiance: vec3<f32>,
+    fresnel_radiance: vec3<f32>,
 }
 
-struct MultiscatterResult {
-    FssEss: vec3<f32>,
-    FmsEms: vec3<f32>,
-    Edss: vec3<f32>,
+// https://developer.nvidia.com/gpugems/gpugems3/part-iii-rendering/chapter-20-gpu-based-importance-sampling
+// Experimental shade-time FIS. The reflection_probes harness enables this only
+// when it binds an ordinary box-filtered radiance pyramid, never a GGX chain.
+const SHADE_TIME_FIS: bool = false;
+const FIS_SAMPLES: u32 = 64u;
+
+// Integrate both Schlick coefficients so Fresnel remains inside the integral.
+// Bounded visible-normal sampling and its matching reflected-direction PDF are
+// shared with the renderer. Below-horizon samples contribute zero, not a
+// renormalized weight. The correlated Smith BRDF matches the pathtracer.
+fn filtered_importance_radiance(
+    map: texture_cube<f32>,
+    input: LayerLightingInput,
+    world_position: vec3<f32>,
+    light_from_world: mat4x4<f32>,
+    bounds: vec3<f32>,
+    parallax_correct: bool,
+    rotation: vec4<f32>,
+) -> mat2x3<f32> {
+    let N = input.N;
+    let V = normalize(2.0 * input.NdotV * N - input.R);
+    let NoV = max(dot(N, V), 0.0001);
+    let alpha = max(input.roughness, 0.001);
+    let local_V = vec3(sqrt(max(0.0, 1.0 - NoV * NoV)), 0.0, NoV);
+    let size = f32(textureDimensions(map, 0).x);
+    let texel_solid_angle = 12.56637061436 / (6.0 * size * size);
+    var a = vec3(0.0);
+    var b = vec3(0.0);
+    for (var i = 0u; i < FIS_SAMPLES; i++) {
+        let xi = vec2((f32(i) + 0.5) / f32(FIS_SAMPLES),
+            f32(reverseBits(i)) * 2.3283064365386963e-10);
+        let L = sample_visible_ggx(xi, alpha, N, V);
+        let NoL = dot(N, L);
+        if NoL <= 0.0 { continue; }
+        let H = normalize(V + L);
+        let NoH = max(dot(N, H), 0.0);
+        let pdf = max(ggx_vndf_pdf(local_V, NoH, alpha), 1e-8);
+        let sample_solid_angle = 1.0 / (f32(FIS_SAMPLES) * pdf);
+        let lod = clamp(0.5 * log2(sample_solid_angle / texel_solid_angle),
+            0.0, f32(textureNumLevels(map) - 1u));
+        let direction = compute_cubemap_sample_dir(world_position, L,
+            light_from_world, bounds, parallax_correct, rotation);
+        let Li = textureSampleLevel(map, bindings::environment_map_sampler, direction, lod).rgb;
+        let weight = D_GGX(alpha, NoH) * V_SmithGGXCorrelated(alpha, NoV, NoL) * NoL / pdf;
+        let Fc = pow(1.0 - saturate(dot(V, H)), 5.0);
+        a += Li * (weight * (1.0 - Fc));
+        b += Li * (weight * Fc);
+    }
+    return mat2x3(a / f32(FIS_SAMPLES), b / f32(FIS_SAMPLES));
+}
+
+/// Split-sum weight with the same multiple-scattering compensation as
+/// `specular_multiscatter` and the pathtracer. Energy missing from the single
+/// scatter is scaled back onto this lobe.
+///
+/// That energy used to be added as `FmsEms * irradiance` (Kulla–Conty). Irradiance
+/// is a cosine lobe, so a small HDR source grew a halo a GGX integral does not have.
+fn compensated_split_sum(F0: vec3<f32>, F_ab: vec2<f32>, specular_occlusion: f32) -> vec3<f32> {
+    let ess = max(F_ab.x + F_ab.y, 1e-4);
+    let single_scatter = (F0 * F_ab.x + F_ab.y) * specular_occlusion;
+    let compensation = 1.0 + F0 * (1.0 / ess - 1.0);
+    return single_scatter * compensation;
 }
 
 /// Computes the direction at which to sample the reflection probe.
@@ -94,6 +153,13 @@ fn compute_cubemap_sample_dir(
     return sample_dir;
 }
 
+// Mip level for a prefiltered specular cubemap. Level `i` stores perceptual
+// roughness `i / maxMip` (Karis 2013; the same linear schedule the Manson–Sloan
+// filter writes). α = perceptual² is used only inside the GGX convolution.
+fn specular_radiance_level(perceptual_roughness: f32, max_specular_mip: f32) -> f32 {
+    return perceptual_roughness * max_specular_mip;
+}
+
 // GGX split-sum dominant reflection direction (Frostbite Listing 22).
 // Used for both prefiltered and MS-generated specular maps — both store radiance
 // indexed by direction, so the sample direction must match.
@@ -122,6 +188,7 @@ fn compute_radiances(
     let roughness = input.roughness;
 
     var radiances: EnvironmentMapRadiances;
+    radiances.fresnel_radiance = vec3(0.0);
 
     // Find all reflection probes that contain the fragment. We're going to
     // accumulate all the radiance and irradiance from them in a weighted sum.
@@ -132,6 +199,7 @@ fn compute_radiances(
     );
 
     var total_weight = 0.0;
+    var fis_a = vec3(0.0);
     radiances.irradiance = vec3(0.0);
     radiances.radiance = vec3(0.0);
 
@@ -174,11 +242,7 @@ fn compute_radiances(
             bindings::specular_environment_maps[query_result.texture_index]) - 1u);
         // Both glTF-IBL-Sampler (prefiltered) and Esoterica/MS-generated maps encode mip `i`
         // as perceptual roughness `i/(n-1)` (α = perceptual² used only inside the GGX filter).
-        // Karis/glTF Sample Viewer therefore sample with `perceptual_roughness * maxMip`,
-        // not `α * maxMip` (which under-blurs mid roughness vs a pathtraced reference).
-        let radiance_level = perceptual_roughness * max_specular_mip;
-        // Frostbite Listing 22 dominant direction uses linear roughness α.
-        let mip_roughness = roughness;
+        let radiance_level = specular_radiance_level(perceptual_roughness, max_specular_mip);
 
         // If we're lightmapped, and we shouldn't accumulate diffuse light from the
         // environment map, note that.
@@ -206,7 +270,7 @@ fn compute_radiances(
         }
 
         var radiance_sample_dir =
-            radiance_sample_direction_ggx_split_sum(N, R, mip_roughness);
+            radiance_sample_direction_ggx_split_sum(N, R, roughness);
         radiance_sample_dir = compute_cubemap_sample_dir(
             world_position,
             radiance_sample_dir,
@@ -222,10 +286,23 @@ fn compute_radiances(
                 radiance_sample_dir,
                 radiance_level).rgb * query_result.intensity * query_result.weight;
 
+        if SHADE_TIME_FIS {
+            let filtered = filtered_importance_radiance(
+                bindings::specular_environment_maps[query_result.texture_index], input,
+                world_position, query_result.light_from_world,
+                query_result.parallax_correction_bounds, parallax_correct, view_rotation);
+            // Replace this probe's split-sum contribution below by accumulating
+            // the independent Schlick integrals in a separate sum.
+            fis_a += filtered[0] * query_result.intensity * query_result.weight;
+            radiances.fresnel_radiance += filtered[1] * query_result.intensity * query_result.weight;
+        }
+
         total_weight += query_result.weight;
     }
 
+    if SHADE_TIME_FIS { radiances.radiance = fis_a; }
     if (total_weight != 0.0) {
+        radiances.fresnel_radiance /= total_weight;
         radiances.irradiance /= total_weight;
         radiances.radiance /= total_weight;
     }
@@ -248,6 +325,7 @@ fn compute_radiances(
     let roughness = input.roughness;
 
     var radiances: EnvironmentMapRadiances;
+    radiances.fresnel_radiance = vec3(0.0);
 
     // If we have no light probe, bail.
     if (light_probes.view_cubemap_index < 0) {
@@ -259,11 +337,9 @@ fn compute_radiances(
     // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
     // Technically we could use textureNumLevels(specular_environment_map) - 1 here, but we use a uniform
     // because textureNumLevels() does not work on WebGL2.
-    // LOD is linear in perceptual roughness for both prefiltered (glTF-IBL-Sampler) and
-    // MS-generated maps — see the MULTIPLE_LIGHT_PROBES path for the rationale.
+    // Same mip index as the multi-probe path: perceptual roughness times the last mip.
     let max_specular_mip = f32(light_probes.smallest_specular_mip_level_for_view);
-    let radiance_level = perceptual_roughness * max_specular_mip;
-    let mip_roughness = roughness;
+    let radiance_level = specular_radiance_level(perceptual_roughness, max_specular_mip);
 
     let intensity = light_probes.intensity_for_view;
 
@@ -289,7 +365,7 @@ fn compute_radiances(
     }
 
     var radiance_sample_dir =
-        radiance_sample_direction_ggx_split_sum(N, R, mip_roughness);
+        radiance_sample_direction_ggx_split_sum(N, R, roughness);
     // Rotating the world space ray direction by the environment map light view rotation,
     // it is equivalent to rotating the environment cubemap itself.
     radiance_sample_dir = quat_rotate(light_probes.view_rotation, radiance_sample_dir);
@@ -301,6 +377,15 @@ fn compute_radiances(
         radiance_sample_dir,
         radiance_level).rgb * intensity;
 
+    if SHADE_TIME_FIS {
+        let filtered = filtered_importance_radiance(bindings::specular_environment_map,
+            input, world_position, mat4x4<f32>(
+                vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0),
+                vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)),
+            vec3(0.0), false, light_probes.view_rotation);
+        radiances.radiance = filtered[0] * intensity;
+        radiances.fresnel_radiance = filtered[1] * intensity;
+    }
     return radiances;
 }
 
@@ -336,25 +421,12 @@ fn environment_map_light_clearcoat(
     // These formulas are from Filament:
     // <https://google.github.io/filament/Filament.md.html#lighting/imagebasedlights/clearcoat>
     (*out).diffuse *= inv_Fc;
+    if SHADE_TIME_FIS {
+        (*out).specular = (*out).specular * inv_Fc * inv_Fc
+            + (clearcoat_F0 * clearcoat_radiances.radiance + clearcoat_radiances.fresnel_radiance) * clearcoat_strength;
+        return;
+    }
     (*out).specular = (*out).specular * inv_Fc * inv_Fc + clearcoat_radiances.radiance * Fc;
-}
-
-/// Multiscattering approximation: https://www.jcgt.org/published/0008/01/03/paper.pdf
-///
-/// We initially used this (https://bruop.github.io/ibl) reference with Roughness Dependent
-/// Fresnel, but it made fresnel very bright so we reverted to the "typical" fresnel term.
-fn compute_multiscatter(
-    F0: vec3<f32>,
-    F_ab: vec2<f32>,
-    Ems: f32,
-    specular_occlusion: f32,
-) -> MultiscatterResult {
-    let FssEss = (F0 * F_ab.x + F_ab.y) * specular_occlusion;
-    let Favg = F0 + (1.0 - F0) / 21.0;
-    let FmsEms = FssEss * Favg / (1.0 - Ems * Favg) * Ems;
-    let Edss = 1.0 - (FssEss + FmsEms);
-
-    return MultiscatterResult(FssEss, FmsEms, Edss);
 }
 
 fn environment_map_light(
@@ -363,10 +435,8 @@ fn environment_map_light(
     found_diffuse_indirect: bool,
 ) -> EnvironmentMapLight {
     // Unpack.
-    let roughness = (*input).layers[LAYER_BASE].roughness;
     let diffuse_color = (*input).diffuse_color;
     let metallic = (*input).metallic;
-    let NdotV = (*input).layers[LAYER_BASE].NdotV;
     let F_ab = (*input).F_ab;
     let F0_dielectric = (*input).F0_dielectric;
     let F0_metallic = (*input).F0_metallic;
@@ -393,24 +463,28 @@ fn environment_map_light(
     let F0_surface = mix(F0_dielectric, F0_metallic, metallic);
     let specular_occlusion = saturate(dot(F0_surface, vec3(50.0 * 0.33)));
 
-    // Compute per-material (dielectric and metallic separately) then mix the results.
-    // We can't use F0 directly as the multiscattering term is nonlinear.
-    let Ems = 1.0 - (F_ab.x + F_ab.y);
+    // Compensation is nonlinear in F0, so dielectric and metallic are evaluated
+    // separately and then mixed, matching `lobe_reflectances` in the pathtracer.
+    let specular_dielectric = compensated_split_sum(F0_dielectric, F_ab, specular_occlusion);
+    let specular_metallic = compensated_split_sum(F0_metallic, F_ab, specular_occlusion);
+    out.specular = mix(specular_dielectric, specular_metallic, metallic) * radiances.radiance;
 
-    let ms_dielectric = compute_multiscatter(F0_dielectric, F_ab, Ems, specular_occlusion);
-    let ms_metallic = compute_multiscatter(F0_metallic, F_ab, Ems, specular_occlusion);
+    if SHADE_TIME_FIS {
+        let compensation_dielectric = 1.0 + F0_dielectric * (1.0 / max(F_ab.x + F_ab.y, 1e-4) - 1.0);
+        let compensation_metallic = 1.0 + F0_metallic * (1.0 / max(F_ab.x + F_ab.y, 1e-4) - 1.0);
+        out.specular = mix(
+            (F0_dielectric * radiances.radiance + radiances.fresnel_radiance) * compensation_dielectric,
+            (F0_metallic * radiances.radiance + radiances.fresnel_radiance) * compensation_metallic,
+            metallic) * specular_occlusion;
+    }
 
-    let FssEss = mix(ms_dielectric.FssEss, ms_metallic.FssEss, metallic);
-    let FmsEms = mix(ms_dielectric.FmsEms, ms_metallic.FmsEms, metallic);
-    let kD = diffuse_color * ms_dielectric.Edss;
-
+    // `diffuse_color` already includes `(1 - metallic)`. Removing the compensated
+    // dielectric specular albedo keeps a constant environment equal to the base color.
     if (!found_diffuse_indirect) {
-        out.diffuse = (FmsEms + kD) * radiances.irradiance;
+        out.diffuse = diffuse_color * saturate(vec3(1.0) - specular_dielectric) * radiances.irradiance;
     } else {
         out.diffuse = vec3(0.0);
     }
-
-    out.specular = FssEss * radiances.radiance;
 
     @if(STANDARD_MATERIAL_CLEARCOAT)
     environment_map_light_clearcoat(

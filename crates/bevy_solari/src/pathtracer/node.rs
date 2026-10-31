@@ -4,16 +4,26 @@ use bevy_asset::{load_embedded_asset, AssetServer};
 use bevy_ecs::{prelude::*, resource::Resource, system::Commands};
 use bevy_render::{
     camera::ExtractedCamera,
+    render_asset::RenderAssets,
     render_resource::{
         binding_types::{texture_storage_2d, uniform_buffer},
         BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-        ImageSubresourceRange, PipelineCache, ShaderStages, StorageTextureAccess, TextureFormat,
+        ImageSubresourceRange, PipelineCache, ShaderStages, ShaderType, StorageTextureAccess,
+        TextureDimension, TextureFormat, TextureUsages, UniformBuffer,
     },
-    renderer::{RenderContext, RenderDevice, ViewQuery},
+    renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
+    texture::GpuImage,
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use bevy_utils::default;
+
+#[derive(ShaderType)]
+struct PathtracerUniform {
+    seed: u32,
+    max_samples: u32,
+    _padding: bevy_math::UVec2,
+}
 
 /// Resource holding the pathtracer pipeline configuration.
 #[derive(Resource)]
@@ -37,6 +47,7 @@ pub fn init_pathtracer_pipelines(
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                 uniform_buffer::<ViewUniform>(true),
+                uniform_buffer::<PathtracerUniform>(false),
             ),
         ),
     );
@@ -59,7 +70,7 @@ pub fn init_pathtracer_pipelines(
 
 pub fn pathtracer(
     view: ViewQuery<(
-        &Pathtracer,
+        &mut Pathtracer,
         &PathtracerAccumulationTexture,
         &ExtractedCamera,
         &ViewTarget,
@@ -70,9 +81,11 @@ pub fn pathtracer(
     scene_bindings: Res<RaytracingSceneBindings>,
     view_uniforms: Res<ViewUniforms>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    images: Res<RenderAssets<GpuImage>>,
     mut ctx: RenderContext,
 ) {
-    let (pathtracer_settings, accumulation_texture, camera, view_target, view_uniform_offset) =
+    let (mut pathtracer_settings, accumulation_texture, camera, view_target, view_uniform_offset) =
         view.into_inner();
 
     let Some(pathtracer_pipelines) = pathtracer_pipelines else {
@@ -88,6 +101,13 @@ pub fn pathtracer(
         return;
     };
 
+    let mut settings = UniformBuffer::from(PathtracerUniform {
+        seed: pathtracer_settings.seed,
+        max_samples: pathtracer_settings.max_samples,
+        _padding: default(),
+    });
+    settings.write_buffer(&render_device, &render_queue);
+
     let bind_group = render_device.create_bind_group(
         "pathtracer_bind_group",
         &pipeline_cache.get_bind_group_layout(&pathtracer_pipelines.bind_group_layout),
@@ -95,6 +115,7 @@ pub fn pathtracer(
             &accumulation_texture.0.default_view,
             view_target.get_unsampled_color_attachment().view,
             view_uniforms_binding,
+            settings.binding().unwrap(),
         )),
     );
 
@@ -115,4 +136,31 @@ pub fn pathtracer(
     pass.set_bind_group(0, scene_bind_group, &[]);
     pass.set_bind_group(1, &bind_group, &[view_uniform_offset.offset]);
     pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+    drop(pass);
+    // Keep reset requests pending through pipeline/scene readiness delays.
+    pathtracer_settings.reset = false;
+
+    if let Some(output) = pathtracer_settings
+        .accumulation_output
+        .as_ref()
+        .and_then(|h| images.get(h))
+    {
+        let descriptor = &output.texture_descriptor;
+        let size = accumulation_texture.0.texture.size();
+        if descriptor.size == size
+            && descriptor.format == TextureFormat::Rgba32Float
+            && descriptor.dimension == TextureDimension::D2
+            && descriptor.mip_level_count == 1
+            && descriptor.sample_count == 1
+            && descriptor
+                .usage
+                .contains(TextureUsages::COPY_DST | TextureUsages::COPY_SRC)
+        {
+            command_encoder.copy_texture_to_texture(
+                accumulation_texture.0.texture.as_image_copy(),
+                output.texture.as_image_copy(),
+                size,
+            );
+        }
+    }
 }

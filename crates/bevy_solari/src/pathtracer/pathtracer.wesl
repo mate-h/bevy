@@ -11,6 +11,21 @@ enable wgpu_ray_query;
 @group(1) @binding(1) var view_output: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(2) var<uniform> view: View;
 
+struct PathtracerSettings {
+    seed: u32,
+    max_samples: u32,
+    _padding: vec2<u32>,
+}
+@group(1) @binding(3) var<uniform> settings: PathtracerSettings;
+
+// Bijective integer avalanche: scramble seed, pixel and sample together.
+fn scramble(value: u32) -> u32 {
+    var x = value;
+    x = (x ^ (x >> 16u)) * 0x7feb352du;
+    x = (x ^ (x >> 15u)) * 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) {
@@ -19,10 +34,18 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let old_color = textureLoad(accumulation_texture, global_id.xy);
 
+    if settings.max_samples != 0u && old_color.a >= f32(settings.max_samples) {
+        textureStore(view_output, global_id.xy, vec4(old_color.rgb, 1.0));
+        return;
+    }
+
     // Setup RNG
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
     let frame_index = u32(old_color.a) * 5782582u;
     var rng = pixel_index + frame_index;
+    if settings.seed != 0u {
+        rng = scramble(rng ^ scramble(settings.seed));
+    }
 
     // Shoot the first ray from the camera
     let pixel_center = vec2<f32>(global_id.xy) + 0.5;

@@ -4,7 +4,7 @@ mod prepare;
 
 use crate::{scene::RaytracingSceneBindings, SolariPlugins};
 use bevy_app::{App, Plugin, PostUpdate};
-use bevy_asset::embedded_asset;
+use bevy_asset::{embedded_asset, Handle};
 use bevy_camera::Hdr;
 use bevy_core_pipeline::{
     schedule::{Core3d, Core3dSystems},
@@ -18,6 +18,7 @@ use bevy_ecs::{
     schedule::IntoScheduleConfigs,
     system::{Commands, Query},
 };
+use bevy_image::Image;
 use bevy_light::AtmosphereEnvironmentMapLight;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
@@ -79,6 +80,18 @@ impl Plugin for PathtracingPlugin {
 #[require(Hdr)]
 pub struct Pathtracer {
     pub reset: bool,
+    /// Independent deterministic RNG scramble. Zero preserves the original sequence.
+    /// Changing this value resets accumulation.
+    pub seed: u32,
+    /// Maximum accumulated samples per pixel; zero means unlimited.
+    /// Changing the limit does not reset accumulation. Raising it resumes tracing.
+    /// Counts are stored as f32, so exact counting requires staying below 2^24 samples.
+    pub max_samples: u32,
+    /// Optional caller-owned snapshot of the running average RGB and actual sample count in alpha.
+    /// Must be a single-mip, single-sample 2D Rgba32Float image matching the viewport,
+    /// with COPY_DST and COPY_SRC usage. Incompatible or unprepared images are skipped.
+    /// Changing the handle resets accumulation. Readback must inspect alpha to verify completion.
+    pub accumulation_output: Option<Handle<Image>>,
 }
 
 /// Turn off atmosphere cubemap filtering for pathtracer cameras to save performance, since the pathtracer does not require it.
