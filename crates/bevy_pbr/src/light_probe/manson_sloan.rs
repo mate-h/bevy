@@ -16,6 +16,12 @@
 //! Layout: `float4 coeffs[7][5][6]` — 7 levels × 5 parameters (dir xyz, LOD, weight) ×
 //! 6 indices (3 axes × 8 taps / 4). Constant polynomial (no θ²/φ² terms).
 //!
+//! Taps are placed in mips of the source, so a table is fitted for one source face size.
+//! There are two: 128² (`FILTER_TABLE_BYTES`) and 256² (`FILTER_TABLE_BYTES_B256`,
+//! `ReflectionProbeTable_ggx_esoterica_b256_cube.bin`, fitted with `--base 256`). Other sizes
+//! use the nearest smaller table with its tap levels shifted by `log2(size / table size)`;
+//! see [`filter_table_for_face_size`].
+//!
 //! Regenerate via `assets/export_esoterica_filter_table.py` after fitting with
 //! `FilterFitter --fit --curve esoterica --write-binary`.
 
@@ -37,7 +43,12 @@ pub const FILTER_TABLE_SIZE: usize = FILTER_TABLE_VEC4_COUNT * 16;
 
 pub const FILTER_TABLE_BYTES: &[u8] = include_bytes!("../../assets/manson_sloan_poly_table.bin");
 
+/// The table fitted for 256² source faces.
+pub const FILTER_TABLE_BYTES_B256: &[u8] =
+    include_bytes!("../../assets/manson_sloan_poly_table_b256.bin");
+
 const _: () = assert!(FILTER_TABLE_BYTES.len() == FILTER_TABLE_SIZE);
+const _: () = assert!(FILTER_TABLE_BYTES_B256.len() == FILTER_TABLE_SIZE);
 const _: () = assert!(FILTER_TABLE_VEC4_COUNT == 210);
 const _: () = assert!(POLY_INDICES == (3 * TAPS_PER_AXIS) / 4);
 
@@ -55,6 +66,13 @@ pub const TABLE_PERCEPTUAL_ROUGHNESS: [f32; SPECULAR_TABLE_LEVELS] = [
 /// Maps linear perceptual roughness to a continuous table row index in `[0, 6]`.
 pub fn perceptual_roughness_to_table_t(perceptual_roughness: f32) -> f32 {
     (perceptual_roughness.clamp(0.0, 1.0) * (SPECULAR_TABLE_LEVELS - 1) as f32).clamp(0.0, 6.0)
+}
+
+/// Picks the table for a source face size: `(true, bias)` for the 256² table, `(false, bias)`
+/// for the 128² one, where `bias = log2(face_size / table face size)` shifts its tap levels.
+pub fn filter_table_for_face_size(face_size: u32) -> (bool, f32) {
+    let table_size = if face_size >= 256 { 256.0 } else { 128.0 };
+    (face_size >= 256, (face_size as f32 / table_size).log2())
 }
 
 /// Perceptual roughness stored in MS-generated mip `mip` of an `num_mips`-level chain.

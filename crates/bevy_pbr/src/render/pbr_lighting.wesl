@@ -1274,9 +1274,17 @@ fn disk_layer_multiscatter(input: ptr<function, LightingInput>, layer: u32) -> v
 
 /// Specular of one layer from a distant disk light of unit illuminance at normal
 /// incidence, already multiplied by N⋅L: a 19-point quadrature of the exact BRDF
-/// where the disk straddles the horizon and the lobe is wide compared to the
-/// disk (a narrow lobe would alias between its points), the corrected LTC
-/// integral everywhere else.
+/// where the disk is within `DISK_QUADRATURE_HORIZON_SCALE` disk radii of the
+/// horizon and the lobe is wide compared to the disk (a narrow lobe would alias
+/// between its points), the corrected LTC integral everywhere else.
+/// The quadrature is used where `|N⋅L|` is below this many `sin r` (1 is where the
+/// disk straddles the horizon) and the lobe is wider than `DISK_QUADRATURE_MIN_LOBE`
+/// `sin r`. Just above the horizon the LTC estimate is still too bright, so the
+/// quadrature extends to twice the straddling band; below a lobe width of about
+/// `sin r` its 19 points alias.
+const DISK_QUADRATURE_HORIZON_SCALE: f32 = 2.0;
+const DISK_QUADRATURE_MIN_LOBE: f32 = 1.5;
+
 @if(AREA_LIGHT_LUTS)
 fn directional_disk_specular(
     input: ptr<function, LightingInput>,
@@ -1287,7 +1295,8 @@ fn directional_disk_specular(
 ) -> vec3<f32> {
     let N = (*input).layers[layer].N;
     let lobe_width = (*input).layers[layer].roughness / max((*input).layers[layer].NdotV, 0.05);
-    if abs(dot(N, L)) < sin_r && lobe_width > 2.0 * sin_r {
+    if abs(dot(N, L)) < DISK_QUADRATURE_HORIZON_SCALE * sin_r
+        && lobe_width > DISK_QUADRATURE_MIN_LOBE * sin_r {
         return directional_disk_quadrature_specular(input, layer, L, cos_r, sin_r);
     }
     return directional_disk_ltc_specular(input, layer, L, cos_r, sin_r);
@@ -1295,9 +1304,8 @@ fn directional_disk_specular(
 
 /// Exact specular from a distant disk light of unit illuminance at normal
 /// incidence, already multiplied by N⋅L, by a 19-point equal-area quadrature of
-/// the BRDF over the disk (rings of 1, 6 and 12 points). Used where the disk
-/// straddles the horizon, where the LTC integral is least accurate, if the lobe
-/// is wider than the disk.
+/// the BRDF over the disk (rings of 1, 6 and 12 points). Used near the horizon,
+/// where the LTC integral is least accurate, if the lobe is wider than the disk.
 fn directional_disk_quadrature_specular(
     input: ptr<function, LightingInput>,
     layer: u32,

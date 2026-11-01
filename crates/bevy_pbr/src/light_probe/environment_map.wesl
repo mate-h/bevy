@@ -46,10 +46,16 @@ const STRETCH_LOBE_SCALE: f32 = 1.0;
 // reflection_probes harness enables it with `IBL_LOBE=fitted1|fitted2`. The
 // table is fitted to the lobe's response to spherical-cap lights of 5° to 90°,
 // each size weighted equally so that light the round kernels collect from below
-// the horizon counts; rows are perceptual roughness 0.2, 0.3, …, 1, columns the
-// N⋅V below.
+// the horizon counts; rows are perceptual roughness 0.2, 0.3, …, 1, columns N⋅V
+// 1, 0.8, 0.6, 0.45, 0.3, 0.2, 0.1, 0.05.
 const FITTED_LOBE_TAPS: u32 = 0u;
-const FITTED_LOBE_NOV: array<f32, 8> = array(1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.1, 0.05);
+// Removes each fitted tap's light from below the surface horizon and renormalizes
+// by the part of its kernel that is left (`horizon_clipped_radiance`). Needs a
+// table fitted with clipped kernels (`HORIZON_CLIP=1 kernel_table.py`).
+const FITTED_LOBE_HORIZON_CLIP: bool = false;
+// The same clip for the plain split-sum lookup along the dominant direction
+// (`horizon_clipped_split_sum_radiance`): one more read, and no table.
+const SPLIT_SUM_HORIZON_CLIP: bool = false;
 /// Per cell, roughness-major: `(angle₀, roughness₀, angle₁, roughness₁)` of the
 /// two-tap fit, then `(weight₀, angle, roughness, 0)` with the one-tap fit. Angles
 /// rotate R toward N, in radians.
@@ -133,6 +139,62 @@ fn fitted_lobe_cell(i: u32, j: u32) -> array<vec4<f32>, 2> {
     return array(FITTED_LOBE_TABLE[index], FITTED_LOBE_TABLE[index + 1u]);
 }
 
+// A round prefiltered read along the unit direction `d`, with the part of its
+// kernel below the horizon taken out when `clip` is set. That part's weight is
+// `½(1 − N⋅d)^p(r)` and its centroid lies `β(r, N⋅d)` below the horizon, in the
+// plane of N and d, both fitted to the Karis kernel (`horizon_analytic.py`); the
+// light there is read from the same mip.
+fn horizon_clipped_radiance(
+    map: texture_cube<f32>,
+    N: vec3<f32>,
+    d: vec3<f32>,
+    roughness: f32,
+    level: f32,
+    clip: bool,
+    world_position: vec3<f32>,
+    light_from_world: mat4x4<f32>,
+    bounds: vec3<f32>,
+    parallax_correct: bool,
+    rotation: vec4<f32>,
+) -> vec3<f32> {
+    let direction = compute_cubemap_sample_dir(world_position, d, light_from_world, bounds,
+        parallax_correct, rotation);
+    let radiance = textureSampleLevel(map, bindings::environment_map_sampler, direction, level).rgb;
+    if !clip {
+        return radiance;
+    }
+    let NdotD = dot(N, d);
+    let r = max(roughness, 0.05);
+    let p = 1.0 + 0.4507 * (pow(r, -2.1412) - 1.0);
+    let tail = 0.5 * pow(1.0 - abs(NdotD), p);
+    let below = select(1.0 - tail, tail, NdotD >= 0.0);
+    let beta = max(0.643 * r - 0.0403, 0.0) * (1.0 - clamp(3.0816 * r - 1.7164, 0.0, 0.75) * NdotD);
+    // Toward d along the horizon; when d is N the below part is empty anyway.
+    let side_raw = d - NdotD * N;
+    let side = side_raw * inverseSqrt(max(dot(side_raw, side_raw), 1e-12));
+    let below_direction = compute_cubemap_sample_dir(world_position,
+        -sin(beta) * N + cos(beta) * side, light_from_world, bounds, parallax_correct, rotation);
+    let below_radiance =
+        textureSampleLevel(map, bindings::environment_map_sampler, below_direction, level).rgb;
+    return max(radiance - below * below_radiance, vec3(0.0)) / max(1.0 - below, 0.05);
+}
+
+fn horizon_clipped_split_sum_radiance(
+    map: texture_cube<f32>,
+    input: LayerLightingInput,
+    max_specular_mip: f32,
+    world_position: vec3<f32>,
+    light_from_world: mat4x4<f32>,
+    bounds: vec3<f32>,
+    parallax_correct: bool,
+    rotation: vec4<f32>,
+) -> vec3<f32> {
+    let dominant = normalize(radiance_sample_direction_ggx_split_sum(input.N, input.R, input.roughness));
+    return horizon_clipped_radiance(map, input.N, dominant, input.perceptual_roughness,
+        specular_radiance_level(input.perceptual_roughness, max_specular_mip), true,
+        world_position, light_from_world, bounds, parallax_correct, rotation);
+}
+
 fn fitted_lobe_radiance(
     map: texture_cube<f32>,
     input: LayerLightingInput,
@@ -153,13 +215,18 @@ fn fitted_lobe_radiance(
     let row = clamp((perceptual - 0.2) / 0.1, 0.0, 8.0);
     let i0 = min(u32(row), 7u);
     let fi = row - f32(i0);
+    // The N⋅V column and the values bounding it, from literals: indexing a constant
+    // array of the columns per pixel tripled the one-tap lookup's extra cost.
     var j0 = 0u;
-    for (var j = 0u; j < 6u; j++) {
-        if NdotV < FITTED_LOBE_NOV[j + 1u] {
-            j0 = j + 1u;
-        }
-    }
-    let fj = (FITTED_LOBE_NOV[j0] - NdotV) / (FITTED_LOBE_NOV[j0] - FITTED_LOBE_NOV[j0 + 1u]);
+    var upper = 1.0;
+    var lower = 0.8;
+    if NdotV < 0.8 { j0 = 1u; upper = 0.8; lower = 0.6; }
+    if NdotV < 0.6 { j0 = 2u; upper = 0.6; lower = 0.45; }
+    if NdotV < 0.45 { j0 = 3u; upper = 0.45; lower = 0.3; }
+    if NdotV < 0.3 { j0 = 4u; upper = 0.3; lower = 0.2; }
+    if NdotV < 0.2 { j0 = 5u; upper = 0.2; lower = 0.1; }
+    if NdotV < 0.1 { j0 = 6u; upper = 0.1; lower = 0.05; }
+    let fj = (upper - NdotV) / (upper - lower);
     let c00 = fitted_lobe_cell(i0, j0);
     let c01 = fitted_lobe_cell(i0, j0 + 1u);
     let c10 = fitted_lobe_cell(i0 + 1u, j0);
@@ -172,11 +239,10 @@ fn fitted_lobe_radiance(
         cell[k] = mix(identity[k], fitted, blend);
     }
 
-    // R = cos θ N + sin θ T in the plane of incidence; a tap's angle turns it toward N.
-    let tangent_raw = R - dot(N, R) * N;
-    let tangent_length = length(tangent_raw);
-    let T = select(vec3(0.0), tangent_raw / max(tangent_length, 1e-6), tangent_length > 1e-6);
-    let theta = atan2(tangent_length, dot(N, R));
+    // A tap's angle turns R toward N in the plane of incidence: P is the unit vector
+    // there perpendicular to R on N's side, so a tap is `cos a R + sin a P`.
+    let toward_N = N - dot(N, R) * R;
+    let P = toward_N * inverseSqrt(max(dot(toward_N, toward_N), 1e-12));
 
     var angles = vec2(cell[1].y, 0.0);
     var roughnesses = vec2(cell[1].z, 0.0);
@@ -188,11 +254,11 @@ fn fitted_lobe_radiance(
     }
     var radiance = vec3(0.0);
     for (var k = 0u; k < FITTED_LOBE_TAPS; k++) {
-        let angle = theta - angles[k];
-        let direction = compute_cubemap_sample_dir(world_position,
-            cos(angle) * N + sin(angle) * T, light_from_world, bounds, parallax_correct, rotation);
-        radiance += weights[k] * textureSampleLevel(map, bindings::environment_map_sampler,
-            direction, specular_radiance_level(saturate(roughnesses[k]), max_specular_mip)).rgb;
+        let roughness = saturate(roughnesses[k]);
+        let tap = cos(angles[k]) * R + sin(angles[k]) * P;
+        radiance += weights[k] * horizon_clipped_radiance(map, N, tap, roughness,
+            specular_radiance_level(roughness, max_specular_mip), FITTED_LOBE_HORIZON_CLIP,
+            world_position, light_from_world, bounds, parallax_correct, rotation);
     }
     return radiance;
 }
@@ -503,6 +569,11 @@ fn compute_radiances(
                 bindings::specular_environment_maps[query_result.texture_index], input,
                 max_specular_mip, world_position, query_result.light_from_world,
                 query_result.parallax_correction_bounds, parallax_correct, view_rotation);
+        } else if SPLIT_SUM_HORIZON_CLIP {
+            specular = horizon_clipped_split_sum_radiance(
+                bindings::specular_environment_maps[query_result.texture_index], input,
+                max_specular_mip, world_position, query_result.light_from_world,
+                query_result.parallax_correction_bounds, parallax_correct, view_rotation);
         } else if STRETCHED_SPLIT_SUM {
             specular = stretched_split_sum_radiance(
                 bindings::specular_environment_maps[query_result.texture_index], input,
@@ -607,6 +678,14 @@ fn compute_radiances(
         bindings::environment_map_sampler,
         radiance_sample_dir,
         radiance_level).rgb * intensity;
+
+    if SPLIT_SUM_HORIZON_CLIP {
+        radiances.radiance = horizon_clipped_split_sum_radiance(bindings::specular_environment_map,
+            input, max_specular_mip, world_position, mat4x4<f32>(
+                vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0),
+                vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)),
+            vec3(0.0), false, light_probes.view_rotation) * intensity;
+    }
 
     if STRETCHED_SPLIT_SUM {
         radiances.radiance = stretched_split_sum_radiance(bindings::specular_environment_map,

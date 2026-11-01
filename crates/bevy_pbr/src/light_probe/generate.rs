@@ -145,7 +145,7 @@ pub struct FilteringConstants {
     /// Perceptual roughness (√α) for Esoterica table lookup. MS-generated mip `i`
     /// stores the filter for perceptual roughness `i/(n-1)`.
     perceptual_roughness: f32,
-    /// `log2(cubemap_face_size / 128)` for non-128 source cubemaps.
+    /// `log2(cubemap_face_size / table face size)`, where the table is the 128² or 256² fit.
     lod_resolution_bias: f32,
     /// Output face size. Some backends don't report storage view dimensions reliably.
     output_size: UVec2,
@@ -154,7 +154,12 @@ pub struct FilteringConstants {
 
 /// GPU buffer for Manson–Sloan polynomial filter coefficients.
 #[derive(Resource, Clone)]
-pub struct MansonSloanFilterTableBuffer(pub Buffer);
+pub struct MansonSloanFilterTableBuffer {
+    /// Fitted for 128² source faces.
+    pub b128: Buffer,
+    /// Fitted for 256² source faces.
+    pub b256: Buffer,
+}
 
 pub struct EnvironmentMapGenerationPlugin;
 
@@ -244,12 +249,17 @@ pub fn initialize_generated_environment_map_resources(
     pipeline_cache: Res<PipelineCache>,
     asset_server: Res<AssetServer>,
 ) {
-    let table_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+    let b128 = render_device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("manson_sloan_poly_table".into()),
         contents: manson_sloan::FILTER_TABLE_BYTES,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
     });
-    commands.insert_resource(MansonSloanFilterTableBuffer(table_buffer));
+    let b256 = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("manson_sloan_poly_table_b256".into()),
+        contents: manson_sloan::FILTER_TABLE_BYTES_B256,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    commands.insert_resource(MansonSloanFilterTableBuffer { b128, b256 });
 
     let table_min_binding = NonZero::new(manson_sloan::FILTER_TABLE_SIZE as u64)
         .expect("filter table size must be non-zero");
@@ -793,12 +803,6 @@ pub fn prepare_generated_environment_map_bind_groups(
         stbn_texture.texture_descriptor.size.height.trailing_zeros(),
     );
 
-    let table_binding = BindingResource::Buffer(BufferBinding {
-        buffer: &manson_sloan_table.0,
-        offset: 0,
-        size: None,
-    });
-
     for (entity, textures, env_map_light, source_buffers) in &light_probes {
         let base_size = env_map_light.environment_map.texture_descriptor.size.width;
         let mip_count = compute_mip_count(base_size);
@@ -859,7 +863,16 @@ pub fn prepare_generated_environment_map_bind_groups(
             &env_map_light.specular_map.texture
         };
 
-        let lod_resolution_bias = (base_size as f32 / 128.0).log2();
+        let (use_b256, lod_resolution_bias) = manson_sloan::filter_table_for_face_size(base_size);
+        let table_binding = BindingResource::Buffer(BufferBinding {
+            buffer: if use_b256 {
+                &manson_sloan_table.b256
+            } else {
+                &manson_sloan_table.b128
+            },
+            offset: 0,
+            size: None,
+        });
         for mip in 0..num_mips {
             // Esoterica linear-perceptual encoding: mip i stores the filter for
             // perceptual roughness i/(n-1). Table rows use the same schedule.

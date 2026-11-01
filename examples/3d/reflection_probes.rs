@@ -58,7 +58,10 @@
 //! `IBL_CLEARCOAT=<roughness>`. `IBL_IRRADIANCE=sampled` uses the generator's old
 //! Monte Carlo irradiance instead of spherical harmonics. `IBL_FILTER=stretch` is
 //! the experimental view-dependent split sum (`IBL_STRETCH_SCALE`, default 1), and
-//! `IBL_LOBE=fitted1|fitted2` the fitted one- or two-tap lookups.
+//! `IBL_LOBE=fitted1|fitted2` the fitted one- or two-tap lookups
+//! (`IBL_LOBE_HORIZON=1` clips each tap at the surface horizon). `IBL_HORIZON=1`
+//! clips the plain lookup at the horizon. `IBL_DISK_QUAD` and `IBL_DISK_MIN_LOBE`
+//! override where disk lights are shaded by quadrature instead of LTC.
 //!
 //! `IBL_SHADOW_SCENE=1` adds a diffuse ground under the sphere, enables the sun's
 //! shadow maps and measures the ground instead, to compare angular soft shadows
@@ -200,6 +203,63 @@ fn configure_irradiance_shader(mut shaders: ResMut<Assets<Shader>>, mut configur
     }
 }
 
+/// `IBL_HORIZON=1` clips the plain split-sum lookup at the surface horizon.
+fn configure_horizon_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
+    if *configured || std::env::var("IBL_HORIZON").ok().as_deref() != Some("1") {
+        return;
+    }
+    for (_, shader) in shaders.iter_mut() {
+        if shader.path.ends_with("light_probe/environment_map.wesl")
+            && let bevy::shader::Source::Wesl(source) = &mut shader.source
+            && source.contains("const SPLIT_SUM_HORIZON_CLIP: bool = false;")
+        {
+            info!("Horizon-clipped split-sum lookup");
+            *configured = true;
+            *source = source
+                .replace(
+                    "const SPLIT_SUM_HORIZON_CLIP: bool = false;",
+                    "const SPLIT_SUM_HORIZON_CLIP: bool = true;",
+                )
+                .into();
+        }
+    }
+}
+
+/// `IBL_DISK_QUAD=<k>` shades disk lights by quadrature up to `k sin r` above the
+/// horizon (default 2), where the lobe is wider than `IBL_DISK_MIN_LOBE` (default
+/// 1.5) `sin r`.
+fn configure_disk_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
+    let Ok(scale) = std::env::var("IBL_DISK_QUAD") else {
+        return;
+    };
+    if *configured {
+        return;
+    }
+    let scale: f32 = scale.parse().expect("IBL_DISK_QUAD must be a number");
+    let min_lobe: f32 = std::env::var("IBL_DISK_MIN_LOBE")
+        .map(|v| v.parse().expect("IBL_DISK_MIN_LOBE must be a number"))
+        .unwrap_or(1.5);
+    for (_, shader) in shaders.iter_mut() {
+        if shader.path.ends_with("render/pbr_lighting.wesl")
+            && let bevy::shader::Source::Wesl(source) = &mut shader.source
+            && source.contains("const DISK_QUADRATURE_HORIZON_SCALE: f32 = 2.0;")
+        {
+            info!("Disk quadrature up to {scale} sin r, lobes wider than {min_lobe} sin r");
+            *configured = true;
+            *source = source
+                .replace(
+                    "const DISK_QUADRATURE_HORIZON_SCALE: f32 = 2.0;",
+                    &format!("const DISK_QUADRATURE_HORIZON_SCALE: f32 = {scale:?};"),
+                )
+                .replace(
+                    "const DISK_QUADRATURE_MIN_LOBE: f32 = 1.5;",
+                    &format!("const DISK_QUADRATURE_MIN_LOBE: f32 = {min_lobe:?};"),
+                )
+                .into();
+        }
+    }
+}
+
 /// `IBL_FILTER=stretch` uses the experimental view-dependent split sum, with
 /// `IBL_STRETCH_SCALE` (default 1) as the lobe width per unit of roughness.
 fn configure_stretch_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
@@ -231,7 +291,7 @@ fn configure_stretch_shader(mut shaders: ResMut<Assets<Shader>>, mut configured:
 
 /// `IBL_LOBE=fitted1|fitted2` replaces the specular lookup with the fitted one- or
 /// two-tap lookups, from the shader's table or the one in `IBL_LOBE_TABLE`
-/// (`kernel_table.py` output).
+/// (`kernel_table.py` output). `IBL_LOBE_HORIZON=1` clips each tap at the horizon.
 fn configure_lobe_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
     let taps = match std::env::var("IBL_LOBE").ok().as_deref() {
         Some("fitted1") => 1,
@@ -241,6 +301,13 @@ fn configure_lobe_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Lo
     if *configured {
         return;
     }
+    let horizon = std::env::var("IBL_LOBE_HORIZON").ok().as_deref() == Some("1");
+    let clip = |source: String| {
+        source.replace(
+            "const FITTED_LOBE_HORIZON_CLIP: bool = false;",
+            &format!("const FITTED_LOBE_HORIZON_CLIP: bool = {horizon};"),
+        )
+    };
     // Without a table, the one built into the shader.
     let Ok(path) = std::env::var("IBL_LOBE_TABLE") else {
         for (_, shader) in shaders.iter_mut() {
@@ -248,14 +315,13 @@ fn configure_lobe_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Lo
                 && let bevy::shader::Source::Wesl(source) = &mut shader.source
                 && source.contains("const FITTED_LOBE_TAPS: u32 = 0u;")
             {
-                info!("Fitted {taps}-tap specular lookups");
+                info!("Fitted {taps}-tap specular lookups, horizon clip {horizon}");
                 *configured = true;
-                *source = source
-                    .replace(
-                        "const FITTED_LOBE_TAPS: u32 = 0u;",
-                        &format!("const FITTED_LOBE_TAPS: u32 = {taps}u;"),
-                    )
-                    .into();
+                *source = clip(source.replace(
+                    "const FITTED_LOBE_TAPS: u32 = 0u;",
+                    &format!("const FITTED_LOBE_TAPS: u32 = {taps}u;"),
+                ))
+                .into();
             }
         }
         return;
@@ -285,19 +351,20 @@ fn configure_lobe_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Lo
             && let bevy::shader::Source::Wesl(source) = &mut shader.source
             && source.contains("const FITTED_LOBE_TAPS: u32 = 0u;")
         {
-            info!("Fitted {taps}-tap specular lookups from {path}");
+            info!("Fitted {taps}-tap specular lookups from {path}, horizon clip {horizon}");
             *configured = true;
             let start = source
                 .find("const FITTED_LOBE_TABLE: array<vec4<f32>, 144> = array(")
                 .unwrap();
             let end = start + source[start..].find(");").unwrap();
             let header = "const FITTED_LOBE_TABLE: array<vec4<f32>, 144> = array(\n";
-            *source = format!("{}{header}{entries}{}", &source[..start], &source[end..])
-                .replace(
+            *source = clip(
+                format!("{}{header}{entries}{}", &source[..start], &source[end..]).replace(
                     "const FITTED_LOBE_TAPS: u32 = 0u;",
                     &format!("const FITTED_LOBE_TAPS: u32 = {taps}u;"),
-                )
-                .into();
+                ),
+            )
+            .into();
         }
     }
 }
@@ -399,6 +466,8 @@ fn main() {
                 configure_fis_shader,
                 configure_sun_shader,
                 configure_stretch_shader,
+                configure_horizon_shader,
+                configure_disk_shader,
                 configure_lobe_shader,
                 configure_irradiance_shader,
                 profile_generated_environment_map,
