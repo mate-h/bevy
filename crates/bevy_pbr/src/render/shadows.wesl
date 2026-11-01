@@ -214,6 +214,22 @@ fn sample_directional_cascade(
     // Soft shadows from the light's angular size. The cascade is orthographic,
     // so its depth row scales NDC depth to world distance along the light.
     if (((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_ANGULAR_SOFT_SHADOWS_BIT) != 0u) {
+        // The receiver plane's depth gradient over shadow map UV, from two of its
+        // tangents, a few texels long so they stay inside the cascade, taken into
+        // light space.
+        let step = 4.0 * texel_size;
+        let tangent_x = step * normalize(cross(surface_normal,
+            select(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), abs(surface_normal.x) > 0.9)));
+        let tangent_y = step * normalize(cross(surface_normal, tangent_x));
+        let a = world_to_directional_light_local(light_id, cascade_index,
+            offset_position + vec4(tangent_x, 0.0)).xyz - light_local.xyz;
+        let b = world_to_directional_light_local(light_id, cascade_index,
+            offset_position + vec4(tangent_y, 0.0)).xyz - light_local.xyz;
+        let determinant = a.x * b.y - a.y * b.x;
+        var receiver_gradient = vec2(0.0);
+        if abs(determinant) > 1e-12 {
+            receiver_gradient = vec2(a.z * b.y - b.z * a.y, b.z * a.x - a.z * b.x) / determinant;
+        }
         let depth_row = vec3(
             (*cascade).clip_from_world[0].z,
             (*cascade).clip_from_world[1].z,
@@ -227,6 +243,7 @@ fn sample_directional_cascade(
             texel_size,
             (*light).sin_angular_radius / max((*light).cos_angular_radius, 1e-4),
             1.0 / max(length(depth_row), 1e-12),
+            receiver_gradient,
         );
     }
 

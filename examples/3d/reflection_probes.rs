@@ -57,7 +57,13 @@
 //! Materials: `IBL_METALLIC` (default 1; 0 measures diffuse) and
 //! `IBL_CLEARCOAT=<roughness>`. `IBL_IRRADIANCE=sampled` uses the generator's old
 //! Monte Carlo irradiance instead of spherical harmonics. `IBL_FILTER=stretch` is
-//! the experimental view-dependent split sum (`IBL_STRETCH_SCALE`, default 1).
+//! the experimental view-dependent split sum (`IBL_STRETCH_SCALE`, default 1), and
+//! `IBL_LOBE=fitted1|fitted2` the fitted one- or two-tap lookups.
+//!
+//! `IBL_SHADOW_SCENE=1` adds a diffuse ground under the sphere, enables the sun's
+//! shadow maps and measures the ground instead, to compare angular soft shadows
+//! (build with `experimental_pbr_pcss`). `IBL_ENV_ROTATE_DEG` rotates the
+//! environment, its local probes and the reference together.
 //!
 //! Reflection probes don't work on WebGL 2 or WebGPU.
 //! The pathtracer mode requires a GPU with ray-query support (`bevy_solari`).
@@ -223,6 +229,79 @@ fn configure_stretch_shader(mut shaders: ResMut<Assets<Shader>>, mut configured:
     }
 }
 
+/// `IBL_LOBE=fitted1|fitted2` replaces the specular lookup with the fitted one- or
+/// two-tap lookups, from the shader's table or the one in `IBL_LOBE_TABLE`
+/// (`kernel_table.py` output).
+fn configure_lobe_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
+    let taps = match std::env::var("IBL_LOBE").ok().as_deref() {
+        Some("fitted1") => 1,
+        Some("fitted2") => 2,
+        _ => return,
+    };
+    if *configured {
+        return;
+    }
+    // Without a table, the one built into the shader.
+    let Ok(path) = std::env::var("IBL_LOBE_TABLE") else {
+        for (_, shader) in shaders.iter_mut() {
+            if shader.path.ends_with("light_probe/environment_map.wesl")
+                && let bevy::shader::Source::Wesl(source) = &mut shader.source
+                && source.contains("const FITTED_LOBE_TAPS: u32 = 0u;")
+            {
+                info!("Fitted {taps}-tap specular lookups");
+                *configured = true;
+                *source = source
+                    .replace(
+                        "const FITTED_LOBE_TAPS: u32 = 0u;",
+                        &format!("const FITTED_LOBE_TAPS: u32 = {taps}u;"),
+                    )
+                    .into();
+            }
+        }
+        return;
+    };
+    let table: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("IBL_LOBE_TABLE unreadable"))
+            .expect("IBL_LOBE_TABLE is not JSON");
+    let number = |value: &serde_json::Value| value.as_f64().expect("table entries are numbers");
+    let mut entries = String::new();
+    for cell in table.as_array().expect("IBL_LOBE_TABLE is a list of cells") {
+        let taps2 = cell["taps2"].as_array().unwrap();
+        let tap1 = cell["tap1"].as_array().unwrap();
+        let tap = |i: usize, k: usize| number(&taps2[i][k]);
+        entries.push_str(&format!(
+            "vec4({:?}, {:?}, {:?}, {:?}), vec4({:?}, {:?}, {:?}, 0.0),\n",
+            tap(0, 0) as f32,
+            tap(0, 1) as f32,
+            tap(1, 0) as f32,
+            tap(1, 1) as f32,
+            tap(0, 2) as f32,
+            number(&tap1[0]) as f32,
+            number(&tap1[1]) as f32,
+        ));
+    }
+    for (_, shader) in shaders.iter_mut() {
+        if shader.path.ends_with("light_probe/environment_map.wesl")
+            && let bevy::shader::Source::Wesl(source) = &mut shader.source
+            && source.contains("const FITTED_LOBE_TAPS: u32 = 0u;")
+        {
+            info!("Fitted {taps}-tap specular lookups from {path}");
+            *configured = true;
+            let start = source
+                .find("const FITTED_LOBE_TABLE: array<vec4<f32>, 144> = array(")
+                .unwrap();
+            let end = start + source[start..].find(");").unwrap();
+            let header = "const FITTED_LOBE_TABLE: array<vec4<f32>, 144> = array(\n";
+            *source = format!("{}{header}{entries}{}", &source[..start], &source[end..])
+                .replace(
+                    "const FITTED_LOBE_TAPS: u32 = 0u;",
+                    &format!("const FITTED_LOBE_TAPS: u32 = {taps}u;"),
+                )
+                .into();
+        }
+    }
+}
+
 /// `IBL_SUN_METHOD=rep` shades disk-shaped directional lights with the representative
 /// direction instead of the LTC disk integral.
 fn configure_sun_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
@@ -320,6 +399,7 @@ fn main() {
                 configure_fis_shader,
                 configure_sun_shader,
                 configure_stretch_shader,
+                configure_lobe_shader,
                 configure_irradiance_shader,
                 profile_generated_environment_map,
             ),
@@ -380,7 +460,7 @@ fn setup(
         DirectionalLight {
             illuminance: sun.illuminance,
             angular_size: sun.angular_size,
-            shadow_maps_enabled: false,
+            shadow_maps_enabled: shadow_scene(),
             ..default()
         },
         Transform::default().looking_to(-sun.direction, Vec3::Y),
@@ -516,7 +596,13 @@ fn spawn_sphere(
         RaytracingMesh3d(sphere_mesh),
         MeshMaterial3d(
             materials.add(StandardMaterial {
-                base_color: Srgba::hex("#ffffff").unwrap().into(),
+                // Black in the shadow scene, so the reference has no light bounced
+                // off the sphere onto the ground, which the raster has no term for.
+                base_color: if shadow_scene() {
+                    Color::BLACK
+                } else {
+                    Srgba::hex("#ffffff").unwrap().into()
+                },
                 // `IBL_METALLIC=0` gives a white dielectric, to measure diffuse.
                 metallic: std::env::var("IBL_METALLIC")
                     .ok()
@@ -538,6 +624,52 @@ fn spawn_sphere(
         ),
         SphereMaterial,
     ));
+
+    // `IBL_SHADOW_SCENE=1` adds a white diffuse ground the sphere shadows, and the
+    // measured region becomes that ground.
+    if shadow_scene() {
+        let mut ground = Plane3d::default()
+            .mesh()
+            .size(2.0 * GROUND_HALF_SIZE, 2.0 * GROUND_HALF_SIZE)
+            .build();
+        ground.generate_tangents().unwrap();
+        if let Some(indices) = ground.indices_mut()
+            && let Indices::U16(_) = indices
+        {
+            *indices = Indices::U32(indices.iter().map(|i| i as u32).collect());
+        }
+        let ground = meshes.add(ground);
+        commands.spawn((
+            Mesh3d(ground.clone()),
+            RaytracingMesh3d(ground),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 1.0,
+                reflectance: 0.0,
+                ..StandardMaterial::default()
+            })),
+            Transform::from_xyz(0.0, GROUND_HEIGHT, 0.0),
+        ));
+    }
+}
+
+const GROUND_HEIGHT: f32 = -1.5;
+const GROUND_HALF_SIZE: f32 = 6.0;
+
+fn shadow_scene() -> bool {
+    std::env::var_os("IBL_SHADOW_SCENE").is_some()
+}
+
+/// The measured geometry: the unit sphere, or in the shadow scene the visible ground.
+fn ray_hits_measured_geometry(origin: Vec3, direction: Vec3) -> bool {
+    if !shadow_scene() {
+        return ray_hits_unit_sphere(origin, direction);
+    }
+    if ray_hits_unit_sphere(origin, direction) || direction.y >= 0.0 {
+        return false;
+    }
+    let hit = origin + direction * ((GROUND_HEIGHT - origin.y) / direction.y);
+    hit.x.abs() < GROUND_HALF_SIZE && hit.z.abs() < GROUND_HALF_SIZE
 }
 
 // Spawns the reflection probe.
@@ -877,6 +1009,7 @@ fn create_camera_environment_map_light(cubemaps: &Cubemaps) -> EnvironmentMapLig
             cubemaps.specular_environment_map.clone()
         },
         intensity: env_map_intensity(),
+        rotation: env_rotation(),
         ..default()
     }
 }
@@ -906,6 +1039,16 @@ fn rotate_camera(
 /// `stress_furnace` (constant, the case split-sum is exact for), `stress_wide`
 /// (60° cap, a source that covers a large part of the hemisphere), `stress_narrow`
 /// (12° disc, the narrow-highlight case).
+/// `IBL_ENV_ROTATE_DEG` rotates the environment about +Y: the view map, the local
+/// probes (through their transform) and the pathtracer reference alike.
+fn env_rotation() -> Quat {
+    let degrees: f32 = std::env::var("IBL_ENV_ROTATE_DEG")
+        .ok()
+        .map(|value| value.parse().expect("IBL_ENV_ROTATE_DEG must be a number"))
+        .unwrap_or(0.0);
+    Quat::from_rotation_y(degrees.to_radians())
+}
+
 fn env_map_intensity() -> f32 {
     std::env::var("IBL_ENV_INTENSITY")
         .ok()
@@ -1500,6 +1643,7 @@ fn drive_pathtracer_error_measure(
                             diffuse_map: cubemaps.diffuse_environment_map.clone(),
                             specular_map: cubemaps.specular_mip0.clone(),
                             intensity: env_map_intensity(),
+                            rotation: env_rotation(),
                             ..default()
                         });
                 }
@@ -1514,6 +1658,9 @@ fn drive_pathtracer_error_measure(
                 }
             }
             // Solari takes the first active camera's environment map, so swap all of them.
+            for mut environment_map in &mut camera_environment_maps {
+                environment_map.rotation = env_rotation();
+            }
             if ibl_reference_stem() != ibl_stress_stem() {
                 for mut environment_map in &mut camera_environment_maps {
                     environment_map.specular_map =
@@ -1669,11 +1816,13 @@ fn start_pathtracer_error_measure(
                 GeneratedEnvironmentMapLight {
                     environment_map: cubemaps.specular_mip0.clone(),
                     intensity: env_map_intensity(),
+                    rotation: env_rotation(),
                     ..default()
                 },
                 Skybox {
                     image: Some(cubemaps.specular_mip0.clone()),
                     brightness: env_map_intensity(),
+                    rotation: env_rotation(),
                     ..default()
                 },
             ));
@@ -1689,22 +1838,35 @@ fn start_pathtracer_error_measure(
                 },
                 ..default()
             };
-            // `IBL_LOCAL_PROBE=1` lights the sphere from a local light probe instead.
-            if std::env::var_os("IBL_LOCAL_PROBE").is_some() {
+            // `IBL_LOCAL_PROBE=1` lights the sphere from a local light probe instead,
+            // rotated by its transform; `IBL_LOCAL_PROBE=2` from two overlapping ones
+            // with the same map, which should blend to the single probe's result.
+            if let Some(local) = std::env::var_os("IBL_LOCAL_PROBE") {
                 commands
                     .entity(entity)
                     .remove::<(GeneratedEnvironmentMapLight, EnvironmentMapLight)>();
-                commands.spawn((
-                    LightProbe::default(),
-                    GeneratedEnvironmentMapLight {
-                        environment_map: cubemaps.specular_mip0.clone(),
-                        intensity: env_map_intensity(),
-                        ..default()
-                    },
-                    extraction,
-                    Transform::from_scale(Vec3::splat(4.0)),
-                    ParallaxCorrection::None,
-                ));
+                let probes: &[(Vec3, f32)] = if local == "2" {
+                    &[(Vec3::ZERO, 4.0), (Vec3::new(1.0, 0.5, -0.5), 6.0)]
+                } else {
+                    &[(Vec3::ZERO, 4.0)]
+                };
+                for &(translation, scale) in probes {
+                    commands.spawn((
+                        LightProbe::default(),
+                        GeneratedEnvironmentMapLight {
+                            environment_map: cubemaps.specular_mip0.clone(),
+                            intensity: env_map_intensity(),
+                            ..default()
+                        },
+                        extraction.clone(),
+                        Transform {
+                            translation,
+                            rotation: env_rotation(),
+                            scale: Vec3::splat(scale),
+                        },
+                        ParallaxCorrection::None,
+                    ));
+                }
             } else {
                 commands.entity(entity).insert(extraction);
             }
@@ -1831,7 +1993,8 @@ fn sphere_error_report(
             let ndc = uv * 2.0 - 1.0;
             let target = world_from_clip * Vec4::new(ndc.x, -ndc.y, 1.0, 1.0);
             let direction = (target.xyz() / target.w - origin).normalize_or_zero();
-            geometry_mask.push(direction != Vec3::ZERO && ray_hits_unit_sphere(origin, direction));
+            geometry_mask
+                .push(direction != Vec3::ZERO && ray_hits_measured_geometry(origin, direction));
             let (Some(c), Some(r)) = (
                 pixel_rgb(candidate_capture, stride, x, y),
                 reference_rgb(fixed_reference_capture, width, x, y).map(Vec3::from),

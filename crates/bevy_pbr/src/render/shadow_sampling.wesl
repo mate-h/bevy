@@ -310,9 +310,15 @@ fn sample_shadow_map_pcss(
         light_local, depth, array_index, frag_coord_xy, texel_size, blur_size, false);
 }
 
-/// PCSS for a distant disk light of angular radius `atan(tan_r)`: the penumbra
-/// is the blocker-to-receiver distance times `2 tan r`, in world units.
-/// `depth_range` converts shadow map depth to world distance along the light.
+/// PCSS for a distant disk light of angular radius `atan(tan_r)`. A blocker `Δz`
+/// above the receiver hides the part of the disk within `Δz tan r` of the
+/// receiver's light-space position, so both the blocker search and the filter
+/// are disks of that radius. `texel_size` is the cascade's world-space texel
+/// size and `depth_range` converts shadow map depth to world distance.
+///
+/// Each tap compares against the receiver plane's depth at the tap, from
+/// `receiver_gradient` (depth per unit of shadow map UV). Without that, wide taps
+/// on the side of a tilted receiver nearer the light find the receiver itself.
 fn sample_shadow_map_pcss_angular(
     light_local: vec2<f32>,
     depth: f32,
@@ -321,22 +327,46 @@ fn sample_shadow_map_pcss_angular(
     texel_size: f32,
     tan_r: f32,
     depth_range: f32,
+    receiver_gradient: vec2<f32>,
 ) -> f32 {
-    // Search as far as a blocker at the near plane could spread the penumbra,
-    // capped at 32 texels.
-    let max_penumbra = min(depth * depth_range * 2.0 * tan_r, 32.0 * texel_size);
-    let z_blocker = search_for_blockers_in_shadow_map(
-        light_local, depth, array_index, texel_size, max(max_penumbra, texel_size));
+    let shadow_map_size = vec2<f32>(textureDimensions(view_bindings::directional_shadow_textures));
+    let world_to_uv = 1.0 / (texel_size * shadow_map_size);
+
+    // Search as far as a blocker at the near plane could reach, capped at 32 texels.
+    let search_radius = max(min(depth * depth_range * tan_r, 32.0 * texel_size), texel_size);
+    var blockers = vec2(0.0);
+    for (var i = 0u; i < 8u; i++) {
+        let offset = D3D_SAMPLE_POINT_POSITIONS[i] * search_radius * world_to_uv;
+        blockers += search_for_blockers_in_shadow_map_hardware(light_local + offset,
+            depth + dot(receiver_gradient, offset), array_index);
+    }
+    if blockers.y == 0.0 {
+        return 1.0;
+    }
     // Reversed Z: blockers are nearer the light, so their depth is larger.
-    let penumbra = max(z_blocker - depth, 0.0) * depth_range * 2.0 * tan_r;
-    let blur_size = max(penumbra / texel_size, 0.5);
+    let z_blocker = blockers.x / blockers.y;
+    let radius = max(z_blocker - depth, 0.0) * depth_range * tan_r;
+    // At least half a texel, so the edge of a sharp shadow is still filtered.
+    let filter_radius = max(radius, 0.5 * texel_size);
+
+    // A Vogel disk: equal-area rings, so every tap stands for the same part of the
+    // light, rotated per pixel (and per frame with temporal filtering).
+    var temporal = false;
     @if(SHADOW_FILTER_METHOD_TEMPORAL)
-    return sample_shadow_map_jimenez_fourteen(
-        light_local, depth, array_index, frag_coord_xy, texel_size, blur_size, true);
-    @else   // SHADOW_FILTER_METHOD_TEMPORAL
-    return sample_shadow_map_jimenez_fourteen(
-        light_local, depth, array_index, frag_coord_xy, texel_size, blur_size, false);
+    temporal = true;
+    let rotation = random_rotation_matrix(frag_coord_xy, temporal);
+    var sum = 0.0;
+    for (var i = 0u; i < ANGULAR_PCSS_TAPS; i++) {
+        let angle = f32(i) * 2.39996323;
+        let distance = sqrt((f32(i) + 0.5) / f32(ANGULAR_PCSS_TAPS));
+        let offset = (rotation * (distance * vec2(cos(angle), sin(angle)))) * filter_radius * world_to_uv;
+        sum += sample_shadow_map_hardware(light_local + offset,
+            depth + dot(receiver_gradient, offset), array_index);
+    }
+    return sum / f32(ANGULAR_PCSS_TAPS);
 }
+
+const ANGULAR_PCSS_TAPS: u32 = 16u;
 
 // NOTE: Due to the non-uniform control flow in `shadows::fetch_point_shadow`,
 // we must use the Level variant of textureSampleCompare to avoid undefined

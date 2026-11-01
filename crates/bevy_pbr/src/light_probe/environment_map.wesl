@@ -39,6 +39,164 @@ const STRETCH_TAPS: u32 = 5u;
 /// Angular standard deviation of the reflected lobe, per unit of roughness α.
 const STRETCH_LOBE_SCALE: f32 = 1.0;
 
+// Experimental fitted view-dependent lookups. The reflected GGX lobe at
+// (roughness, N⋅V) is fitted offline with one or two reads of the round
+// prefiltered map, each rotated in the plane of N and R by its own angle and read
+// at its own roughness (`kernel_table.py` in the reflection_probes notes). The
+// reflection_probes harness enables it with `IBL_LOBE=fitted1|fitted2`. The
+// table is fitted to the lobe's response to spherical-cap lights of 5° to 90°,
+// each size weighted equally so that light the round kernels collect from below
+// the horizon counts; rows are perceptual roughness 0.2, 0.3, …, 1, columns the
+// N⋅V below.
+const FITTED_LOBE_TAPS: u32 = 0u;
+const FITTED_LOBE_NOV: array<f32, 8> = array(1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.1, 0.05);
+/// Per cell, roughness-major: `(angle₀, roughness₀, angle₁, roughness₁)` of the
+/// two-tap fit, then `(weight₀, angle, roughness, 0)` with the one-tap fit. Angles
+/// rotate R toward N, in radians.
+const FITTED_LOBE_TABLE: array<vec4<f32>, 144> = array(
+    vec4(-0.0192, 0.8475, 0.0000, 0.2018), vec4(0.0137, 0.0000, 0.2071, 0.0),
+    vec4(-0.0154, 0.1819, 0.0546, 0.1899), vec4(0.7474, 0.0006, 0.1909, 0.0),
+    vec4(-0.0328, 0.1745, 0.0413, 0.1569), vec4(0.5445, 0.0015, 0.1816, 0.0),
+    vec4(-0.0266, 0.1345, 0.0557, 0.1868), vec4(0.5345, 0.0091, 0.1765, 0.0),
+    vec4(-0.0277, 0.1479, 0.0775, 0.1204), vec4(0.6339, 0.0006, 0.1539, 0.0),
+    vec4(0.0105, 0.1457, 0.1834, 0.1926), vec4(0.8854, 0.0191, 0.1644, 0.0),
+    vec4(0.0113, 0.0309, 0.1123, 0.1690), vec4(0.3568, 0.0609, 0.1804, 0.0),
+    vec4(0.0965, 0.1224, 0.3874, 0.3179), vec4(0.7176, 0.1388, 0.2195, 0.0),
+    vec4(-0.0006, 0.9576, 0.0000, 0.3020), vec4(0.0384, 0.0000, 0.3093, 0.0),
+    vec4(-0.0158, 0.2695, 0.1660, 0.3472), vec4(0.8225, 0.0045, 0.2893, 0.0),
+    vec4(-0.0464, 0.2346, 0.1391, 0.2777), vec4(0.6444, 0.0032, 0.2732, 0.0),
+    vec4(-0.0458, 0.2021, 0.1453, 0.2683), vec4(0.5614, 0.0329, 0.2616, 0.0),
+    vec4(-0.0260, 0.1934, 0.1884, 0.2443), vec4(0.5848, 0.0101, 0.2222, 0.0),
+    vec4(0.0223, 0.1875, 0.2849, 0.2851), vec4(0.6701, 0.0617, 0.2242, 0.0),
+    vec4(0.0790, 0.1722, 0.3827, 0.3303), vec4(0.6164, 0.1352, 0.2415, 0.0),
+    vec4(0.1286, 0.1706, 0.4529, 0.3609), vec4(0.5534, 0.1923, 0.2522, 0.0),
+    vec4(-0.0000, 1.0000, 0.0000, 0.4028), vec4(0.0954, -0.0001, 0.4206, 0.0),
+    vec4(-0.0270, 0.3682, 0.2491, 0.4364), vec4(0.7834, 0.0089, 0.3929, 0.0),
+    vec4(-0.0650, 0.3054, 0.1921, 0.3820), vec4(0.5231, 0.0216, 0.3647, 0.0),
+    vec4(-0.0887, 0.2376, 0.1856, 0.3396), vec4(0.3887, 0.0551, 0.3447, 0.0),
+    vec4(-0.0387, 0.2049, 0.2090, 0.3373), vec4(0.2806, 0.0736, 0.3308, 0.0),
+    vec4(0.0488, 0.2071, 0.3302, 0.3635), vec4(0.3811, 0.1123, 0.2980, 0.0),
+    vec4(0.1667, 0.2177, 0.5567, 0.4311), vec4(0.4972, 0.1980, 0.3023, 0.0),
+    vec4(0.2206, 0.2168, 0.6584, 0.4678), vec4(0.4838, 0.2511, 0.3161, 0.0),
+    vec4(-0.0000, 0.5001, 0.0000, 1.0000), vec4(0.7995, -0.0002, 0.5432, 0.0),
+    vec4(-0.0153, 0.4684, 0.5413, 0.6056), vec4(0.8181, 0.0289, 0.5031, 0.0),
+    vec4(-0.0547, 0.3837, 0.3377, 0.4972), vec4(0.5180, 0.0716, 0.4654, 0.0),
+    vec4(0.0248, 0.3600, 0.4835, 0.4930), vec4(0.5819, 0.1248, 0.4424, 0.0),
+    vec4(0.0332, 0.2434, 0.4284, 0.4633), vec4(0.3377, 0.2059, 0.4315, 0.0),
+    vec4(0.1218, 0.2344, 0.5555, 0.4858), vec4(0.3616, 0.2808, 0.4344, 0.0),
+    vec4(0.2143, 0.2270, 0.7038, 0.5239), vec4(0.3571, 0.3812, 0.4499, 0.0),
+    vec4(0.2622, 0.2240, 0.7880, 0.5509), vec4(0.3462, 0.4437, 0.4651, 0.0),
+    vec4(-0.0000, 0.5857, 0.0000, 1.0000), vec4(0.6217, -0.0002, 0.6775, 0.0),
+    vec4(-0.0108, 0.5506, 0.6354, 0.7765), vec4(0.7080, 0.0887, 0.6220, 0.0),
+    vec4(0.0280, 0.4751, 0.6754, 0.6791), vec4(0.5906, 0.1755, 0.5807, 0.0),
+    vec4(0.0923, 0.4314, 0.7504, 0.6554), vec4(0.5312, 0.2607, 0.5609, 0.0),
+    vec4(0.1902, 0.4042, 0.8965, 0.6625), vec4(0.5033, 0.3713, 0.5546, 0.0),
+    vec4(0.2669, 0.3931, 1.0239, 0.6827), vec4(0.4862, 0.4637, 0.5612, 0.0),
+    vec4(0.3512, 0.3864, 1.1779, 0.7223), vec4(0.4653, 0.5752, 0.5805, 0.0),
+    vec4(0.3978, 0.3863, 1.2763, 0.7582), vec4(0.4563, 0.6395, 0.5976, 0.0),
+    vec4(-0.0000, 0.6393, 0.0000, 1.0000), vec4(0.3454, -0.0004, 0.8198, 0.0),
+    vec4(0.0076, 0.6136, 0.6116, 0.9459), vec4(0.5224, 0.2091, 0.7591, 0.0),
+    vec4(0.0973, 0.5493, 0.8485, 0.8666), vec4(0.4977, 0.3484, 0.7227, 0.0),
+    vec4(0.1906, 0.5151, 1.0106, 0.8466), vec4(0.4805, 0.4647, 0.7099, 0.0),
+    vec4(0.2971, 0.4893, 1.1791, 0.8524), vec4(0.4585, 0.5991, 0.7119, 0.0),
+    vec4(0.3740, 0.4763, 1.3015, 0.8746), vec4(0.4405, 0.7025, 0.7247, 0.0),
+    vec4(0.4547, 0.4675, 1.4412, 0.9247), vec4(0.4206, 0.8203, 0.7527, 0.0),
+    vec4(0.4956, 0.4658, 1.5240, 0.9751), vec4(0.4101, 0.8867, 0.7778, 0.0),
+    vec4(-0.0002, 0.5419, 0.0000, 1.0000), vec4(0.0400, -0.0003, 0.9639, 0.0),
+    vec4(-0.0301, 0.6525, 0.6060, 1.0000), vec4(0.2963, 0.3910, 1.0000, 0.0),
+    vec4(0.1375, 0.6051, 0.8879, 1.0000), vec4(0.3280, 0.6019, 1.0000, 0.0),
+    vec4(0.2501, 0.5780, 1.0747, 1.0000), vec4(0.3322, 0.7519, 1.0000, 0.0),
+    vec4(0.3555, 0.5560, 1.2590, 1.0000), vec4(0.3291, 0.9034, 1.0000, 0.0),
+    vec4(0.4216, 0.5445, 1.3869, 1.0000), vec4(0.3257, 1.0065, 1.0000, 0.0),
+    vec4(0.4837, 0.5394, 1.5329, 1.0000), vec4(0.3283, 1.1107, 1.0000, 0.0),
+    vec4(0.5140, 0.5437, 1.6272, 1.0000), vec4(0.3388, 1.1618, 1.0000, 0.0),
+    vec4(-1.1039, 1.0000, 0.0422, 1.0000), vec4(0.0570, -0.0000, 1.0000, 0.0),
+    vec4(-0.1829, 1.0000, 0.6109, 1.0000), vec4(0.1341, 0.5226, 1.0000, 0.0),
+    vec4(0.0016, 0.6484, 0.9402, 1.0000), vec4(0.1704, 0.7708, 1.0000, 0.0),
+    vec4(0.1478, 0.6326, 1.1354, 1.0000), vec4(0.1911, 0.9333, 1.0000, 0.0),
+    vec4(0.2740, 0.6229, 1.3290, 1.0000), vec4(0.2124, 1.0886, 1.0000, 0.0),
+    vec4(0.3521, 0.6223, 1.4673, 1.0000), vec4(0.2321, 1.1903, 1.0000, 0.0),
+    vec4(0.4326, 0.6334, 1.6339, 1.0000), vec4(0.2671, 1.2903, 1.0000, 0.0),
+    vec4(0.4845, 0.6524, 1.7536, 1.0000), vec4(0.3039, 1.3378, 1.0000, 0.0),
+    vec4(-0.3351, 1.0000, 0.2543, 1.0000), vec4(0.4366, -0.0000, 1.0000, 0.0),
+    vec4(0.5562, 1.0000, 1.7738, 1.0000), vec4(0.8898, 0.6435, 1.0000, 0.0),
+    vec4(0.8065, 1.0000, 2.0659, 0.7258), vec4(0.8784, 0.9273, 1.0000, 0.0),
+    vec4(-0.0309, 0.7318, 1.2486, 1.0000), vec4(0.1420, 1.1040, 1.0000, 0.0),
+    vec4(1.0835, 1.0000, 2.3934, 0.7420), vec4(0.8274, 1.2661, 1.0000, 0.0),
+    vec4(1.1420, 1.0000, 2.4818, 0.7558), vec4(0.7945, 1.3694, 1.0000, 0.0),
+    vec4(1.1527, 1.0000, 2.5402, 0.7891), vec4(0.7348, 1.4705, 1.0000, 0.0),
+    vec4(0.8573, 1.0000, 2.1581, 1.0000), vec4(0.4926, 1.5207, 1.0000, 0.0),
+);
+
+fn fitted_lobe_cell(i: u32, j: u32) -> array<vec4<f32>, 2> {
+    let index = 2u * (i * 8u + j);
+    return array(FITTED_LOBE_TABLE[index], FITTED_LOBE_TABLE[index + 1u]);
+}
+
+fn fitted_lobe_radiance(
+    map: texture_cube<f32>,
+    input: LayerLightingInput,
+    max_specular_mip: f32,
+    world_position: vec3<f32>,
+    light_from_world: mat4x4<f32>,
+    bounds: vec3<f32>,
+    parallax_correct: bool,
+    rotation: vec4<f32>,
+) -> vec3<f32> {
+    let N = input.N;
+    let R = input.R;
+    let perceptual = input.perceptual_roughness;
+    let NdotV = clamp(input.NdotV, 0.05, 1.0);
+
+    // Bilinear weights over the table; below its first row, blend toward the
+    // plain lookup at zero roughness.
+    let row = clamp((perceptual - 0.2) / 0.1, 0.0, 8.0);
+    let i0 = min(u32(row), 7u);
+    let fi = row - f32(i0);
+    var j0 = 0u;
+    for (var j = 0u; j < 6u; j++) {
+        if NdotV < FITTED_LOBE_NOV[j + 1u] {
+            j0 = j + 1u;
+        }
+    }
+    let fj = (FITTED_LOBE_NOV[j0] - NdotV) / (FITTED_LOBE_NOV[j0] - FITTED_LOBE_NOV[j0 + 1u]);
+    let c00 = fitted_lobe_cell(i0, j0);
+    let c01 = fitted_lobe_cell(i0, j0 + 1u);
+    let c10 = fitted_lobe_cell(i0 + 1u, j0);
+    let c11 = fitted_lobe_cell(i0 + 1u, j0 + 1u);
+    let blend = clamp(perceptual / 0.2, 0.0, 1.0);
+    let identity = array(vec4(0.0, perceptual, 0.0, perceptual), vec4(1.0, 0.0, perceptual, 0.0));
+    var cell: array<vec4<f32>, 2>;
+    for (var k = 0u; k < 2u; k++) {
+        let fitted = mix(mix(c00[k], c01[k], fj), mix(c10[k], c11[k], fj), fi);
+        cell[k] = mix(identity[k], fitted, blend);
+    }
+
+    // R = cos θ N + sin θ T in the plane of incidence; a tap's angle turns it toward N.
+    let tangent_raw = R - dot(N, R) * N;
+    let tangent_length = length(tangent_raw);
+    let T = select(vec3(0.0), tangent_raw / max(tangent_length, 1e-6), tangent_length > 1e-6);
+    let theta = atan2(tangent_length, dot(N, R));
+
+    var angles = vec2(cell[1].y, 0.0);
+    var roughnesses = vec2(cell[1].z, 0.0);
+    var weights = vec2(1.0, 0.0);
+    if FITTED_LOBE_TAPS == 2u {
+        angles = cell[0].xz;
+        roughnesses = cell[0].yw;
+        weights = vec2(cell[1].x, 1.0 - cell[1].x);
+    }
+    var radiance = vec3(0.0);
+    for (var k = 0u; k < FITTED_LOBE_TAPS; k++) {
+        let angle = theta - angles[k];
+        let direction = compute_cubemap_sample_dir(world_position,
+            cos(angle) * N + sin(angle) * T, light_from_world, bounds, parallax_correct, rotation);
+        radiance += weights[k] * textureSampleLevel(map, bindings::environment_map_sampler,
+            direction, specular_radiance_level(saturate(roughnesses[k]), max_specular_mip)).rgb;
+    }
+    return radiance;
+}
+
 fn stretched_split_sum_radiance(
     map: texture_cube<f32>,
     input: LayerLightingInput,
@@ -338,26 +496,26 @@ fn compute_radiances(
             parallax_correct,
             view_rotation,
         );
-        radiances.radiance +=
-            textureSampleLevel(
-                bindings::specular_environment_maps[query_result.texture_index],
-                bindings::environment_map_sampler,
-                radiance_sample_dir,
-                radiance_level).rgb * query_result.intensity * query_result.weight;
-
-        if STRETCHED_SPLIT_SUM {
-            // Replace the round lookup above with the stretched one.
-            radiances.radiance -= textureSampleLevel(
-                bindings::specular_environment_maps[query_result.texture_index],
-                bindings::environment_map_sampler,
-                radiance_sample_dir,
-                radiance_level).rgb * query_result.intensity * query_result.weight;
-            radiances.radiance += stretched_split_sum_radiance(
+        // The fitted or stretched lookups replace the round one, so it isn't read.
+        var specular: vec3<f32>;
+        if FITTED_LOBE_TAPS > 0u {
+            specular = fitted_lobe_radiance(
                 bindings::specular_environment_maps[query_result.texture_index], input,
                 max_specular_mip, world_position, query_result.light_from_world,
-                query_result.parallax_correction_bounds, parallax_correct, view_rotation)
-                * query_result.intensity * query_result.weight;
+                query_result.parallax_correction_bounds, parallax_correct, view_rotation);
+        } else if STRETCHED_SPLIT_SUM {
+            specular = stretched_split_sum_radiance(
+                bindings::specular_environment_maps[query_result.texture_index], input,
+                max_specular_mip, world_position, query_result.light_from_world,
+                query_result.parallax_correction_bounds, parallax_correct, view_rotation);
+        } else {
+            specular = textureSampleLevel(
+                bindings::specular_environment_maps[query_result.texture_index],
+                bindings::environment_map_sampler,
+                radiance_sample_dir,
+                radiance_level).rgb;
         }
+        radiances.radiance += specular * query_result.intensity * query_result.weight;
 
         if SHADE_TIME_FIS {
             let filtered = filtered_importance_radiance(
@@ -452,6 +610,14 @@ fn compute_radiances(
 
     if STRETCHED_SPLIT_SUM {
         radiances.radiance = stretched_split_sum_radiance(bindings::specular_environment_map,
+            input, max_specular_mip, world_position, mat4x4<f32>(
+                vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0),
+                vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)),
+            vec3(0.0), false, light_probes.view_rotation) * intensity;
+    }
+
+    if FITTED_LOBE_TAPS > 0u {
+        radiances.radiance = fitted_lobe_radiance(bindings::specular_environment_map,
             input, max_specular_mip, world_position, mat4x4<f32>(
                 vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0),
                 vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)),

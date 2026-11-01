@@ -90,8 +90,9 @@ pub struct GeneratorPipelines {
 }
 
 /// Entry points of `environment_sources.wesl`, in dispatch order.
-const SOURCE_PASSES: [&str; 6] = [
+const SOURCE_PASSES: [&str; 7] = [
     "cell_stats",
+    "find_peak",
     "cell_clamped",
     "choose_threshold",
     "cell_excess",
@@ -1104,7 +1105,7 @@ pub fn downsampling_system(
             for (pipeline, entry_point) in source_pipelines.iter().zip(SOURCE_PASSES) {
                 compute_pass.set_pipeline(pipeline);
                 match entry_point {
-                    "choose_threshold" | "select_sources" => {
+                    "find_peak" | "choose_threshold" | "select_sources" => {
                         compute_pass.dispatch_workgroups(1, 1, 1);
                     }
                     "write_residual" => {

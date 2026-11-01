@@ -178,26 +178,26 @@ fn cell_stats(
 
 var<workgroup> reduce_a: array<f32, SELECT_THREADS>;
 var<workgroup> reduce_b: array<f32, SELECT_THREADS>;
-var<workgroup> peak_luminance: f32;
 
-/// The largest luminance over all cells, the same in every invocation.
-fn workgroup_peak_luminance(thread: u32, threads: u32) -> f32 {
+/// The largest luminance over all cells, computed once for the passes after it.
+@compute
+@workgroup_size(256, 1, 1)
+fn find_peak(@builtin(local_invocation_index) thread: u32) {
     var peak = 0.0;
-    for (var index = thread; index < cell_count(); index += threads) {
+    for (var index = thread; index < cell_count(); index += SELECT_THREADS) {
         peak = max(peak, cells[index].max_luminance);
     }
     reduce_a[thread] = peak;
     workgroupBarrier();
-    for (var stride = threads / 2u; stride > 0u; stride /= 2u) {
+    for (var stride = SELECT_THREADS / 2u; stride > 0u; stride /= 2u) {
         if thread < stride {
             reduce_a[thread] = max(reduce_a[thread], reduce_a[thread + stride]);
         }
         workgroupBarrier();
     }
     if thread == 0u {
-        peak_luminance = reduce_a[0];
+        globals.max_luminance = reduce_a[0];
     }
-    return workgroupUniformLoad(&peak_luminance);
 }
 
 fn candidate_threshold(peak: f32, k: u32) -> f32 {
@@ -207,8 +207,8 @@ fn candidate_threshold(peak: f32, k: u32) -> f32 {
 var<workgroup> texel_bin: array<u32, CELL_THREADS>;
 var<workgroup> texel_luminance: array<f32, CELL_THREADS>;
 var<workgroup> texel_solid_angles: array<f32, CELL_THREADS>;
-var<workgroup> bin_luminance: array<f32, CANDIDATES>;
-var<workgroup> bin_solid_angle: array<f32, CANDIDATES>;
+var<workgroup> bin_luminance: array<f32, CELL_THREADS>;
+var<workgroup> bin_solid_angle: array<f32, CELL_THREADS>;
 
 /// Σ min(Y, t_k) Ω of each cell, for every threshold candidate, from a histogram:
 /// a texel in bin `j` (`t_{j+1} < Y ≤ t_j`) contributes `Y Ω` to the candidates
@@ -221,7 +221,7 @@ fn cell_clamped(
     @builtin(local_invocation_index) thread: u32,
 ) {
     let index = workgroup.x;
-    let peak = workgroup_peak_luminance(thread, CELL_THREADS);
+    let peak = globals.max_luminance;
     let coords = cell_coords(index);
     let span = cell_span();
     var luminance_sum = 0.0;
@@ -247,25 +247,27 @@ fn cell_clamped(
         texel_luminance[thread] = weighted;
         texel_solid_angles[thread] = omega;
         workgroupBarrier();
-        if thread < CANDIDATES {
-            for (var i = 0u; i < CELL_THREADS; i++) {
-                if texel_bin[i] == thread {
-                    luminance_sum += texel_luminance[i];
-                    solid_angle_sum += texel_solid_angles[i];
-                }
+        // Thread `t` gathers bin `t % 32` from its half of the texels
+        // (`CELL_THREADS` is twice `CANDIDATES`).
+        let bin_of_thread = thread % CANDIDATES;
+        let half = (thread / CANDIDATES) * (CELL_THREADS / 2u);
+        for (var i = half; i < half + CELL_THREADS / 2u; i++) {
+            if texel_bin[i] == bin_of_thread {
+                luminance_sum += texel_luminance[i];
+                solid_angle_sum += texel_solid_angles[i];
             }
         }
         workgroupBarrier();
     }
-    if thread < CANDIDATES {
-        bin_luminance[thread] = luminance_sum;
-        bin_solid_angle[thread] = solid_angle_sum;
-    }
+    bin_luminance[thread] = luminance_sum;
+    bin_solid_angle[thread] = solid_angle_sum;
     workgroupBarrier();
     if thread < CANDIDATES {
         var clamped = 0.0;
         for (var j = 0u; j < CANDIDATES; j++) {
-            clamped += select(candidate_threshold(peak, thread) * bin_solid_angle[j], bin_luminance[j], j >= thread);
+            let bin = vec2(bin_luminance[j], bin_solid_angle[j])
+                + vec2(bin_luminance[j + CANDIDATES], bin_solid_angle[j + CANDIDATES]);
+            clamped += select(candidate_threshold(peak, thread) * bin.y, bin.x, j >= thread);
         }
         cells[index].clamped[thread] = clamped;
     }
@@ -280,7 +282,7 @@ fn cell_clamped(
 @compute
 @workgroup_size(256, 1, 1)
 fn choose_threshold(@builtin(local_invocation_index) thread: u32) {
-    let peak = workgroup_peak_luminance(thread, SELECT_THREADS);
+    let peak = globals.max_luminance;
     let k = thread % CANDIDATES;
     let group = thread / CANDIDATES;
     var clamped = 0.0;
@@ -322,7 +324,6 @@ fn choose_threshold(@builtin(local_invocation_index) thread: u32) {
                 }
             }
         }
-        globals.max_luminance = peak;
         globals.mean_luminance = mean;
         globals.threshold = threshold;
     }
@@ -411,27 +412,65 @@ fn reduce_sum(thread: u32, value: vec4<f32>) -> vec4<f32> {
 @workgroup_size(256, 1, 1)
 fn select_sources(@builtin(local_invocation_index) thread: u32) {
     let count = cell_count();
+    // Each thread owns cells `thread + j * SELECT_THREADS`, cached here.
+    var weights: array<f32, CELLS_PER_THREAD>;
+    var neighbors: array<vec4<u32>, CELLS_PER_THREAD>;
     var total_weight = 0.0;
     for (var j = 0u; j < CELLS_PER_THREAD; j++) {
         let index = thread + j * SELECT_THREADS;
-        labels[index] = UNLABELED;
+        weights[j] = 0.0;
         if index < count {
-            total_weight += cells[index].weight;
+            weights[j] = cells[index].weight;
+            neighbors[j] = cells[index].neighbors;
+            total_weight += weights[j];
         }
+        // Every cell with excess starts as its own component.
+        labels[index] = select(UNLABELED, index, weights[j] > 0.0);
     }
     total_weight = reduce_sum(thread, vec4(total_weight, 0.0, 0.0, 0.0)).x;
+
+    // Connected components of cells with excess, across face seams, all at once:
+    // each cell takes the smallest label among itself and its neighbors until
+    // nothing changes. Cells without excess stay UNLABELED, the largest value.
+    for (var iteration = 0u; iteration < 6u * MAX_GRID; iteration++) {
+        if thread == 0u {
+            atomicStore(&changed, 0u);
+        }
+        workgroupBarrier();
+        for (var j = 0u; j < CELLS_PER_THREAD; j++) {
+            let index = thread + j * SELECT_THREADS;
+            if weights[j] <= 0.0 {
+                continue;
+            }
+            let n = neighbors[j];
+            let smallest = min(
+                min(labels[index], labels[n.x]),
+                min(min(labels[n.y], labels[n.z]), labels[n.w]),
+            );
+            if smallest < labels[index] {
+                labels[index] = smallest;
+                atomicStore(&changed, 1u);
+            }
+        }
+        workgroupBarrier();
+        if thread == 0u {
+            changed_value = atomicLoad(&changed);
+        }
+        if workgroupUniformLoad(&changed_value) == 0u {
+            break;
+        }
+    }
 
     var kept_count = 0u;
     var kept_weight = 0.0;
     for (var attempt = 0u; attempt < MAX_ATTEMPTS; attempt++) {
-        // Seed: the unlabeled cell with the most excess.
+        // Seed: the cell with the most excess in a component not yet examined.
         var best = 0.0;
         var best_index = UNLABELED;
         for (var j = 0u; j < CELLS_PER_THREAD; j++) {
-            let index = thread + j * SELECT_THREADS;
-            if index < count && labels[index] == UNLABELED && cells[index].weight > best {
-                best = cells[index].weight;
-                best_index = index;
+            if weights[j] > best {
+                best = weights[j];
+                best_index = thread + j * SELECT_THREADS;
             }
         }
         reduce_a[thread] = best;
@@ -448,37 +487,11 @@ fn select_sources(@builtin(local_invocation_index) thread: u32) {
         if seed == UNLABELED || kept_count >= params.max_sources {
             break;
         }
-        if thread == 0u {
-            labels[seed] = attempt;
-        }
-        workgroupBarrier();
-
-        // Flood fill across cells with excess, crossing face seams.
-        for (var iteration = 0u; iteration < 6u * MAX_GRID; iteration++) {
-            if thread == 0u {
-                atomicStore(&changed, 0u);
-            }
-            workgroupBarrier();
-            for (var j = 0u; j < CELLS_PER_THREAD; j++) {
-                let index = thread + j * SELECT_THREADS;
-                if index >= count || labels[index] != UNLABELED || cells[index].weight <= 0.0 {
-                    continue;
-                }
-                let neighbors = cells[index].neighbors;
-                if labels[neighbors.x] == attempt
-                    || labels[neighbors.y] == attempt
-                    || labels[neighbors.z] == attempt
-                    || labels[neighbors.w] == attempt {
-                    labels[index] = attempt;
-                    atomicStore(&changed, 1u);
-                }
-            }
-            workgroupBarrier();
-            if thread == 0u {
-                changed_value = atomicLoad(&changed);
-            }
-            if workgroupUniformLoad(&changed_value) == 0u {
-                break;
+        let component = labels[seed];
+        // Examined, whether or not it is kept.
+        for (var j = 0u; j < CELLS_PER_THREAD; j++) {
+            if labels[thread + j * SELECT_THREADS] == component {
+                weights[j] = 0.0;
             }
         }
 
@@ -487,7 +500,7 @@ fn select_sources(@builtin(local_invocation_index) thread: u32) {
         var moment = vec4(0.0);
         for (var j = 0u; j < CELLS_PER_THREAD; j++) {
             let index = thread + j * SELECT_THREADS;
-            if index < count && labels[index] == attempt {
+            if index < count && labels[index] == component {
                 energy_weight += vec4(cells[index].energy, cells[index].weight);
                 moment += vec4(cells[index].moment, 0.0);
             }
@@ -506,7 +519,7 @@ fn select_sources(@builtin(local_invocation_index) thread: u32) {
         var covariance = vec4(0.0);
         for (var j = 0u; j < CELLS_PER_THREAD; j++) {
             let index = thread + j * SELECT_THREADS;
-            if index < count && labels[index] == attempt && cells[index].weight > 0.0 {
+            if index < count && labels[index] == component && cells[index].weight > 0.0 {
                 let w = cells[index].weight;
                 let d = normalize(cells[index].moment);
                 let offset = vec2(dot(d, basis_x), dot(d, basis_y));
@@ -531,7 +544,7 @@ fn select_sources(@builtin(local_invocation_index) thread: u32) {
         if accepted {
             for (var j = 0u; j < CELLS_PER_THREAD; j++) {
                 let index = thread + j * SELECT_THREADS;
-                if index < count && labels[index] == attempt {
+                if index < count && labels[index] == component {
                     cells[index].kept = 1u;
                 }
             }
