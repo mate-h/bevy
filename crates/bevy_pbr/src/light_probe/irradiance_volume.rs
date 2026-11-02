@@ -319,6 +319,7 @@ impl LightProbeComponent for IrradianceVolume {
 
     fn create_render_view_light_probes(
         _: Option<&Self>,
+        _: &Self::QueryData,
         _: &RenderAssets<GpuImage>,
     ) -> RenderViewLightProbes<Self> {
         RenderViewLightProbes::new()
