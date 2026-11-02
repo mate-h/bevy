@@ -322,13 +322,13 @@ fn calculate_contact_shadow(
     return 1.0;
 }
 
-/// Returns the material-supplied shadow factor for a light with the given custom shadow channel
-/// bits (`channel + 1` of its `CustomShadowChannel`, or 0 if it has none).
-fn custom_shadow_factor(custom_shadow_factors: vec4<f32>, custom_shadow_channel: u32) -> f32 {
-    if custom_shadow_channel == 0u {
+/// Returns the material-supplied shadow factor for a light with the given material shadow channel
+/// bits (`channel + 1` of its `MaterialShadowChannel`, or 0 if it has none).
+fn material_shadow_factor(material_shadow_factors: vec4<f32>, material_shadow_channel: u32) -> f32 {
+    if material_shadow_channel == 0u {
         return 1.0;
     }
-    return custom_shadow_factors[custom_shadow_channel - 1u];
+    return material_shadow_factors[material_shadow_channel - 1u];
 }
 
 @if(!PREPASS_FRAGMENT)
@@ -489,16 +489,16 @@ fn apply_pbr_lighting(
         @else   // LIGHTMAP
         let enable_diffuse = true;
 
-        // Material-supplied shadowing for lights with a `CustomShadowChannel`.
-        let custom_shadow = custom_shadow_factor(
-            in.custom_shadow_factors,
-            (view_bindings::clustered_lights.data[light_id].flags >> mesh_view_types::POINT_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT) &
-                mesh_view_types::POINT_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_MASK,
+        // Material-supplied shadowing for lights with a `MaterialShadowChannel`.
+        let material_shadow = material_shadow_factor(
+            in.material_shadow_factors,
+            (view_bindings::clustered_lights.data[light_id].flags >> mesh_view_types::POINT_LIGHT_FLAGS_MATERIAL_SHADOW_CHANNEL_SHIFT) &
+                mesh_view_types::POINT_LIGHT_FLAGS_MATERIAL_SHADOW_CHANNEL_MASK,
         );
 
         var shadow: f32 = 1.0;
         if is_shadow_receiver {
-            shadow = custom_shadow;
+            shadow = material_shadow;
         }
         if (is_shadow_receiver
                 && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
@@ -528,7 +528,7 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if is_transmitted_shadow_receiver {
-            transmitted_shadow = custom_shadow;
+            transmitted_shadow = material_shadow;
         }
         if (is_transmitted_shadow_receiver
                 && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
@@ -556,16 +556,16 @@ fn apply_pbr_lighting(
         @else   // LIGHTMAP
         let enable_diffuse = true;
 
-        // Material-supplied shadowing for lights with a `CustomShadowChannel`.
-        let custom_shadow = custom_shadow_factor(
-            in.custom_shadow_factors,
-            (view_bindings::clustered_lights.data[light_id].flags >> mesh_view_types::POINT_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT) &
-                mesh_view_types::POINT_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_MASK,
+        // Material-supplied shadowing for lights with a `MaterialShadowChannel`.
+        let material_shadow = material_shadow_factor(
+            in.material_shadow_factors,
+            (view_bindings::clustered_lights.data[light_id].flags >> mesh_view_types::POINT_LIGHT_FLAGS_MATERIAL_SHADOW_CHANNEL_SHIFT) &
+                mesh_view_types::POINT_LIGHT_FLAGS_MATERIAL_SHADOW_CHANNEL_MASK,
         );
 
         var shadow: f32 = 1.0;
         if is_shadow_receiver {
-            shadow = custom_shadow;
+            shadow = material_shadow;
         }
         if (is_shadow_receiver
                 && (view_bindings::clustered_lights.data[light_id].flags &
@@ -602,7 +602,7 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if is_transmitted_shadow_receiver {
-            transmitted_shadow = custom_shadow;
+            transmitted_shadow = material_shadow;
         }
         if (is_transmitted_shadow_receiver
                 && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
@@ -638,16 +638,16 @@ fn apply_pbr_lighting(
         @else   // LIGHTMAP
         let enable_diffuse = true;
 
-        // Material-supplied shadowing for lights with a `CustomShadowChannel`.
-        let custom_shadow = custom_shadow_factor(
-            in.custom_shadow_factors,
-            ((*light).flags >> mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_SHIFT) &
-                mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_CUSTOM_SHADOW_CHANNEL_MASK,
+        // Material-supplied shadowing for lights with a `MaterialShadowChannel`.
+        let material_shadow = material_shadow_factor(
+            in.material_shadow_factors,
+            ((*light).flags >> mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_MATERIAL_SHADOW_CHANNEL_SHIFT) &
+                mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_MATERIAL_SHADOW_CHANNEL_MASK,
         );
 
         var shadow: f32 = 1.0;
         if is_shadow_receiver {
-            shadow = custom_shadow;
+            shadow = material_shadow;
         }
         if (is_shadow_receiver
                 && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
@@ -681,7 +681,7 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if is_transmitted_shadow_receiver {
-            transmitted_shadow = custom_shadow;
+            transmitted_shadow = material_shadow;
         }
         if (is_transmitted_shadow_receiver
                 && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
