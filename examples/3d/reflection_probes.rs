@@ -56,7 +56,9 @@
 //!
 //! Materials: `IBL_METALLIC` (default 1; 0 measures diffuse) and
 //! `IBL_CLEARCOAT=<roughness>`. `IBL_IRRADIANCE=sampled` uses the generator's old
-//! Monte Carlo irradiance instead of spherical harmonics. `IBL_FILTER=stretch` is
+//! Monte Carlo irradiance instead of spherical harmonics, and `IBL_IRRADIANCE_EXCESS`
+//! sets the clamp above which texels are kept out of the SH projection (0 = none,
+//! default 16). `IBL_FILTER=stretch` is
 //! the experimental view-dependent split sum (`IBL_STRETCH_SCALE`, default 1), and
 //! `IBL_LOBE=fitted1|fitted2` the fitted one- or two-tap lookups
 //! (`IBL_LOBE_HORIZON=1` clips each tap at the surface horizon). `IBL_HORIZON=1`
@@ -181,9 +183,12 @@ struct Cubemaps {
 }
 
 /// `IBL_IRRADIANCE=sampled` makes the runtime generator's irradiance use the old
-/// 1024-sample estimator instead of spherical harmonics.
+/// 1024-sample estimator instead of spherical harmonics, and `IBL_IRRADIANCE_EXCESS`
+/// sets the clamp above which texels are kept out of the projection (0 = none).
 fn configure_irradiance_shader(mut shaders: ResMut<Assets<Shader>>, mut configured: Local<bool>) {
-    if *configured || std::env::var("IBL_IRRADIANCE").ok().as_deref() != Some("sampled") {
+    let sampled = std::env::var("IBL_IRRADIANCE").ok().as_deref() == Some("sampled");
+    let excess = std::env::var("IBL_IRRADIANCE_EXCESS").ok();
+    if *configured || (!sampled && excess.is_none()) {
         return;
     }
     for (_, shader) in shaders.iter_mut() {
@@ -191,14 +196,26 @@ fn configure_irradiance_shader(mut shaders: ResMut<Assets<Shader>>, mut configur
             && let bevy::shader::Source::Wesl(source) = &mut shader.source
             && source.contains("const IRRADIANCE_SH: bool = true;")
         {
-            info!("Generated irradiance uses Monte Carlo samples");
             *configured = true;
-            *source = source
-                .replace(
+            let mut patched = source.to_string();
+            if sampled {
+                info!("Generated irradiance uses Monte Carlo samples");
+                patched = patched.replace(
                     "const IRRADIANCE_SH: bool = true;",
                     "const IRRADIANCE_SH: bool = false;",
-                )
-                .into();
+                );
+            }
+            if let Some(excess) = &excess {
+                let excess: f32 = excess
+                    .parse()
+                    .expect("IBL_IRRADIANCE_EXCESS must be a number");
+                info!("SH irradiance keeps texels above {excess}× the mean out of the projection");
+                patched = patched.replace(
+                    "const IRRADIANCE_SH_EXCESS_SCALE: f32 = 16.0;",
+                    &format!("const IRRADIANCE_SH_EXCESS_SCALE: f32 = {excess:?};"),
+                );
+            }
+            *source = patched.into();
         }
     }
 }

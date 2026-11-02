@@ -186,8 +186,20 @@ fn irradiance_sample_lod(pdf: f32, src_width: f32, sample_count: f32, max_lod: f
 const IRRADIANCE_SH: bool = true;
 /// Face size of the level projected onto spherical harmonics.
 const IRRADIANCE_SH_SOURCE_SIZE: u32 = 32u;
+/// Two bands ring around a small, very bright source such as a sun (±20% on a
+/// sphere under a beach HDRI). Texels brighter than this many times the map's mean
+/// luminance are clamped to it, keeping their color, before the projection, and
+/// their excess is added back per output texel as exact clamped-cosine point
+/// lights. 0 projects every texel.
+const IRRADIANCE_SH_EXCESS_SCALE: f32 = 16.0;
+/// At most this many excess texels are kept as point lights; any beyond go into the
+/// projection with the rest.
+const IRRADIANCE_SH_MAX_EXCESS: u32 = 64u;
 
 var<workgroup> sh_partial: array<vec3f, 64>;
+var<workgroup> excess_count: atomic<u32>;
+var<workgroup> excess_direction: array<vec3f, 64>;
+var<workgroup> excess_radiance: array<vec3f, 64>;
 
 fn sh9_basis(d: vec3f) -> array<f32, 9> {
     return array<f32, 9>(
@@ -207,29 +219,80 @@ fn texel_corner(x: f32, y: f32) -> f32 {
     return atan2(x * y, sqrt(1.0 + x * x + y * y));
 }
 
+/// Sums `value` over the workgroup; every invocation gets the total.
+fn workgroup_sum(local_index: u32, value: vec3f) -> vec3f {
+    sh_partial[local_index] = value;
+    workgroupBarrier();
+    for (var stride = 32u; stride > 0u; stride /= 2u) {
+        if local_index < stride {
+            sh_partial[local_index] += sh_partial[local_index + stride];
+        }
+        workgroupBarrier();
+    }
+    let total = sh_partial[0];
+    workgroupBarrier();
+    return total;
+}
+
+/// Texel `t` of the projected level, as its direction and its radiance times its
+/// solid angle.
+fn sh_source_texel(t: u32, size: u32, level: u32) -> array<vec3f, 2> {
+    let face = t / (size * size);
+    let rem = t - face * size * size;
+    let coords = vec2u(rem % size, rem / size);
+    let inv = 2.0 / f32(size);
+    let lo = vec2f(coords) * inv - 1.0;
+    let hi = lo + inv;
+    let solid_angle = texel_corner(hi.x, hi.y) - texel_corner(lo.x, hi.y)
+        - texel_corner(hi.x, lo.y) + texel_corner(lo.x, lo.y);
+    let uv = (vec2f(coords) + 0.5) / f32(size);
+    return array(output_texel_world_dir(uv, face),
+        textureLoad(input_texture, coords, face, level).rgb * solid_angle);
+}
+
 /// Projects the environment onto 9 SH coefficients, cosine-convolved and divided
-/// by π, so `dot(coefficients, Y(n))` is the white Lambertian radiance at `n`.
+/// by π, so `dot(coefficients, Y(n))` is the white Lambertian radiance at `n`,
+/// leaving out the excess of texels above `IRRADIANCE_SH_EXCESS_SCALE`, which it
+/// stores in `excess_direction` and `excess_radiance` (radiance times solid angle).
 /// Every invocation of the workgroup gets the full result.
 fn project_irradiance_sh(local_index: u32) -> array<vec3f, 9> {
     let base_size = textureDimensions(input_texture).x;
     let size = min(IRRADIANCE_SH_SOURCE_SIZE, base_size);
     let level = u32(round(log2(f32(base_size) / f32(size))));
     let texels = 6u * size * size;
+    let luma = vec3f(0.2126, 0.7152, 0.0722);
+
+    if local_index == 0u {
+        atomicStore(&excess_count, 0u);
+    }
+    workgroupBarrier();
+    // The clamp is on luminance times solid angle. The mean radiance comes from the
+    // chain's 1×1 level, whose faces are box averages: close enough for a threshold.
+    var clamp_luminance = 3.4e38;
+    if IRRADIANCE_SH_EXCESS_SCALE > 0.0 {
+        let last = textureNumLevels(input_texture) - 1u;
+        var mean = 0.0;
+        for (var face = 0u; face < 6u; face++) {
+            mean += dot(textureLoad(input_texture, vec2u(0u), face, last).rgb, luma) / 6.0;
+        }
+        clamp_luminance = IRRADIANCE_SH_EXCESS_SCALE * mean * (4.0 * PI / f32(texels));
+    }
 
     var partial: array<vec3f, 9>;
     for (var t = local_index; t < texels; t += 64u) {
-        let face = t / (size * size);
-        let rem = t - face * size * size;
-        let coords = vec2u(rem % size, rem / size);
-        let inv = 2.0 / f32(size);
-        let lo = vec2f(coords) * inv - 1.0;
-        let hi = lo + inv;
-        let solid_angle = texel_corner(hi.x, hi.y) - texel_corner(lo.x, hi.y)
-            - texel_corner(hi.x, lo.y) + texel_corner(lo.x, lo.y);
-        let uv = (vec2f(coords) + 0.5) / f32(size);
-        let direction = output_texel_world_dir(uv, face);
-        let radiance = textureLoad(input_texture, coords, face, level).rgb * solid_angle;
-        let basis = sh9_basis(direction);
+        let texel = sh_source_texel(t, size, level);
+        var radiance = texel[1];
+        let luminance = dot(radiance, luma);
+        if luminance > clamp_luminance {
+            let clamped = radiance * (clamp_luminance / luminance);
+            let slot = atomicAdd(&excess_count, 1u);
+            if slot < IRRADIANCE_SH_MAX_EXCESS {
+                excess_direction[slot] = texel[0];
+                excess_radiance[slot] = radiance - clamped;
+                radiance = clamped;
+            }
+        }
+        let basis = sh9_basis(texel[0]);
         for (var i = 0u; i < 9u; i++) {
             partial[i] += radiance * basis[i];
         }
@@ -239,16 +302,7 @@ fn project_irradiance_sh(local_index: u32) -> array<vec3f, 9> {
     let band_scale = array<f32, 9>(1.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.25, 0.25, 0.25, 0.25, 0.25);
     var result: array<vec3f, 9>;
     for (var i = 0u; i < 9u; i++) {
-        sh_partial[local_index] = partial[i];
-        workgroupBarrier();
-        for (var stride = 32u; stride > 0u; stride /= 2u) {
-            if local_index < stride {
-                sh_partial[local_index] += sh_partial[local_index + stride];
-            }
-            workgroupBarrier();
-        }
-        result[i] = sh_partial[0] * band_scale[i];
-        workgroupBarrier();
+        result[i] = workgroup_sum(local_index, partial[i]) * band_scale[i];
     }
     return result;
 }
@@ -267,13 +321,19 @@ fn generate_irradiance_map(
             return;
         }
         let uv = (vec2f(global_id.xy) + 0.5) / vec2f(size);
-        let basis = sh9_basis(output_texel_world_dir(uv, global_id.z));
+        let normal = output_texel_world_dir(uv, global_id.z);
+        let basis = sh9_basis(normal);
         var irradiance = vec3f(0.0);
         for (var i = 0u; i < 9u; i++) {
             irradiance += coefficients[i] * basis[i];
         }
-        // Two bands can ring below zero around bright, small sources.
-        textureStore(output_texture, global_id.xy, global_id.z, vec4f(max(irradiance, vec3f(0.0)), 1.0));
+        // Two bands can still ring below zero around what the clamp leaves.
+        irradiance = max(irradiance, vec3f(0.0));
+        let excess = min(atomicLoad(&excess_count), IRRADIANCE_SH_MAX_EXCESS);
+        for (var i = 0u; i < excess; i++) {
+            irradiance += excess_radiance[i] * (max(dot(normal, excess_direction[i]), 0.0) / PI);
+        }
+        textureStore(output_texture, global_id.xy, global_id.z, vec4f(irradiance, 1.0));
         return;
     }
     generate_irradiance_map_sampled(global_id);
