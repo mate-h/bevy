@@ -363,9 +363,9 @@ impl FromWorld for Cubemaps {
     fn from_world(world: &mut World) -> Self {
         Cubemaps {
             diffuse_environment_map: world
-                .load_asset("environment_maps/pisa_diffuse_rgb9e5_zstd.ktx2"),
+                .load_asset("environment_maps/chinese_garden_diffuse_rgb9e5_zstd.ktx2"),
             specular_environment_map: world
-                .load_asset("environment_maps/pisa_specular_rgb9e5_zstd.ktx2"),
+                .load_asset("environment_maps/chinese_garden_specular_rgb9e5_zstd.ktx2"),
             specular_reflection_probe: world
                 .load_asset("environment_maps/cubes_reflection_probe_specular_rgb9e5_zstd.ktx2"),
         }
