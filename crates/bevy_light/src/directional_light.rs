@@ -85,6 +85,16 @@ pub struct DirectionalLight {
     /// The default is [`light_consts::lux::AMBIENT_DAYLIGHT`] = 10,000.
     pub illuminance: f32,
 
+    /// The angular diameter of the light, in radians.
+    ///
+    /// A light with an angular size is shaded as a uniformly bright disk, which
+    /// widens and softens its specular highlights on smooth surfaces. The total
+    /// light, [`illuminance`](Self::illuminance), stays the same. Use
+    /// [`SunDisk::EARTH`]'s angular size for the sun as seen from Earth.
+    ///
+    /// The default is `0.0`, an infinitely small light.
+    pub angular_size: f32,
+
     /// Whether this light casts shadows.
     ///
     /// Note that shadows are rather expensive and become more so with every
@@ -149,6 +159,7 @@ impl Default for DirectionalLight {
         DirectionalLight {
             color: Color::WHITE,
             illuminance: light_consts::lux::AMBIENT_DAYLIGHT,
+            angular_size: 0.0,
             shadow_maps_enabled: false,
             contact_shadows_enabled: false,
             shadow_depth_bias: Self::DEFAULT_SHADOW_DEPTH_BIAS,
