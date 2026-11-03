@@ -49,11 +49,13 @@ use bevy_render::{
 //    storage texture.
 // 2. Generating mipmaps with a quadratic B-spline filter.
 // 3. Convolving the mip chain twice:
-//    * a [Lambertian convolution] for the 32 × 32 diffuse cubemap
+//    * a [Lambertian convolution] for the 32 × 32 diffuse cubemap, with a
+//      projection onto [spherical harmonics]
 //    * a [GGX convolution] for each mip of the specular cubemap, with the fitted
 //      filters of [Manson and Sloan].
 //
 // [Lambertian convolution]: https://bruop.github.io/ibl/#:~:text=Lambertian%20Diffuse%20Component
+// [spherical harmonics]: https://cseweb.ucsd.edu/~ravir/papers/envmap/envmap.pdf
 // [GGX convolution]: https://gpuopen.com/download/Bounded_VNDF_Sampling_for_Smith-GGX_Reflections.pdf
 // [Manson and Sloan]: https://doi.org/10.1111/cgf.12822
 
@@ -234,7 +236,11 @@ pub fn initialize_generated_environment_map_resources(
         &BindGroupLayoutEntries::with_indices(
             ShaderStages::COMPUTE,
             (
-                (1, sampler(SamplerBindingType::Filtering)), // Source sampler
+                // Source environment cubemap
+                (
+                    0,
+                    texture_2d_array(TextureSampleType::Float { filterable: true }),
+                ),
                 // Output irradiance map
                 (
                     2,
@@ -242,11 +248,6 @@ pub fn initialize_generated_environment_map_resources(
                         TextureFormat::Rgba16Float,
                         StorageTextureAccess::WriteOnly,
                     ),
-                ),
-                // Source environment cubemap
-                (
-                    5,
-                    texture_cube(TextureSampleType::Float { filterable: true }),
                 ),
             ),
         ),
@@ -585,9 +586,8 @@ pub fn prepare_generated_environment_map_bind_groups(
             "irradiance_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.irradiance),
             &BindGroupEntries::with_indices((
-                (1, &samplers.linear),
+                (0, &textures.environment_map.default_view),
                 (2, &irradiance_map),
-                (5, &environment_map_cube),
             )),
         );
 

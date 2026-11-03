@@ -1,4 +1,5 @@
-import package::render::utils::{sample_cosine_hemisphere, sample_cube_dir};
+import bevy_render::maths::PI;
+import package::render::utils::sample_cube_dir;
 
 struct FilteringConstants {
     perceptual_roughness: f32,
@@ -12,7 +13,8 @@ const TABLE_PARAMETERS: u32 = 5u;
 const TABLE_INDICES: u32 = 6u;
 const TAPS_PER_AXIS_DIV_4: u32 = 2u;
 
-// The source as a cubemap, so filtering crosses face edges.
+@group(0) @binding(0) var input_texture: texture_2d_array<f32>;
+// The same source as a cubemap, so filtering crosses face edges.
 @group(0) @binding(5) var input_cube: texture_cube<f32>;
 @group(0) @binding(1) var input_sampler: sampler;
 @group(0) @binding(2) var output_texture: texture_storage_2d_array<rgba16float, write>;
@@ -110,47 +112,151 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     textureStore(output_texture, coords, face, vec4f(max(color / total_weight, vec3f(0.0)), 1.0));
 }
 
+// Irradiance is projected from the mip with faces of this size, or the source
+// if it is smaller.
+const IRRADIANCE_SOURCE_SIZE: u32 = 32u;
+// Two SH bands ring around a small, very bright source such as the sun. So texels
+// brighter than this many times the mean luminance are clamped before the
+// projection, and their excess is added back exactly as point lights.
+const IRRADIANCE_EXCESS_SCALE: f32 = 16.0;
+// At most this many texels are clamped; any beyond are projected in full.
+const IRRADIANCE_MAX_EXCESS: u32 = 64u;
+
+var<workgroup> sh_partial_sums: array<vec3f, 64>;
+var<workgroup> excess_count: atomic<u32>;
+var<workgroup> excess_directions: array<vec3f, IRRADIANCE_MAX_EXCESS>;
+var<workgroup> excess_radiances: array<vec3f, IRRADIANCE_MAX_EXCESS>;
+
+fn sh9_basis(d: vec3f) -> array<f32, 9> {
+    return array<f32, 9>(
+        0.282095,
+        0.488603 * d.y,
+        0.488603 * d.z,
+        0.488603 * d.x,
+        1.092548 * d.x * d.y,
+        1.092548 * d.y * d.z,
+        0.315392 * (3.0 * d.z * d.z - 1.0),
+        1.092548 * d.x * d.z,
+        0.546274 * (d.x * d.x - d.y * d.y),
+    );
+}
+
+/// The solid angle of the part of a cube face between its center and the
+/// position `(x, y)` on it, in [-1, 1].
+fn face_corner_solid_angle(x: f32, y: f32) -> f32 {
+    return atan2(x * y, sqrt(1.0 + x * x + y * y));
+}
+
+/// Sums `value` over the workgroup; every invocation gets the total.
+fn workgroup_sum(local_index: u32, value: vec3f) -> vec3f {
+    sh_partial_sums[local_index] = value;
+    workgroupBarrier();
+    for (var stride = 32u; stride > 0u; stride /= 2u) {
+        if (local_index < stride) {
+            sh_partial_sums[local_index] += sh_partial_sums[local_index + stride];
+        }
+        workgroupBarrier();
+    }
+    let total = sh_partial_sums[0];
+    workgroupBarrier();
+    return total;
+}
+
+/// Projects the source onto 9 spherical harmonic coefficients (Ramamoorthi and
+/// Hanrahan 2001), convolved with the clamped cosine and divided by π, so that
+/// the irradiance over π at the normal `n` is their dot product with the basis
+/// at `n`. The excess of texels brighter than `IRRADIANCE_EXCESS_SCALE` times
+/// the mean is left out and stored in `excess_directions` and
+/// `excess_radiances`, as radiance times solid angle.
+fn project_irradiance(local_index: u32) -> array<vec3f, 9> {
+    let base_size = textureDimensions(input_texture).x;
+    let size = min(IRRADIANCE_SOURCE_SIZE, base_size);
+    let level = firstLeadingBit(base_size / size);
+    let texel_count = 6u * size * size;
+    let luminance_weights = vec3f(0.2126, 0.7152, 0.0722);
+
+    if (local_index == 0u) {
+        atomicStore(&excess_count, 0u);
+    }
+    workgroupBarrier();
+
+    // The mean comes from the 1×1 mip, which is close enough for a threshold.
+    let last_level = textureNumLevels(input_texture) - 1u;
+    var mean_luminance = 0.0;
+    for (var face = 0u; face < 6u; face++) {
+        let radiance = textureLoad(input_texture, vec2u(0u), face, last_level).rgb;
+        mean_luminance += dot(radiance, luminance_weights) / 6.0;
+    }
+    let max_luminance = IRRADIANCE_EXCESS_SCALE * mean_luminance * 4.0 * PI / f32(texel_count);
+
+    var partial_sums: array<vec3f, 9>;
+    for (var texel = local_index; texel < texel_count; texel += 64u) {
+        let face = texel / (size * size);
+        let coords = vec2u(texel % size, (texel / size) % size);
+        let lo = 2.0 * vec2f(coords) / f32(size) - 1.0;
+        let hi = 2.0 * vec2f(coords + 1u) / f32(size) - 1.0;
+        let solid_angle = face_corner_solid_angle(hi.x, hi.y) - face_corner_solid_angle(lo.x, hi.y)
+            - face_corner_solid_angle(hi.x, lo.y) + face_corner_solid_angle(lo.x, lo.y);
+        let direction = sample_cube_dir((vec2f(coords) + 0.5) / f32(size), face);
+
+        // Radiance times solid angle, and its luminance.
+        var radiance = textureLoad(input_texture, coords, face, level).rgb * solid_angle;
+        let luminance = dot(radiance, luminance_weights);
+        if (luminance > max_luminance) {
+            let slot = atomicAdd(&excess_count, 1u);
+            if (slot < IRRADIANCE_MAX_EXCESS) {
+                let clamped = radiance * (max_luminance / luminance);
+                excess_directions[slot] = direction;
+                excess_radiances[slot] = radiance - clamped;
+                radiance = clamped;
+            }
+        }
+
+        let basis = sh9_basis(direction);
+        for (var i = 0u; i < 9u; i++) {
+            partial_sums[i] += radiance * basis[i];
+        }
+    }
+
+    // The clamped cosine convolved with each band, over π.
+    let band_scales = array<f32, 9>(1.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.25, 0.25, 0.25, 0.25, 0.25);
+    var coefficients: array<vec3f, 9>;
+    for (var i = 0u; i < 9u; i++) {
+        coefficients[i] = workgroup_sum(local_index, partial_sums[i]) * band_scales[i];
+    }
+    return coefficients;
+}
+
+/// Computes the diffuse map from a projection of the source onto spherical
+/// harmonics, which every workgroup computes in full before writing its texels.
 @compute
 @workgroup_size(8, 8, 1)
-fn generate_irradiance_map(@builtin(global_invocation_id) global_id: vec3u) {
+fn generate_irradiance_map(
+    @builtin(global_invocation_id) global_id: vec3u,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    let coefficients = project_irradiance(local_index);
+
     let size = textureDimensions(output_texture).xy;
-    let invSize = 1.0 / vec2f(size);
-
-    let coords = vec2u(global_id.xy);
+    let coords = global_id.xy;
     let face = global_id.z;
-
     if (any(coords >= size)) {
         return;
     }
 
-    // Convert texture coordinates to direction vector
-    let uv = (vec2f(coords) + 0.5) * invSize;
-    let normal = sample_cube_dir(uv, face);
-
+    let normal = sample_cube_dir((vec2f(coords) + 0.5) / vec2f(size), face);
+    let basis = sh9_basis(normal);
     var irradiance = vec3f(0.0);
+    for (var i = 0u; i < 9u; i++) {
+        irradiance += coefficients[i] * basis[i];
+    }
+    // Two bands can ring below zero around what the clamp leaves.
+    irradiance = max(irradiance, vec3f(0.0));
 
-    // 32 phi, 32 theta = 1024 samples total
-    let sample_count = 1024u;
-
-    // Use uniform sampling on a hemisphere
-    for (var i = 0u; i < sample_count; i++) {
-        // Build a deterministic RNG seed for this pixel / sample
-        // 4 randomly chosen 32-bit primes
-        var rng: u32 = (coords.x * 2131358057u) ^ (coords.y * 3416869721u) ^ (face * 1199786941u) ^ (i * 566200673u);
-
-        // Sample a direction from the upper hemisphere around the normal
-        var sample_dir = sample_cosine_hemisphere(normal, &rng);
-
-        // Sample environment with level 0 (no mip)
-        var sample_color = sample_environment(sample_dir, 0.0).rgb;
-
-        // Accumulate the contribution
-        irradiance += sample_color;
+    let excess_texel_count = min(atomicLoad(&excess_count), IRRADIANCE_MAX_EXCESS);
+    for (var i = 0u; i < excess_texel_count; i++) {
+        irradiance += excess_radiances[i] * max(dot(normal, excess_directions[i]), 0.0) / PI;
     }
 
-    // Normalize by number of samples (cosine-weighted sampling already accounts for PDF)
-    irradiance = irradiance / f32(sample_count);
-
-    // Write result to output texture
     textureStore(output_texture, coords, face, vec4f(irradiance, 1.0));
 }
