@@ -25,7 +25,7 @@ import package::atmosphere::{
         cloud_layer_segment, get_cloud_medium_density_coarse, near_camera_reshape,
         get_cloud_medium_density_lod, cloud_mip_from_distance, get_cloud_scattering_coeff,
         get_cloud_absorption_coeff, cloud_density_context, cloud_layer, cirrus_slant_optical_depth, CIRRUS_SLICES,
-        cloud_field_uvw, cloud_field_voxel_m, CLOUD_FIELD_EXTENT_M,
+        cloud_field_uvw, cloud_field_voxel_m, CLOUD_FIELD_EXTENT_M, CLOUD_FIELD_RES_Z,
         cloud_profile_lut, CLOUD_PROFILE_TYPE_ROWS, CLOUD_SCHEME_ROW,
         cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
         cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
@@ -82,11 +82,54 @@ fn cloud_far_leap(p: vec3<f32>, r_p: f32, ray_dir: vec3<f32>) -> f32 {
 
 /// The cloud field's diffusion solution at p (0 outside the grid).
 fn cloud_field_diffuse(p: vec3<f32>) -> f32 {
-    let uvw = cloud_field_uvw(p, textureLoad(cloud_field_diff, vec3(0), 0).gb);
+    return cloud_field_diffuse_sample(p, textureLoad(cloud_field_diff, vec3(0), 0).gb).r;
+}
+
+/// The published volume at p with the solution's build cell: (U, build cell, extinction); 0
+/// outside the grid.
+fn cloud_field_diffuse_sample(p: vec3<f32>, cell: vec2<f32>) -> vec4<f32> {
+    let uvw = cloud_field_uvw(p, cell);
     if (any(uvw.xy < vec2(0.0)) || any(uvw.xy > vec2(1.0))) {
-        return 0.0;
+        return vec4(0.0);
     }
-    return textureSampleLevel(cloud_field_diff, atmosphere_lut_sampler, saturate(uvw), 0.0).r;
+    return textureSampleLevel(cloud_field_diff, atmosphere_lut_sampler, saturate(uvw), 0.0);
+}
+
+/// The diffusion solution's in-scatter toward the camera, per unit sun irradiance in units of
+/// U (the cloud pass's multiple-scattering source is E (.) / (4 pi) per unit sigma_s), and U.
+/// The Eddington diffuse radiance is I(w) = (U + 3 F.w) / (4 pi) with the diffuse flux
+/// F = -D grad U, D = 1 / (3 sigma') (cloud_field.wesl); in-scattered by the droplet phase
+/// function (first moment g) it gives the source (U + 3 g F.w) / (4 pi) for light leaving along
+/// w = -ray_dir (Joseph, Wiscombe & Weinman 1976, eq. 3-6: the first-moment term). U grows inward
+/// from a cloud's surface (Marshak: outward flux U / 2), so faces seen from outside send more than
+/// U / (4 pi). F.w from a central difference of U along the ray over one cell. Only the flux of
+/// the diffusion term: the beam's own first moment (g' T'_sun along the sun) is not representable
+/// by this linear expansion with g ~ 0.88 (negative radiance near sunlit faces) and stays in the
+/// forward-peak beam term. IPRT C2 cube vs MYSTIC on this grid, all 9 views
+/// (.clouds-handoff/validation/iprt_c2/c2_grid.py): 0.79 -> 0.89, 0.79-1.06 per view.
+fn cloud_field_diffuse_toward(p: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
+    let cell = textureLoad(cloud_field_diff, vec3(0), 0).gb;
+    let c = cloud_field_diffuse_sample(p, cell);
+    let up = normalize(p);
+    let v = dot(ray_dir, up);
+    let hz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_FIELD_RES_Z);
+    let eps = 0.5 / length(vec2(sqrt(max(1.0 - v * v, 0.0)) / cloud_field_voxel_m(), v / hz));
+    let u_far = cloud_field_diffuse_sample(p + ray_dir * eps, cell).r;
+    let u_near = cloud_field_diffuse_sample(p - ray_dir * eps, cell).r;
+    let g = CLOUD_MIE_MEAN_COS;
+    let sigma_p = (1.0 - g * g) * max(c.a, 1e-6);
+    let du = (u_far - u_near) / (2.0 * eps);
+    // Flux-limited diffusion (Levermore & Pomraning 1981, ApJ 248): F = -(lambda(R) / sigma')
+    // grad U, R = |grad U| / (sigma' U), lambda = (coth R - 1/R) / R: 1/3 (Fick, D above) where
+    // the field varies slowly, and |F| -> U (free streaming) where it varies within a mean free
+    // path, as at the edge of the published volume (the extinction filtered toward clear cells;
+    // with D alone, 15-60x fireflies in the hero, backlit and low-sun views). R from the
+    // derivative along the ray. C2 cube: 0.90 -> 0.89 (c2_grid.py LIMIT=1).
+    let r = abs(du) / (sigma_p * max(c.r, 1e-9));
+    let r_safe = max(r, 1e-2);
+    let lambda = select((1.0 / tanh(r_safe) - 1.0 / r_safe) / r_safe, 1.0 / 3.0 - r * r / 45.0, r < 1e-2);
+    // -3 g F.w with w = -ray_dir: + 3 g (lambda / sigma') dU/dt along the ray.
+    return vec2(max(c.r + 3.0 * g * lambda / sigma_p * du, 0.0), c.r);
 }
 /// Second exponential integral E2(x) = int_1^inf exp(-x t) / t^2 dt (the hemispheric escape of a
 /// slab of optical depth x). Rational fit exp(-x) (x^2 + a x + b) / (x^3 + c x^2 + d x + b),
@@ -1191,7 +1234,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                         var field_on = light_i == 0u;
                         @if(ATM_DBG_MS_SERIES_ONLY) { field_on = false; }
                         if (field_on) {
-                            ms_vol = max(ms_vol, cloud_field_diffuse(p));
+                            // The solve is delta-Eddington (Joseph, Wiscombe & Weinman 1976): its
+                            // diffuse field leaves out the light scattered into the forward peak
+                            // (a fraction g^2 of every scattering), which stays in the delta-scaled
+                            // direct beam T' = exp(-(1 - g^2) tau_sun) and is not in exp(-tau_sun).
+                            // That beam, T' - T, is in-scattered with the full phase function like
+                            // the direct sunlight. IPRT C2 cube vs MYSTIC (Emde et al. 2019), all 9
+                            // views: 0.67 -> 0.80 of the radiance, lowest view 0.39 -> 0.71
+                            // (.clouds-handoff/validation/iprt_c2/c2_flux.py). The escape series (thin
+                            // cloud) was fitted to all orders >= 2, the forward-peak beam included.
+                            var u_diff = cloud_field_diffuse_toward(p, ray_dir);
+                            @if(ATM_DBG_NO_DIFF_FLUX) { u_diff.x = u_diff.y; }
+                            let t_delta = exp(-(1.0 - CLOUD_MIE_MEAN_COS * CLOUD_MIE_MEAN_COS) * tau_sun);
+                            let beam_fwd = max(t_delta - t_cloud, 0.0);
+                            @if(!ATM_DBG_NO_FWD_BEAM) {
+                                if (u_diff.y + beam_fwd > ms_vol) {
+                                    ms_vol = u_diff.x;
+                                    direct += beam_fwd * cloud_phase(cos_theta);
+                                }
+                            }
+                            @if(ATM_DBG_NO_FWD_BEAM) { ms_vol = max(ms_vol, u_diff.x); }
                         }
                         // Experiment: the vertical-slab solution (lights only the layer top).
                         @if(ATM_DBG_MS_DIFFUSION) {

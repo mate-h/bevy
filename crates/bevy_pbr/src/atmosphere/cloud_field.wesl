@@ -413,7 +413,7 @@ fn sor_black(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 /// Copies the solution into the filterable volume the cloud pass samples (r: U per unit sun
-/// irradiance, gb: build cell); `diffusion_reset` restarts the solve from zero.
+/// irradiance, gb: build cell, a: extinction); `diffusion_reset` restarts the solve from zero.
 @compute @workgroup_size(4, 4, 4)
 fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= CLOUD_FIELD_RES_XY || id.y >= CLOUD_FIELD_RES_XY || id.z >= CLOUD_FIELD_RES_Z) {
@@ -423,6 +423,9 @@ fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
     // maps positions with the solution's own cell while the SDF of a new build is pending.
     let e = textureLoad(in_field_ext, id, 0);
     var u = textureLoad(diff_u, id).r;
+    // a: the extinction the solve used (per metre), for the diffuse flux F = -grad U / (3 sigma')
+    // the cloud pass takes from this volume; the filled clear cells take their neighbours' mean.
+    var sigma = e.r;
     // Clear cells next to cloud take the mean of their cloud neighbours: the camera sees the
     // outer tens of metres of a cloud, within a cell of clear air, and trilinear filtering
     // against a stored 0 halved the diffuse light at every surface. Cells far from cloud (the
@@ -434,21 +437,26 @@ fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
     let far = field_in_range(qs) && textureLoad(cloud_field_sdf, qs, 0).r > 2.0 * cloud_field_voxel_m();
     if (e.r <= DIFF_SIGMA_MIN && far) {
         u = 0.0;
+        sigma = 0.0;
     } else if (e.r <= DIFF_SIGMA_MIN) {
         var sum = 0.0;
+        var sum_sigma = 0.0;
         var n = 0.0;
         for (var k = 0; k < 6; k++) {
             var o = vec3(0);
             o[k / 2] = select(-1, 1, (k & 1) == 1);
             let q = vec3<i32>(id) + o;
-            if (field_in_range(q) && textureLoad(in_field_ext, q, 0).r > DIFF_SIGMA_MIN) {
+            let sq = select(0.0, textureLoad(in_field_ext, q, 0).r, field_in_range(q));
+            if (sq > DIFF_SIGMA_MIN) {
                 sum += textureLoad(diff_u, q).r;
+                sum_sigma += sq;
                 n += 1.0;
             }
         }
         u = select(0.0, sum / max(n, 1.0), n > 0.0);
+        sigma = select(0.0, sum_sigma / max(n, 1.0), n > 0.0);
     }
-    textureStore(out_field_diff, id, vec4(u, e.ba, 0.0));
+    textureStore(out_field_diff, id, vec4(u, e.ba, sigma));
 }
 
 @compute @workgroup_size(4, 4, 4)
