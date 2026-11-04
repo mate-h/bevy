@@ -243,7 +243,11 @@ fn main() {
             },
         );
     }
-    if bench.screenshot.is_some() || bench.exit_secs.is_some() || bench.exit_frame.is_some() {
+    if bench.screenshot.is_some()
+        || bench.exit_secs.is_some()
+        || bench.exit_frame.is_some()
+        || bench.no_clouds
+    {
         app.insert_resource(bench).add_systems(Update, bench_hooks);
     }
     app.run();
