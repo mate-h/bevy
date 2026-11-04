@@ -1177,7 +1177,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     light_od += d_far * LIGHT_LONG_TAP_M;
                     let light_optical_depth = light_od * sigma_t_unit;
                     let p_beyond = p + l * (tap_t + LIGHT_LONG_TAP_M);
-                    var t_far = sample_cloud_shadow_map(p_beyond, l, false);
+                    var t_far = sample_cloud_shadow_map(p_beyond, l, false, false);
                     @if(ATM_DBG_NO_FAR_SHADOW) { t_far = 1.0; }
                     let t_local = exp(-light_optical_depth);
                     @if(ATM_DBG_OUT_SUN_OD) {
@@ -1187,7 +1187,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     // at p; the field's diffusion solution; density) at the first in-cloud sample.
                     @if(ATM_DBG_OUT_SUN_TAU) {
                         if (dbg_sun.x < 0.0) {
-                            dbg_sun = vec4(light_optical_depth - log(max(t_far, 1e-6)), -log(max(sample_cloud_shadow_map(p, l, false), 1e-6)), cloud_field_diffuse(p), lit.w);
+                            dbg_sun = vec4(light_optical_depth - log(max(t_far, 1e-6)), -log(max(sample_cloud_shadow_map(p, l, false, false), 1e-6)), cloud_field_diffuse(p), lit.w);
                         }
                     }
                     let t_cloud = t_far * t_local;

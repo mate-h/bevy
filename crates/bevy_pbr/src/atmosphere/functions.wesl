@@ -491,7 +491,9 @@ fn cubic_bspline_weights(f: f32) -> vec4<f32> {
 }
 
 @if(CLOUDS_ENABLED)
-fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, use_optical_depth_only: bool) -> f32 {
+/// `far_mean`: off the map, the map's mean transmittance (`cloud_shadow_mean_field`) instead of
+/// the far-field density march; for the atmosphere's in-scattering, not for cloud lighting.
+fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, use_optical_depth_only: bool, far_mean: bool) -> f32 {
 
     let extent = settings.cloud_shadow_map_extent;
     // Keep consumer consistent with producer: half-depth is derived from extent (Unreal-style).
@@ -522,10 +524,29 @@ fn sample_cloud_shadow_map(world_pos: vec3<f32>, direction_to_light: vec3<f32>, 
     if (on_map) {
         return cloud_shadow_map_lookup(world_pos, vec2(x, y), d_sample, use_optical_depth_only);
     }
+    if (far_mean && cloud_shadow_is_mapped_light(direction_to_light)) {
+        return cloud_shadow_mean_field(world_pos);
+    }
     // Off the map, or a light it was not traced for: the far-field march, from one call site.
     // An early return per case inlined the march's density loop three times into every caller
     // (register spills in the cloud pass, whose light loop calls this per sample).
     return cloud_far_transmittance(world_pos, direction_to_light, use_optical_depth_only);
+}
+
+/// Cloud transmittance toward the mapped light at a point off the map, as the map's mean: its
+/// coarsest level, whose cumulus (B) and thin-layer (A) depths are averaged as transmittance
+/// (`cloud_shadow_mips.wesl`), the expected visibility under the cloud field seen within
+/// +-extent. For the haze beyond the map (up to ~340 km toward the horizon below the cirrus) the
+/// far-field march (several full density evaluations per step) was 20 % of the haze pass at sun
+/// 35 and 46 % at sun 3, for at most 4/255 in the image: a pixel's far haze averages many cloud
+/// shadows, whose mean this is. Inside the cumulus layer, the share of the layer above the point
+/// is taken out.
+@if(CLOUDS_ENABLED)
+fn cloud_shadow_mean_field(world_pos: vec3<f32>) -> f32 {
+    let q = textureLoad(cloud_shadow_map, vec2(0), textureNumLevels(cloud_shadow_map) - 1u);
+    let below = saturate((cloud_layer.cloud_layer_end - length(world_pos))
+        / max(cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start, 1.0));
+    return exp(-q.b * below - cloud_thin_shadow_weight(world_pos) * q.a);
 }
 
 /// The cloud shadow map's transmittance at a point on the map: `xy` in the light frame,
@@ -632,7 +653,9 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
         let above_clouds = mu_light >= 0.0
             && local_r > max(cloud_layer.cloud_layer_end, settings.cloud_thin_shadow_max_radius);
         if (!above_clouds) {
-            cloud_sun_t = sample_cloud_shadow_map(world_pos, (*light).direction_to_light, false);
+            var far_mean = true;
+            @if(ATM_DBG_HAZE_FAR_MARCH) { far_mean = false; }
+            cloud_sun_t = sample_cloud_shadow_map(world_pos, (*light).direction_to_light, false, far_mean);
             shadow_factor *= cloud_sun_t;
         }
         }
