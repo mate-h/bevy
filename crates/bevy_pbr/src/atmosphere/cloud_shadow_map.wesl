@@ -11,8 +11,10 @@
 import package::atmosphere::bindings::{atmosphere, settings, view, lights};
 import package::atmosphere::clouds::{
     cloud_layer_segment,
-    get_cloud_medium_density_coarse,
     get_cloud_medium_density_lod,
+    cloud_column_at,
+    cloud_coarse_from_column,
+    cloud_shape_from_column,
     get_cloud_scattering_coeff,
     get_cloud_absorption_coeff,
     cloud_shadow_uv_to_xy,
@@ -267,9 +269,14 @@ fn main(@builtin(global_invocation_id) thread_id: vec3<u32>) {
         // Coarse (weather x profile) only gates empty space; the map integrates the real noise
         // density at a coarse mip. Integrating the coarse proxy itself overestimated occlusion
         // (63 % of the map below 1 % transmittance at 35 % coverage) -> black ground / dark haze.
+        // One column (weather, profile: a chain of dependent fetches) for both the empty-space
+        // test and the fine density; evaluating each separately fetched it twice.
         var density = 0.0;
-        if (get_cloud_medium_density_coarse(r, p) > 0.0) {
-            density = get_cloud_medium_density_lod(r, p, CLOUD_SHADOW_NOISE_MIP);
+        if (r >= cloud_layer.cloud_layer_start && r <= cloud_layer.cloud_layer_end) {
+            let column = cloud_column_at(r, p);
+            if (cloud_coarse_from_column(column) > 0.0) {
+                density = cloud_shape_from_column(column, CLOUD_SHADOW_NOISE_MIP) * cloud_layer.cloud_density;
+            }
         }
         if (density > 0.0) {
             let extinction = density * sigma_t_per_density; // 1/m

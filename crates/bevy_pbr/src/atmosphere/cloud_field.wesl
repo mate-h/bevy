@@ -17,8 +17,9 @@ import package::atmosphere::functions::CLOUD_MIE_MEAN_COS;
 import package::atmosphere::functions::{cloud_shadow_frame, cloud_shadow_transmittance, cloud_thin_shadow_weight};
 import package::atmosphere::clouds::{
     cloud_layer,
-    get_cloud_medium_density_coarse,
-    get_cloud_medium_density_lod,
+    cloud_column_at,
+    cloud_coarse_from_column,
+    cloud_shape_from_column,
     get_cloud_scattering_coeff,
     get_cloud_absorption_coeff,
     cloud_field_origin_from_cell,
@@ -79,13 +80,16 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let xz = cloud_field_frame_to_atmosphere_xz(cloud_field_origin_from_cell(cell) + (vec2<f32>(id.xy) + 0.5) * vox);
     let r = cloud_layer.cloud_layer_start + (f32(id.z) + 0.5) * dz;
     let p = vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y);
-    let coarse = get_cloud_medium_density_coarse(length(p), p);
+    // One column (weather, profile) for the coarse test and the fine density (r is inside the
+    // layer by construction).
+    let column = cloud_column_at(length(p), p);
+    let coarse = cloud_coarse_from_column(column) * cloud_layer.cloud_density;
     let inside = coarse > INSIDE_EPS;
     // a: optical depth of the voxel's vertical extent (same mip-3 density as the shadow map),
     // blurred by edt_x/edt_y and summed by edt_z into the column optical depth.
     var od = 0.0;
     if (coarse > 0.0) {
-        od = get_cloud_medium_density_lod(length(p), p, AO_DENSITY_MIP)
+        od = cloud_shape_from_column(column, AO_DENSITY_MIP) * cloud_layer.cloud_density
             * (get_cloud_scattering_coeff() + get_cloud_absorption_coeff()) * dz;
     }
     // r: squared distance to the nearest inside voxel, g: to the nearest outside voxel.
