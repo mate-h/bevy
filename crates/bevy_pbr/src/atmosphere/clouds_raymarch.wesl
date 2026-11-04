@@ -729,6 +729,10 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
     var d = view_dir;
     var t_max = t_scene;
     var first_t = 0.0;
+    // ATM_DBG_REF_CLOUD_SUN: only paths whose every event is a cloud scatter (the sunlight the
+    // clouds scatter, orders >= 1, to compare with the realtime sun terms); 0 after any air or
+    // ground event (sky/ground ambient and haze).
+    var nee_w = 1.0;
     var bounce = 0u;
     for (; bounce < REF_MAX_BOUNCES; bounce++) {
         let f = ref_flight(p, d, t_max, ch, air_max, false);
@@ -739,10 +743,11 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
         if (f.event == 4u) {
             if (bounce == 0u && t_scene < 1e29) { break; } // scene geometry handled by the raster
             // Lambertian ground.
+            @if(ATM_DBG_REF_CLOUD_SUN) { nee_w = 0.0; }
             let n = normalize(p);
             p = n * (atmosphere.inner_radius + 0.5);
             if (has_light) {
-                L += thr * atmosphere.ground_albedo[ch] / PI * sun * max(dot(l, n), 0.0) * ref_sun_vis(p, l, ch);
+                L += nee_w * thr * atmosphere.ground_albedo[ch] / PI * sun * max(dot(l, n), 0.0) * ref_sun_vis(p, l, ch);
             }
             thr *= atmosphere.ground_albedo[ch];
             // cosine-weighted hemisphere
@@ -751,16 +756,17 @@ fn cloud_reference_trace(origin: vec3<f32>, view_dir: vec3<f32>, t_scene: f32, p
         } else if (f.event == 2u) {
             // Cloud scatter (albedo folded into the analog absorption event).
             if (has_light) {
-                L += thr * cloud_phase(dot(l, d)) * sun * ref_sun_vis(p, l, ch);
+                L += nee_w * thr * cloud_phase(dot(l, d)) * sun * ref_sun_vis(p, l, ch);
             }
             d = ref_dir_around(d, clamp(ref_sample_cloud_phase(), -1.0, 1.0));
         } else {
             // Air scatter: phase = scattering LUT (sum_i sigma_s,i * p_i) / sigma_s.
+            @if(ATM_DBG_REF_CLOUD_SUN) { nee_w = 0.0; }
             let r = length(p);
             let s_air = max(sample_density_lut(r, SCATTERING_DENSITY)[ch], 1e-20);
             if (has_light) {
                 let ph = sample_scattering_lut(r, dot(l, d))[ch] / s_air;
-                L += thr * ph * sun * ref_sun_vis(p, l, ch);
+                L += nee_w * thr * ph * sun * ref_sun_vis(p, l, ch);
             }
             // Sample 50% uniform sphere / 50% HG(0.8), weight by phase / mixture pdf.
             var nd: vec3<f32>;

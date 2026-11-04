@@ -3397,6 +3397,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the
 ///   tracer's bounce (r), flight segment (g) and sun-ray (b) budgets, and that continued past a
 ///   segment's null-collision budget (a, exact).
+/// - `ATM_DBG_REF_CLOUD_SUN`: with `CLOUD_REFERENCE`, only the paths whose every event is a cloud
+///   scatter (the clouds' own sunlight, all orders; no sky, ground or haze light).
 /// - `ATM_DBG_NO_COARSE`: fine samples everywhere from the ray start, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
 /// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.
