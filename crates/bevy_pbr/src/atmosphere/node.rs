@@ -68,11 +68,13 @@ pub fn atmosphere_luts(
     let (
         Some(transmittance_lut_pipeline),
         Some(multiscattering_lut_pipeline),
+        Some(ground_irradiance_lut_pipeline),
         Some(sky_view_lut_pipeline),
         Some(aerial_view_lut_pipeline),
     ) = (
         pipeline_cache.get_compute_pipeline(pipelines.transmittance_lut),
         pipeline_cache.get_compute_pipeline(pipelines.multiscattering_lut),
+        pipeline_cache.get_compute_pipeline(pipelines.ground_irradiance_lut),
         pipeline_cache.get_compute_pipeline(pipelines.sky_view_lut),
         pipeline_cache.get_compute_pipeline(pipelines.aerial_view_lut),
     )
@@ -202,6 +204,7 @@ pub fn atmosphere_luts(
                 .hash(&mut h);
             textures.transmittance_lut.texture.id().hash(&mut h);
             textures.multiscattering_lut.texture.id().hash(&mut h);
+            textures.ground_irradiance_lut.texture.id().hash(&mut h);
             h.finish()
         };
         let lut_static_dirty =
@@ -238,6 +241,28 @@ pub fn atmosphere_luts(
             luts_pass.dispatch_workgroups(
                 settings.multiscattering_lut_size.x,
                 settings.multiscattering_lut_size.y,
+                1,
+            );
+            pass_span.end(&mut luts_pass);
+            drop(luts_pass);
+
+            // Clear-sky ground irradiance by sun zenith cosine, from the two LUTs above: the
+            // sky-view LUT's skylight on the ground.
+            let mut luts_pass = labelled_compute_pass!("atmosphere_ground_irradiance_lut");
+            let pass_span =
+                diagnostics.pass_span(&mut luts_pass, "atmosphere_ground_irradiance_lut");
+            luts_pass.set_pipeline(ground_irradiance_lut_pipeline);
+            luts_pass.set_bind_group(
+                0,
+                &bind_groups.ground_irradiance_lut,
+                &[
+                    atmosphere_uniforms_offset.index(),
+                    settings_uniforms_offset.index(),
+                ],
+            );
+            luts_pass.dispatch_workgroups(
+                super::resources::GROUND_IRRADIANCE_LUT_SIZE.div_ceil(64),
+                1,
                 1,
             );
             pass_span.end(&mut luts_pass);

@@ -209,6 +209,7 @@ fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<11
 pub(crate) struct AtmosphereBindGroupLayouts {
     pub transmittance_lut: BindGroupLayoutDescriptor,
     pub multiscattering_lut: BindGroupLayoutDescriptor,
+    pub ground_irradiance_lut: BindGroupLayoutDescriptor,
     pub sky_view_lut: BindGroupLayoutDescriptor,
     pub aerial_view_lut: BindGroupLayoutDescriptor,
     pub sky_view_lut_clouds: BindGroupLayoutDescriptor,
@@ -302,6 +303,32 @@ impl AtmosphereBindGroupLayouts {
             ),
         );
 
+        // Ground irradiance LUT (`ground_irradiance_lut.wesl`): the multiscattering LUT's inputs
+        // plus that LUT.
+        let ground_irradiance_lut = BindGroupLayoutDescriptor::new(
+            "ground_irradiance_lut_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuAtmosphere>(true)),
+                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (5, texture_2d(TextureSampleType::default())),
+                    (6, texture_2d(TextureSampleType::default())),
+                    (7, sampler(SamplerBindingType::Filtering)),
+                    (8, texture_2d(TextureSampleType::default())), // transmittance
+                    (9, texture_2d(TextureSampleType::default())), // multiscattering
+                    (12, sampler(SamplerBindingType::Filtering)),
+                    (
+                        13,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
         let sky_view_lut_entries = || {
             DynamicBindGroupLayoutEntries::new_with_indices(
                 ShaderStages::COMPUTE,
@@ -327,6 +354,7 @@ impl AtmosphereBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    (62, texture_2d(TextureSampleType::default())), // ground irradiance
                 ),
             )
             .extend_with_indices(shadow_map_layout_entries())
@@ -647,6 +675,7 @@ impl AtmosphereBindGroupLayouts {
         Self {
             transmittance_lut,
             multiscattering_lut,
+            ground_irradiance_lut,
             sky_view_lut,
             aerial_view_lut,
             sky_view_lut_clouds,
@@ -1161,6 +1190,7 @@ impl FromWorld for CloudNoiseSampler {
 pub(crate) struct AtmosphereLutPipelines {
     pub transmittance_lut: CachedComputePipelineId,
     pub multiscattering_lut: CachedComputePipelineId,
+    pub ground_irradiance_lut: CachedComputePipelineId,
     pub sky_view_lut: CachedComputePipelineId,
     pub aerial_view_lut: CachedComputePipelineId,
     pub sky_view_lut_clouds: CachedComputePipelineId,
@@ -1205,6 +1235,15 @@ impl FromWorld for AtmosphereLutPipelines {
                 label: Some("multi_scattering_lut_pipeline".into()),
                 layout: vec![layouts.multiscattering_lut.clone()],
                 shader: load_embedded_asset!(world, "multiscattering_lut.wesl"),
+                shader_defs: atm_dbg_defs(),
+                ..default()
+            });
+
+        let ground_irradiance_lut =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("ground_irradiance_lut_pipeline".into()),
+                layout: vec![layouts.ground_irradiance_lut.clone()],
+                shader: load_embedded_asset!(world, "ground_irradiance_lut.wesl"),
                 shader_defs: atm_dbg_defs(),
                 ..default()
             });
@@ -1352,6 +1391,7 @@ impl FromWorld for AtmosphereLutPipelines {
         Self {
             transmittance_lut,
             multiscattering_lut,
+            ground_irradiance_lut,
             sky_view_lut,
             aerial_view_lut,
             sky_view_lut_clouds,
@@ -1609,6 +1649,8 @@ pub struct RenderSkyHazePipelineId {
 pub struct AtmosphereTextures {
     pub transmittance_lut: CachedTexture,
     pub multiscattering_lut: CachedTexture,
+    /// Clear-sky ground irradiance by sun zenith cosine (`ground_irradiance_lut.wesl`).
+    pub ground_irradiance_lut: CachedTexture,
     pub sky_view_lut: CachedTexture,
     pub aerial_view_lut: CachedTexture,
     pub cloud_shadow_map: CachedTexture,
@@ -1726,6 +1768,21 @@ pub(super) fn prepare_atmosphere_textures(
             usage: TextureUsages::STORAGE_BINDING
                 | TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let ground_irradiance_lut = textures.get(TextureDescriptor {
+            label: Some("ground_irradiance_lut"),
+            size: Extent3d {
+                width: GROUND_IRRADIANCE_LUT_SIZE,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
@@ -2055,6 +2112,7 @@ pub(super) fn prepare_atmosphere_textures(
             AtmosphereTextures {
                 transmittance_lut,
                 multiscattering_lut,
+                ground_irradiance_lut,
                 sky_view_lut,
                 aerial_view_lut,
                 cloud_shadow_map,
@@ -2272,6 +2330,7 @@ pub(super) fn prepare_atmosphere_transforms(
 pub(crate) struct AtmosphereBindGroups {
     pub transmittance_lut: BindGroup,
     pub multiscattering_lut: BindGroup,
+    pub ground_irradiance_lut: BindGroup,
     pub sky_view_lut: BindGroup,
     pub aerial_view_lut: BindGroup,
     /// Cloud-shadowed LUT bind groups (views with a `VolumetricCloudLayer`).
@@ -2700,6 +2759,22 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )),
         );
 
+        let ground_irradiance_lut = render_device.create_bind_group(
+            "ground_irradiance_lut_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.ground_irradiance_lut),
+            &BindGroupEntries::with_indices((
+                (0, atmosphere_binding.clone()),
+                (1, settings_binding.clone()),
+                (5, &gpu_medium.density_lut_view),
+                (6, &gpu_medium.scattering_lut_view),
+                (7, medium_sampler.sampler()),
+                (8, &textures.transmittance_lut.default_view),
+                (9, &textures.multiscattering_lut.default_view),
+                (12, &atmosphere_sampler.0),
+                (13, &textures.ground_irradiance_lut.default_view),
+            )),
+        );
+
         let sky_view_lut = render_device.create_bind_group(
             "sky_view_lut_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.sky_view_lut),
@@ -2720,6 +2795,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &atmosphere_sampler.0),
                 // sky view lut storage texture
                 (13, &textures.sky_view_lut.default_view),
+                (62, &textures.ground_irradiance_lut.default_view),
                 // shadow maps
                 (14, &shadow_bindings.point_light_depth_texture_view),
                 (15, &shadow_samplers.shadow_comparison_sampler),
@@ -3186,6 +3262,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (9, &textures.multiscattering_lut.default_view),
                         (12, &atmosphere_sampler.0),
                         (13, &textures.sky_view_lut.default_view),
+                        (62, &textures.ground_irradiance_lut.default_view),
                         (14, &shadow_bindings.point_light_depth_texture_view),
                         (15, &shadow_samplers.shadow_comparison_sampler),
                         (16, &shadow_bindings.directional_light_depth_texture_view),
@@ -3245,6 +3322,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         commands.entity(entity).insert(AtmosphereBindGroups {
             transmittance_lut,
             multiscattering_lut,
+            ground_irradiance_lut,
             sky_view_lut,
             aerial_view_lut,
             sky_view_lut_clouds,
@@ -3406,6 +3484,9 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_NO_COARSE`: fine samples everywhere from the ray start, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
 /// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.
+/// Texels of the ground irradiance LUT (`GROUND_IRRADIANCE_LUT_SIZE` in `functions.wesl`).
+pub(crate) const GROUND_IRRADIANCE_LUT_SIZE: u32 = 128;
+
 fn atm_dbg_defs() -> Vec<bevy_shader::ShaderDefVal> {
     std::env::var("ATMOSPHERE_DBG")
         .map(|v| {

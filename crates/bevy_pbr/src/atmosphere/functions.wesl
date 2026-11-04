@@ -25,7 +25,7 @@ import package::atmosphere::{
         atmosphere, settings, view, lights, transmittance_lut, atmosphere_lut_sampler,
         multiscattering_lut, sky_view_lut, aerial_view_lut, atmosphere_transforms,
         medium_density_lut, medium_scattering_lut, medium_sampler,
-        cloud_shadow_map, cloud_field_sdf,
+        cloud_shadow_map, cloud_field_sdf, ground_irradiance_lut,
     },
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, ray_intersects_ground,
@@ -1071,6 +1071,14 @@ fn raymarch_atmosphere(
     @if(!ATMOSPHERE_NO_SHADOW_MAPS) {
         mesh_shadow_t_max = directional_shadow_ray_t_max(pos, ray_dir);
     }
+    // Raymarched mode: render_sky marches the visible sky (with the shafts) itself, and the
+    // sky-view LUT only feeds diffuse lighting, where mesh shadow shafts do not show; the
+    // shadow-map fetches were a quarter of this pass. In lookup-texture mode the LUT is the sky.
+    @if(SKY_VIEW_LUT_PASS) {
+        if (settings.rendering_method == 1u) {
+            mesh_shadow_t_max = -1.0;
+        }
+    }
     for (var s = 0u; s < n_steps; s += 1u) {
         let jitter = fract(jitter0 + f32(s) * 0.618033988749895); // [0, 1]
         let u0 = f32(s) / f32(n_steps);
@@ -1210,16 +1218,26 @@ fn cloud_column_march_optical_depth(p: vec3<f32>) -> f32 {
 }
 
 const GROUND_SKY_DIRS: u32 = 6u;
-const GROUND_SKY_STEPS: u32 = 6u;
 fn ground_sky_irradiance(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {
     let n = normalize(p);
-    let r = length(p);
+    @if(SKY_VIEW_LUT_PASS) {
+    // The sky-view LUT pass cannot read the LUT it writes. On the ground the clear-sky irradiance
+    // depends only on the sun's zenith angle there, so it comes from the ground irradiance LUT,
+    // rebuilt with the transmittance and multiscattering LUTs. A 6 x 6 march per texel (36
+    // in-scattering evaluations, each with a shadow-map fetch) was half the cost of this pass.
+    var e = vec3(0.0);
+    for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
+        let light = &lights.directional_lights[light_i];
+        e += (*light).color.rgb * sample_ground_irradiance_lut(dot((*light).direction_to_light, n));
+    }
+    return e;
+    }
+    @if(!SKY_VIEW_LUT_PASS) {
+    // 8 fetches of this frame's sky-view LUT (sky as seen from the camera, a good proxy for
+    // nearby ground). A 64-sample march cost 3-5 ms of render_sky.
     let tx = normalize(select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(n.x) > 0.9) - n * dot(n, select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(n.x) > 0.9)));
     let ty = cross(n, tx);
     var sum = vec3(0.0);
-    @if(!SKY_VIEW_LUT_PASS) {
-    // Cheap path: 8 fetches of this frame's sky-view LUT (sky as seen from the camera, a good
-    // proxy for nearby ground). The 64-sample march below cost 3-5 ms of render_sky.
     let r_cam = length(get_view_position());
     for (var k = 0u; k < GROUND_SKY_DIRS; k++) {
         let u = (f32(k) + 0.5) / f32(GROUND_SKY_DIRS);
@@ -1231,30 +1249,20 @@ fn ground_sky_irradiance(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {
     }
     return PI * sum / f32(GROUND_SKY_DIRS);
     }
-    for (var k = 0u; k < GROUND_SKY_DIRS; k++) {
-        let u = (f32(k) + 0.5) / f32(GROUND_SKY_DIRS);
-        let phi = f32(k) * 2.399963; // golden angle
-        let st = sqrt(u);
-        let ct = sqrt(1.0 - u);
-        let d = normalize(n * ct + (tx * cos(phi) + ty * sin(phi)) * st);
-        let t_end = distance_to_top_atmosphere_boundary(atmosphere, r, ct);
-        var tr = vec3(1.0);
-        var l = vec3(0.0);
-        for (var i = 0u; i < GROUND_SKY_STEPS; i++) {
-            let ua = f32(i) / f32(GROUND_SKY_STEPS);
-            let ub = f32(i + 1u) / f32(GROUND_SKY_STEPS);
-            let ta = t_end * ua * ua;
-            let tb = t_end * ub * ub;
-            let q = p + d * (0.5 * (ta + tb));
-            let rq = length(q);
-            let scattering = sample_density_lut(rq, SCATTERING_DENSITY);
-            let extinction = sample_density_lut(rq, ABSORPTION_DENSITY) + scattering;
-            let st_i = exp(-extinction * (tb - ta));
-            let ins = sample_local_inscattering(scattering, d, q, pixel_coords, true);
-            l += tr * (ins - ins * st_i) / max(extinction, MIN_EXTINCTION);
-            tr *= st_i;
-        }
-        sum += l;
-    }
-    return PI * sum / f32(GROUND_SKY_DIRS);
+}
+
+/// Texels of the ground irradiance LUT (`ground_irradiance_lut.wesl`), linear in the cosine of
+/// the sun's zenith angle on the ground, mu in [-1, 1] (texel centres at the ends).
+const GROUND_IRRADIANCE_LUT_SIZE: u32 = 128u;
+
+fn ground_irradiance_lut_u_to_mu(u: f32) -> f32 {
+    return 2.0 * u - 1.0;
+}
+
+/// Clear-sky irradiance on the ground per unit sun illuminance (Lambert-weighted sky radiance,
+/// all scattering orders), for the sun at zenith cosine mu there.
+fn sample_ground_irradiance_lut(mu: f32) -> vec3<f32> {
+    let n = f32(GROUND_IRRADIANCE_LUT_SIZE);
+    let u = (clamp(mu, -1.0, 1.0) * 0.5 + 0.5) * (n - 1.0) / n + 0.5 / n;
+    return textureSampleLevel(ground_irradiance_lut, atmosphere_lut_sampler, vec2(u, 0.5), 0.0).rgb;
 }

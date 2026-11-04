@@ -147,6 +147,7 @@ impl Plugin for AtmospherePlugin {
 
         embedded_asset!(app, "transmittance_lut.wesl");
         embedded_asset!(app, "multiscattering_lut.wesl");
+        embedded_asset!(app, "ground_irradiance_lut.wesl");
         embedded_asset!(app, "sky_view_lut.wesl");
         embedded_asset!(app, "aerial_view_lut.wesl");
         embedded_asset!(app, "render_sky.wesl");
