@@ -15,7 +15,9 @@
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse),
 //!   `ATMOSPHERE_SUN_SWEEP=<deg/frame>,<first>,<last>` (turns the sun by a fixed angle per frame),
 //!   `ATMOSPHERE_WIND_SCALE=<x>` (wind profile multiplier, 0..2; `-` / `=`).
-//! - Debug view: `ATMOSPHERE_DEBUG_VIEW=1` starts with the LUT / buffer previews shown (Tab).
+//! - Settings panel (Tab): tabs of sliders for the wind, cumulus, cirrus, camera and the debug
+//!   view; `ATMOSPHERE_SETTINGS=wind|clouds|cirrus|scene|debug` starts with it open on that tab,
+//!   `ATMOSPHERE_DEBUG_VIEW=1` on the LUT / buffer previews.
 //! - Cloud shadows: `ATMOSPHERE_SHADOW_INTERLEAVE`, `ATMOSPHERE_SHADOW_SAMPLES`,
 //!   `ATMOSPHERE_SHADOW_TEMPORAL_ALPHA`.
 //! - Capture / runs: `ATMOSPHERE_BACKGROUND`, `ATMOSPHERE_SCREENSHOT`, `ATMOSPHERE_SCREENSHOT_SECS`,
@@ -33,6 +35,14 @@ use bevy::{
     color::palettes::css::BLACK,
     core_pipeline::tonemapping::Tonemapping,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    ecs::template::OptionTemplate,
+    feathers::{
+        controls::{FeathersSlider, FeathersTab, FeathersTabList},
+        dark_theme::create_dark_theme,
+        display::{caption, label_small},
+        theme::{ThemeBackgroundColor, ThemeBorderColor, UiTheme},
+        tokens, FeathersPlugins,
+    },
     image::{
         ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
         ImageSamplerDescriptor,
@@ -61,6 +71,7 @@ use bevy::{
         view::screenshot::{save_to_disk, Screenshot},
     },
     shader::ShaderRef,
+    ui_widgets::{tablist_self_update, SelectedTab, SliderPrecision, SliderValue, ValueChange},
 };
 
 #[derive(Resource)]
@@ -141,13 +152,19 @@ fn main() {
             FreeCameraPlugin,
         ))
         .add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, Water>>::default())
-        .add_plugins(AtmosphereDebugViewPlugin)
+        .add_plugins((AtmosphereDebugViewPlugin, FeathersPlugins))
+        .insert_resource(UiTheme(create_dark_theme()))
+        .init_resource::<WindControl>()
+        .init_resource::<PointerOnUi>()
+        // After picking has found what the pointer is over, before the camera controller
+        // (`RunFixedMainLoop`) and `sun_drag` read the mouse.
+        .add_systems(PreUpdate, pointer_on_ui.after(bevy::picking::PickingSystems::Last))
         .add_systems(
             Startup,
             (
                 setup_camera_fog,
                 setup_terrain_scene,
-                setup_debug_overlay.after(setup_camera_fog),
+                setup_settings_panel.after(setup_camera_fog),
                 print_controls,
             ),
         )
@@ -158,9 +175,11 @@ fn main() {
                 sun_drag,
                 sun_sweep,
                 atmosphere_controls,
-                debug_overlay_controls,
+                settings_panel_controls,
+                populate_debug_page,
                 debug_overlay_scale,
-                wind_speed_controls,
+                (wind_speed_controls, apply_wind).chain(),
+                sync_setting_sliders,
                 cycle_cloud_profiles,
                 visibility_toggle.after(atmosphere_controls),
                 camera_pose_title,
@@ -358,72 +377,158 @@ fn print_controls() {
     println!("    Right drag - Slide the time of day (sun position)");
     println!("    Up/Down    - Increase/Decrease exposure");
     println!("    - / =      - Decrease/Increase the wind speed (whole profile: drift and lean), 0x .. 2x");
-    println!("    Tab        - Toggle the debug view (LUTs, cloud buffers, cloud field, weather, noise)");
+    println!("    Tab        - Toggle the settings panel (wind, clouds, cirrus, scene, debug view)");
     println!("    [ / ]      - Debug view: move the slice of the 3D textures down/up");
 }
 
-/// The debug overlay's root node (Tab).
-#[derive(Component)]
-struct DebugOverlay;
-
-/// The debug overlay's slice readout.
-#[derive(Component)]
-struct DebugSliceText;
-
-/// Wind speed multiplier (- / =) on the atmosphere's wind profile as spawned.
-struct WindScale {
-    base: Option<AtmosphereWind>,
-    scale: f32,
+/// The settings panel's pages, one per tab.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum Page {
+    #[default]
+    Wind,
+    Clouds,
+    Cirrus,
+    Scene,
+    Debug,
 }
 
-impl Default for WindScale {
+/// The settings panel's root node (Tab shows / hides it).
+#[derive(Component, Clone, Copy, Default)]
+struct SettingsPanel;
+
+/// The settings panel's tab strip.
+#[derive(Component, Clone, Copy, Default)]
+struct SettingsTabList;
+
+/// A tab of the settings panel and the page it shows.
+#[derive(Component, Clone, Copy, Default)]
+struct SettingsTab(Page);
+
+/// A page of the settings panel, shown while its tab is selected.
+#[derive(Component, Clone, Copy, Default)]
+struct SettingsPage(Page);
+
+/// Whether the settings panel is open, and on which page.
+#[derive(Resource, Default)]
+struct SettingsUi {
+    open: bool,
+    page: Page,
+}
+
+/// A value the settings panel edits. Read from and written to the scene, so the sliders follow
+/// the keyboard shortcuts too.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum Setting {
+    #[default]
+    WindSpeed,
+    WindShear,
+    WindHeading,
+    TimeScale,
+    Coverage,
+    Density,
+    Detail,
+    CloudSize,
+    Updraft,
+    Lifetime,
+    CirrusOpticalDepth,
+    CirrusCoverage,
+    CirrusFallSpeed,
+    CirrusTop,
+    Exposure,
+    MarchSteps,
+    LightTaps,
+    DebugSlice,
+}
+
+/// The [`Setting`] a slider edits.
+#[derive(Component, Clone, Copy, Default)]
+struct SettingSlider(Setting);
+
+/// The wind as edited by the settings panel and - / =: the atmosphere's wind profile as spawned
+/// (`base`), scaled, with its shear (the change of the wind above the surface) scaled again, and
+/// turned to a heading.
+#[derive(Resource)]
+struct WindControl {
+    base: Option<AtmosphereWind>,
+    /// Multiplier on the whole profile (drift and lean), 0..2.
+    speed: f32,
+    /// Extra multiplier on the shear only (lean, fall streaks), 0..2.
+    shear: f32,
+    /// Heading of the surface wind, degrees from +X toward +Z.
+    heading_deg: f32,
+}
+
+impl Default for WindControl {
     fn default() -> Self {
-        Self { base: None, scale: 1.0 }
+        Self {
+            base: None,
+            // `ATMOSPHERE_WIND_SCALE=<x>` sets the speed at startup.
+            speed: env_f32("ATMOSPHERE_WIND_SCALE").map_or(1.0, |s| s.clamp(0.0, 2.0)),
+            shear: 1.0,
+            heading_deg: 0.0,
+        }
     }
 }
 
-/// Scales the whole wind profile (- / =): the clouds' drift and, through the shear, their lean.
-/// Up to 2x: with stronger shear the lean changes across air masses faster than the field can
-/// follow (`VolumetricCloudLayer::wind_shear`). `ATMOSPHERE_WIND_SCALE=<x>` sets it at startup.
-fn wind_speed_controls(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut state: Local<WindScale>,
-    mut winds: Query<&mut AtmosphereWind>,
-) {
-    let initial = (state.base.is_none() && !winds.is_empty())
-        .then(|| env_f32("ATMOSPHERE_WIND_SCALE"))
-        .flatten();
-    if let Some(scale) = initial {
-        state.scale = scale.clamp(0.0, 2.0);
-    } else if keyboard_input.just_pressed(KeyCode::Equal) {
-        state.scale = (state.scale + 0.25).min(2.0);
-    } else if keyboard_input.just_pressed(KeyCode::Minus) {
-        state.scale = (state.scale - 0.25).max(0.0);
-    } else {
-        if state.base.is_none() {
-            for wind in &winds {
-                state.base = Some(wind.clone());
-            }
-        }
+fn heading_deg(velocity: Vec3) -> f32 {
+    velocity.z.atan2(velocity.x).to_degrees().rem_euclid(360.0)
+}
+
+/// Applies [`WindControl`] to the atmosphere's wind profile. Up to 2x speed and shear: with
+/// stronger shear the lean changes across air masses faster than the field can follow
+/// (`VolumetricCloudLayer::wind_shear`).
+fn apply_wind(mut control: ResMut<WindControl>, mut winds: Query<&mut AtmosphereWind>) {
+    if control.base.is_none() {
+        let Some(wind) = winds.iter().next() else {
+            return;
+        };
+        control.heading_deg = wind.levels.first().map_or(0.0, |&(_, v)| heading_deg(v));
+        control.base = Some(wind.clone());
+    } else if !control.is_changed() {
         return;
     }
-    let scale = state.scale;
+    let Some(base) = control.base.as_ref() else {
+        return;
+    };
+    let surface = base.levels.first().map_or(Vec3::ZERO, |&(_, v)| v);
+    let turn = Quat::from_rotation_y(-(control.heading_deg - heading_deg(surface)).to_radians());
+    let levels: Vec<(f32, Vec3)> = base
+        .levels
+        .iter()
+        .map(|&(z, v)| (z, turn * (surface + (v - surface) * control.shear) * control.speed))
+        .collect();
     for mut wind in &mut winds {
-        let base = state.base.get_or_insert_with(|| wind.clone());
-        wind.levels = base.levels.iter().map(|&(z, v)| (z, v * scale)).collect();
+        wind.levels = levels.clone();
     }
-    let (bottom, top) = bevy::pbr::physical_profile_bounds();
-    let shear = state.base.as_ref().map_or(0.0, |b| b.mean_shear(bottom, top).length()) * scale;
-    println!("Wind x{scale:.2} (cloud-layer shear {:.1} m/s per km)", shear * 1e3);
 }
 
-/// Edge of the debug grid at UI scale 1 (logical px): 5 x 4 tiles with labels.
-const DEBUG_GRID: Vec2 = Vec2::new(5.0 * (DEBUG_TILE + 4.0) + 8.0, 4.0 * (DEBUG_TILE + 26.0) + 24.0);
+/// - / = scale the whole wind profile: the clouds' drift and, through the shear, their lean.
+fn wind_speed_controls(keyboard_input: Res<ButtonInput<KeyCode>>, mut control: ResMut<WindControl>) {
+    let speed = if keyboard_input.just_pressed(KeyCode::Equal) {
+        (control.speed + 0.25).min(2.0)
+    } else if keyboard_input.just_pressed(KeyCode::Minus) {
+        (control.speed - 0.25).max(0.0)
+    } else {
+        return;
+    };
+    control.speed = speed;
+    let (bottom, top) = bevy::pbr::physical_profile_bounds();
+    let shear = control
+        .base
+        .as_ref()
+        .map_or(0.0, |b| b.mean_shear(bottom, top).length())
+        * speed
+        * control.shear;
+    println!("Wind x{speed:.2} (cloud-layer shear {:.1} m/s per km)", shear * 1e3);
+}
 
-/// The debug overlay at the display's scale: the window is pinned to scale factor 1 (dumps match
-/// across displays), so on a HiDPI display the overlay would be half size. The UI scale is the
-/// display's own scale factor (2 on HiDPI), at most what keeps the grid within 60 % of the
-/// window's width and its height.
+/// Edge of the debug grid at UI scale 1 (logical px): 5 x 4 tiles with labels, below the tabs.
+const DEBUG_GRID: Vec2 = Vec2::new(5.0 * (DEBUG_TILE + 4.0) + 24.0, 4.0 * (DEBUG_TILE + 26.0) + 110.0);
+
+/// The settings panel at the display's scale: the window is pinned to scale factor 1 (dumps
+/// match across displays), so on a HiDPI display the panel would be half size. The UI scale is
+/// the display's own scale factor (2 on HiDPI), at most what keeps the debug grid within 60 % of
+/// the window's width and its height.
 fn debug_overlay_scale(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, mut ui_scale: ResMut<UiScale>) {
     let Ok(window) = windows.single() else {
         return;
@@ -439,92 +544,270 @@ fn debug_overlay_scale(windows: Query<&Window, With<bevy::window::PrimaryWindow>
 /// Edge of a debug preview in the overlay (logical px).
 const DEBUG_TILE: f32 = 136.0;
 
-/// The debug view (`AtmosphereDebugView`): a grid of live previews of the atmosphere's lookup
-/// tables, cloud buffers, cloud field, weather and noise, drawn by the engine into images each
-/// frame. Hidden until Tab; `ATMOSPHERE_DEBUG_VIEW=1` starts with it shown.
-fn setup_debug_overlay(
+/// Width of the settings pages other than the debug grid (logical px).
+const SETTINGS_WIDTH: f32 = 300.0;
+
+fn settings_tab(text: &'static str, page: Page) -> impl Scene {
+    bsn! {
+        @FeathersTab {
+            @caption: bsn! { @caption(text) }
+        }
+        SettingsTab(page)
+    }
+}
+
+fn settings_page(page: Page) -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::None,
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            padding: px(8),
+            min_width: px(SETTINGS_WIDTH),
+            border: UiRect {
+                left: px(1),
+                right: px(1),
+                bottom: px(1),
+            },
+        }
+        SettingsPage(page)
+        ThemeBackgroundColor(tokens::PANE_BODY_BG)
+        ThemeBorderColor(tokens::TAB_STRIP_BG)
+    }
+}
+
+/// A labelled slider editing `setting` over `min..=max`, shown with `precision` decimals.
+fn setting_row(label: &'static str, setting: Setting, min: f32, max: f32, precision: i32) -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            row_gap: px(2),
+        }
+        Children [
+            @label_small(label)
+            --
+            @FeathersSlider {
+                @min: min,
+                @max: max,
+            }
+            SliderPrecision(precision)
+            SettingSlider(setting)
+            on(apply_setting)
+        ]
+    }
+}
+
+/// The settings panel (Tab): tabbed pages of sliders for the wind, the cumulus and cirrus layers,
+/// the camera, and the debug view (`AtmosphereDebugView`, a grid of live previews of the
+/// atmosphere's lookup tables, cloud buffers, cloud field, weather and noise).
+fn settings_panel() -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            right: px(8),
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Stretch,
+        }
+        SettingsPanel
+        Children [
+            @FeathersTabList {
+                @selected: OptionTemplate::Some(#wind_tab),
+            }
+            SettingsTabList
+            on(tablist_self_update)
+            Children [
+                #wind_tab
+                @settings_tab("Wind", Page::Wind)
+                --
+                @settings_tab("Clouds", Page::Clouds)
+                --
+                @settings_tab("Cirrus", Page::Cirrus)
+                --
+                @settings_tab("Scene", Page::Scene)
+                --
+                @settings_tab("Debug", Page::Debug)
+            ]
+            --
+            @settings_page(Page::Wind)
+            Children [
+                @setting_row("Wind speed (x profile, - / =)", Setting::WindSpeed, 0.0, 2.0, 2)
+                --
+                @setting_row("Wind shear (x, cloud lean)", Setting::WindShear, 0.0, 2.0, 2)
+                --
+                @setting_row("Wind heading (deg)", Setting::WindHeading, 0.0, 360.0, 0)
+                --
+                @setting_row("Cloud time scale (T: 60x)", Setting::TimeScale, 0.0, 120.0, 1)
+                --
+                @setting_row("Updraft speed (m/s)", Setting::Updraft, 0.0, 8.0, 1)
+                --
+                @setting_row("Cloud life time (min, 0 = static)", Setting::Lifetime, 0.0, 60.0, 1)
+            ]
+            --
+            @settings_page(Page::Clouds)
+            Children [
+                @setting_row("Coverage (Left / Right)", Setting::Coverage, 0.0, 3.0, 2)
+                --
+                @setting_row("Density", Setting::Density, 0.0, 3.0, 2)
+                --
+                @setting_row("Detail noise strength", Setting::Detail, 0.0, 1.0, 2)
+                --
+                @setting_row("Cloud size (shape noise period, km)", Setting::CloudSize, 1.0, 20.0, 1)
+            ]
+            --
+            @settings_page(Page::Cirrus)
+            Children [
+                @setting_row("Optical depth", Setting::CirrusOpticalDepth, 0.0, 3.0, 2)
+                --
+                @setting_row("Coverage", Setting::CirrusCoverage, 0.0, 1.0, 2)
+                --
+                @setting_row("Ice fall speed (m/s)", Setting::CirrusFallSpeed, 0.0, 3.0, 2)
+                --
+                @setting_row("Top altitude (km)", Setting::CirrusTop, 5.0, 13.0, 1)
+            ]
+            --
+            @settings_page(Page::Scene)
+            Children [
+                @setting_row("Exposure (EV100, Up / Down)", Setting::Exposure, 6.0, 18.0, 1)
+                --
+                @setting_row("Cloud march steps", Setting::MarchSteps, 16.0, 256.0, 0)
+                --
+                @setting_row("Cloud light taps", Setting::LightTaps, 4.0, 24.0, 0)
+            ]
+            --
+            @settings_page(Page::Debug)
+            Children [
+                @setting_row("3D texture slice ([ / ])", Setting::DebugSlice, 0.0, 0.999, 2)
+            ]
+        ]
+    }
+}
+
+/// Spawns the settings panel, hidden until Tab; `ATMOSPHERE_SETTINGS=wind|clouds|cirrus|scene|debug`
+/// starts with it open on that page, `ATMOSPHERE_DEBUG_VIEW=1` on the debug view.
+fn setup_settings_panel(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     cameras: Query<(Entity, &Camera), With<Camera3d>>,
 ) {
-    let mut view = AtmosphereDebugView::all(&mut images);
-    view.enabled = std::env::var("ATMOSPHERE_DEBUG_VIEW").is_ok();
-    let columns = 5.0;
-    let mut overlay = commands.spawn_empty();
+    let view = AtmosphereDebugView::all(&mut images);
+    let page = match std::env::var("ATMOSPHERE_SETTINGS").as_deref() {
+        _ if std::env::var("ATMOSPHERE_DEBUG_VIEW").is_ok() => Some(Page::Debug),
+        Ok("wind") => Some(Page::Wind),
+        Ok("clouds") => Some(Page::Clouds),
+        Ok("cirrus") => Some(Page::Cirrus),
+        Ok("scene") => Some(Page::Scene),
+        Ok("debug") => Some(Page::Debug),
+        _ => None,
+    };
+    commands.insert_resource(SettingsUi {
+        open: page.is_some(),
+        page: page.unwrap_or_default(),
+    });
+    let mut panel = commands.spawn_scene(settings_panel());
+    panel.insert(if page.is_some() { Visibility::Inherited } else { Visibility::Hidden });
     // On the main camera, which renders offscreen in background runs.
     if let Some((camera, _)) = cameras.iter().min_by_key(|(_, c)| c.order) {
-        overlay.insert(UiTargetCamera(camera));
+        panel.insert(UiTargetCamera(camera));
     }
-    overlay
-        .insert((
-            DebugOverlay,
-            Node {
-                position_type: PositionType::Absolute,
-                top: px(8),
-                right: px(8),
-                width: px(columns * (DEBUG_TILE + 4.0) + 8.0),
-                flex_wrap: FlexWrap::Wrap,
-                column_gap: px(4),
-                row_gap: px(2),
-                padding: UiRect::all(px(4)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-            if view.enabled { Visibility::Inherited } else { Visibility::Hidden },
-        ))
-        .with_children(|parent| {
-            for panel in &view.panels {
-                parent
-                    .spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        width: px(DEBUG_TILE),
-                        ..default()
-                    })
-                    .with_children(|tile| {
-                        tile.spawn((
-                            ImageNode::new(panel.image.clone()),
-                            Node {
-                                width: px(DEBUG_TILE),
-                                height: px(DEBUG_TILE),
-                                ..default()
-                            },
-                        ));
-                        tile.spawn((
-                            Text::new(panel.label.clone()),
-                            TextFont {
-                                font_size: FontSize::Px(10.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                        ));
-                    });
-            }
-            parent.spawn((
-                DebugSliceText,
-                Text::new("3D slice 0.50 ([ / ])"),
-                TextFont {
-                    font_size: FontSize::Px(10.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.85, 0.85, 0.85)),
-            ));
-        });
     commands.insert_resource(view);
 }
 
-/// Tab shows/hides the debug view (the engine skips the previews while hidden); [ and ] move
-/// the slice of every 3D texture (cloud field and aerial perspective: height / distance).
-fn debug_overlay_controls(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut view: ResMut<AtmosphereDebugView>,
-    mut overlay: Query<&mut Visibility, With<DebugOverlay>>,
-    mut slice_text: Query<&mut Text, With<DebugSliceText>>,
+/// Fills the debug page with the previews of the debug view, once it is spawned.
+fn populate_debug_page(
+    mut commands: Commands,
+    pages: Query<(Entity, &SettingsPage), Added<SettingsPage>>,
+    view: Res<AtmosphereDebugView>,
 ) {
-    if keyboard_input.just_pressed(KeyCode::Tab) {
-        view.enabled = !view.enabled;
-        for mut visibility in &mut overlay {
-            *visibility = if view.enabled { Visibility::Inherited } else { Visibility::Hidden };
+    for (page, _) in pages.iter().filter(|(_, p)| p.0 == Page::Debug) {
+        commands.entity(page).with_children(|parent| {
+            parent
+                .spawn(Node {
+                    width: px(5.0 * (DEBUG_TILE + 4.0)),
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: px(4),
+                    row_gap: px(2),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for panel in &view.panels {
+                        grid.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            width: px(DEBUG_TILE),
+                            ..default()
+                        })
+                        .with_children(|tile| {
+                            tile.spawn((
+                                ImageNode::new(panel.image.clone()),
+                                Node {
+                                    width: px(DEBUG_TILE),
+                                    height: px(DEBUG_TILE),
+                                    ..default()
+                                },
+                            ));
+                            tile.spawn((
+                                Text::new(panel.label.clone()),
+                                TextFont {
+                                    font_size: FontSize::Px(10.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.85, 0.85, 0.85)),
+                            ));
+                        });
+                    }
+                });
+        });
+    }
+}
+
+/// Tab opens / closes the settings panel; the selected tab picks the page. The engine draws the
+/// debug previews only while the debug page is shown. [ and ] move the slice of every 3D texture
+/// (cloud field and aerial perspective: height / distance).
+fn settings_panel_controls(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut ui: ResMut<SettingsUi>,
+    mut view: ResMut<AtmosphereDebugView>,
+    mut panels: Query<&mut Visibility, With<SettingsPanel>>,
+    lists: Query<(Entity, &SelectedTab), With<SettingsTabList>>,
+    tabs: Query<(Entity, &SettingsTab)>,
+    mut pages: Query<(&SettingsPage, &mut Node)>,
+    mut commands: Commands,
+    mut initialized: Local<bool>,
+) {
+    // Start on the page `SettingsUi` was set up with (the tab list starts on the wind tab).
+    if !*initialized {
+        let Some(tab) = tabs.iter().find(|(_, t)| t.0 == ui.page).map(|(e, _)| e) else {
+            return;
+        };
+        for (list, _) in &lists {
+            commands.entity(list).insert(SelectedTab(Some(tab)));
         }
+        *initialized = true;
+    } else {
+        for (_, selected) in &lists {
+            if let Some(page) = selected.0.and_then(|e| tabs.get(e).ok()).map(|(_, t)| t.0)
+                && page != ui.page
+            {
+                ui.page = page;
+            }
+        }
+    }
+    if keyboard_input.just_pressed(KeyCode::Tab) {
+        ui.open = !ui.open;
+    }
+    if ui.is_changed() {
+        for mut visibility in &mut panels {
+            *visibility = if ui.open { Visibility::Inherited } else { Visibility::Hidden };
+        }
+        for (page, mut node) in &mut pages {
+            node.display = if page.0 == ui.page { Display::Flex } else { Display::None };
+        }
+    }
+    let enabled = ui.open && ui.page == Page::Debug;
+    if view.enabled != enabled {
+        view.enabled = enabled;
     }
     let step = if keyboard_input.just_pressed(KeyCode::BracketRight) {
         1.0 / 32.0
@@ -533,13 +816,128 @@ fn debug_overlay_controls(
     } else {
         return;
     };
-    let mut slice = 0.5;
     for panel in &mut view.panels {
         panel.slice = (panel.slice + step).clamp(0.0, 1.0 - 1e-3);
-        slice = panel.slice;
     }
-    for mut text in &mut slice_text {
-        text.0 = format!("3D slice {slice:.2} ([ / ])");
+}
+
+/// A slider moved: write its value to the scene.
+fn apply_setting(change: On<ValueChange<f32>>, sliders: Query<&SettingSlider>, mut commands: Commands) {
+    let Ok(&SettingSlider(setting)) = sliders.get(change.source) else {
+        return;
+    };
+    let value = change.value;
+    commands.entity(change.source).insert(SliderValue(value));
+    commands.queue(move |world: &mut World| write_setting(world, setting, value));
+}
+
+/// Keeps the sliders on the scene's values (the keyboard shortcuts change them too).
+fn sync_setting_sliders(world: &mut World) {
+    if !world.get_resource::<SettingsUi>().is_some_and(|ui| ui.open) {
+        return;
+    }
+    let sliders: Vec<(Entity, Setting, f32, i32)> = world
+        .query::<(Entity, &SettingSlider, &SliderValue, &SliderPrecision)>()
+        .iter(world)
+        .map(|(entity, slider, value, precision)| (entity, slider.0, value.0, precision.0))
+        .collect();
+    for (entity, setting, shown, precision) in sliders {
+        // Rounded to the slider's precision: the slider prints values with more decimals in full.
+        let factor = 10f32.powi(precision);
+        if let Some(value) = read_setting(world, setting).map(|v| (v * factor).round() / factor)
+            && (value - shown).abs() > 1e-4 * (1.0 + value.abs())
+        {
+            world.entity_mut(entity).insert(SliderValue(value));
+        }
+    }
+}
+
+/// The planet's radius: cloud layer altitudes are radii from the planet center.
+fn ground_radius(world: &mut World) -> f32 {
+    world
+        .query::<&Atmosphere>()
+        .iter(world)
+        .next()
+        .map_or(6_360_000.0, |a| a.inner_radius)
+}
+
+fn read_setting(world: &mut World, setting: Setting) -> Option<f32> {
+    fn first<C: Component, R>(world: &mut World, f: impl Fn(&C) -> R) -> Option<R> {
+        world.query::<&C>().iter(world).next().map(f)
+    }
+    fn cirrus<R>(world: &mut World, f: impl Fn(&ThinCloudLayer) -> R) -> Option<R> {
+        world
+            .query_filtered::<&ThinCloudLayer, With<Atmosphere>>()
+            .iter(world)
+            .next()
+            .map(f)
+    }
+    let wind = world.resource::<WindControl>();
+    Some(match setting {
+        Setting::WindSpeed => wind.speed,
+        Setting::WindShear => wind.shear,
+        Setting::WindHeading => wind.heading_deg,
+        Setting::TimeScale => world.resource::<CloudTimeScale>().0,
+        Setting::Coverage => first(world, |c: &VolumetricCloudLayer| c.coverage)?,
+        Setting::Density => first(world, |c: &VolumetricCloudLayer| c.cloud_density)?,
+        Setting::Detail => first(world, |c: &VolumetricCloudLayer| c.detail_strength)?,
+        Setting::CloudSize => first(world, |c: &VolumetricCloudLayer| c.shape_noise_scale * 1e-3)?,
+        Setting::Updraft => first(world, |c: &VolumetricCloudLayer| c.updraft_speed)?,
+        Setting::Lifetime => first(world, |c: &VolumetricCloudLayer| c.lifetime / 60.0)?,
+        Setting::CirrusOpticalDepth => cirrus(world, |c| c.optical_depth)?,
+        Setting::CirrusCoverage => cirrus(world, |c| c.coverage)?,
+        Setting::CirrusFallSpeed => cirrus(world, |c| c.fall_speed)?,
+        Setting::CirrusTop => {
+            let ground = ground_radius(world);
+            cirrus(world, |c| (c.top - ground) * 1e-3)?
+        }
+        Setting::Exposure => first(world, |e: &Exposure| e.ev100)?,
+        Setting::MarchSteps => first(world, |s: &VolumetricCloudSettings| s.max_steps as f32)?,
+        Setting::LightTaps => first(world, |s: &VolumetricCloudSettings| s.light_taps as f32)?,
+        Setting::DebugSlice => world.resource::<AtmosphereDebugView>().panels.first()?.slice,
+    })
+}
+
+fn write_setting(world: &mut World, setting: Setting, value: f32) {
+    fn each<C: Component<Mutability = bevy::ecs::component::Mutable>>(world: &mut World, f: impl Fn(&mut C)) {
+        for mut c in world.query::<&mut C>().iter_mut(world) {
+            f(&mut c);
+        }
+    }
+    fn cirrus(world: &mut World, f: impl Fn(&mut ThinCloudLayer)) {
+        for mut c in world
+            .query_filtered::<&mut ThinCloudLayer, With<Atmosphere>>()
+            .iter_mut(world)
+        {
+            f(&mut c);
+        }
+    }
+    match setting {
+        Setting::WindSpeed => world.resource_mut::<WindControl>().speed = value,
+        Setting::WindShear => world.resource_mut::<WindControl>().shear = value,
+        Setting::WindHeading => world.resource_mut::<WindControl>().heading_deg = value,
+        Setting::TimeScale => world.resource_mut::<CloudTimeScale>().0 = value,
+        Setting::Coverage => each(world, |c: &mut VolumetricCloudLayer| c.coverage = value),
+        Setting::Density => each(world, |c: &mut VolumetricCloudLayer| c.cloud_density = value),
+        Setting::Detail => each(world, |c: &mut VolumetricCloudLayer| c.detail_strength = value),
+        Setting::CloudSize => each(world, |c: &mut VolumetricCloudLayer| c.shape_noise_scale = value * 1e3),
+        Setting::Updraft => each(world, |c: &mut VolumetricCloudLayer| c.updraft_speed = value),
+        Setting::Lifetime => each(world, |c: &mut VolumetricCloudLayer| c.lifetime = value * 60.0),
+        Setting::CirrusOpticalDepth => cirrus(world, |c| c.optical_depth = value),
+        Setting::CirrusCoverage => cirrus(world, |c| c.coverage = value),
+        Setting::CirrusFallSpeed => cirrus(world, |c| c.fall_speed = value),
+        Setting::CirrusTop => {
+            let ground = ground_radius(world);
+            cirrus(world, |c| c.top = ground + value * 1e3);
+        }
+        Setting::Exposure => each(world, |e: &mut Exposure| e.ev100 = value),
+        Setting::MarchSteps => each(world, |s: &mut VolumetricCloudSettings| s.max_steps = value.round() as u32),
+        Setting::LightTaps => each(world, |s: &mut VolumetricCloudSettings| s.light_taps = value.round() as u32),
+        Setting::DebugSlice => {
+            for panel in &mut world.resource_mut::<AtmosphereDebugView>().panels {
+                panel.slice = value;
+            }
+        }
     }
 }
 
@@ -1393,14 +1791,48 @@ fn sun_sweep(mut frame: Local<u32>, mut suns: Query<&mut Transform, With<Directi
     }
 }
 
+/// Whether the UI owns the mouse: from a press that starts over the settings panel until every
+/// button is released. The camera controller and `sun_drag` ignore the mouse meanwhile, so
+/// dragging a slider doesn't turn the camera or the sun. A drag that starts over the scene keeps
+/// the camera even when the cursor crosses the panel.
+#[derive(Resource, Default)]
+struct PointerOnUi(bool);
+
+fn pointer_on_ui(
+    mouse: Res<ButtonInput<MouseButton>>,
+    hover_map: Res<bevy::picking::hover::HoverMap>,
+    nodes: Query<(), With<Node>>,
+    mut on_ui: ResMut<PointerOnUi>,
+    #[cfg(feature = "free_camera")] mut cameras: Query<&mut FreeCameraState>,
+) {
+    // Only the first button of a press decides; releasing every button frees the mouse.
+    let first_press = mouse.get_just_pressed().next().is_some()
+        && mouse.get_pressed().all(|button| mouse.just_pressed(*button));
+    if first_press {
+        // Hidden UI (the closed panel) is not picked.
+        on_ui.0 = hover_map
+            .get(&bevy::picking::pointer::PointerId::Mouse)
+            .is_some_and(|hits| hits.keys().any(|entity| nodes.contains(*entity)));
+    } else if mouse.get_pressed().next().is_none() && on_ui.0 {
+        on_ui.0 = false;
+    }
+    #[cfg(feature = "free_camera")]
+    for mut state in &mut cameras {
+        if state.enabled == on_ui.0 {
+            state.enabled = !on_ui.0;
+        }
+    }
+}
+
 /// Right-drag slides the time of day: horizontal mouse motion swings the sun along its arc
 /// (rotation about world Z, the same plane as `ATMOSPHERE_SUN_ELEV_DEG`), 0.15 deg per pixel.
 fn sun_drag(
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
+    on_ui: Res<PointerOnUi>,
     mut suns: Query<&mut Transform, With<DirectionalLight>>,
 ) {
-    if !buttons.pressed(MouseButton::Right) || motion.delta.x == 0.0 {
+    if on_ui.0 || !buttons.pressed(MouseButton::Right) || motion.delta.x == 0.0 {
         return;
     }
     let rotation = Quat::from_rotation_z(-motion.delta.x * 0.15f32.to_radians());
