@@ -380,6 +380,7 @@ pub fn atmosphere_luts(
                         &[
                             atmosphere_uniforms_offset.index(),
                             settings_uniforms_offset.index(),
+                            atmosphere_transforms_offset.index(),
                             view_uniforms_offset.offset,
                             lights_uniforms_offset.offset,
                             cloud_layer_uniforms_offset.index(),
@@ -460,6 +461,7 @@ pub fn atmosphere_luts(
                         &[
                             atmosphere_uniforms_offset.index(),
                             settings_uniforms_offset.index(),
+                            atmosphere_transforms_offset.index(),
                             view_uniforms_offset.offset,
                             lights_uniforms_offset.offset,
                             cloud_layer_uniforms_offset.index(),
@@ -596,6 +598,7 @@ pub fn atmosphere_luts(
             &[
                 atmosphere_uniforms_offset.index(),
                 settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
                 view_uniforms_offset.offset,
                 lights_uniforms_offset.offset,
                 cloud_layer_uniforms_offset.index(),
@@ -619,6 +622,32 @@ pub fn atmosphere_luts(
             &[
                 atmosphere_uniforms_offset.index(),
                 settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
+            ],
+        );
+        let n = super::resources::CLOUD_COLUMN_MAP_SIZE.div_ceil(8);
+        pass.dispatch_workgroups(n, n, 1);
+    }
+
+    // Ground skylight under the clouds (`cloud_shadow_map.wesl` ground_sky): reads the column map
+    // just written (a separate pass for the storage -> sampled barrier) and the sky-view LUT.
+    if let (Some(cloud_layer_uniforms_offset), Some(sky_bg), Some(pipeline)) = (
+        cloud_layer_uniforms_offset.as_ref(),
+        bind_groups.cloud_ground_sky.as_ref(),
+        pipeline_cache.get_compute_pipeline(pipelines.cloud_ground_sky),
+    ) {
+        let mut pass = labelled_compute_pass!("cloud_ground_sky");
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(
+            0,
+            sky_bg,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
                 view_uniforms_offset.offset,
                 lights_uniforms_offset.offset,
                 cloud_layer_uniforms_offset.index(),

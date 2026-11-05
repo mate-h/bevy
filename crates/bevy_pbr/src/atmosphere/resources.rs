@@ -414,8 +414,18 @@ impl AtmosphereBindGroupLayouts {
                 (
                     (0, uniform_buffer::<GpuAtmosphere>(true)),
                     (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
                     (3, uniform_buffer::<ViewUniform>(true)),
                     (4, uniform_buffer::<GpuLights>(true)),
+                    // Transmittance (8) and sky-view (10) LUTs, their sampler (12) and the ground
+                    // column map (63): the ground skylight (`cloud_shadow_map.wesl` ground_sky).
+                    (8, texture_2d(TextureSampleType::default())),
+                    (10, texture_2d(TextureSampleType::default())),
+                    (12, sampler(SamplerBindingType::Filtering)),
+                    (
+                        63,
+                        texture_2d(TextureSampleType::Float { filterable: true }),
+                    ),
                     (20, uniform_buffer::<GpuCloudLayers>(true)),
                     (
                         21,
@@ -1207,6 +1217,7 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_field_init: CachedComputePipelineId,
     pub cloud_far_grid: CachedComputePipelineId,
     pub cloud_column_map: CachedComputePipelineId,
+    pub cloud_ground_sky: CachedComputePipelineId,
     pub cloud_field_edt_x: CachedComputePipelineId,
     pub cloud_field_edt_y: CachedComputePipelineId,
     pub cloud_field_edt_z: CachedComputePipelineId,
@@ -1311,6 +1322,18 @@ impl FromWorld for AtmosphereLutPipelines {
             entry_point: Some("ground_column".into()),
             ..default()
         });
+        let cloud_ground_sky = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_ground_sky_pipeline".into()),
+            layout: vec![layouts.cloud_shadow_map.clone()],
+            shader: load_embedded_asset!(world, "cloud_shadow_map.wesl"),
+            shader_defs: [
+                atm_dbg_defs(),
+                vec!["CLOUDS_ENABLED".into(), "CLOUD_COLUMN_MAP".into()],
+            ]
+            .concat(),
+            entry_point: Some("ground_sky".into()),
+            ..default()
+        });
 
         let cloud_shadow_filter =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -1413,6 +1436,7 @@ impl FromWorld for AtmosphereLutPipelines {
                 "far_grid",
             ),
             cloud_column_map,
+            cloud_ground_sky,
             cloud_field_edt_x: field(
                 "cloud_field_edt_x_pipeline",
                 &layouts.cloud_field_edt,
@@ -1687,6 +1711,7 @@ pub struct AtmosphereTextures {
     /// Vertical cloud optical depth over the ground around the camera (`cloud_shadow_map.wesl`
     /// ground_column), read by the haze's cloud-occluded ground skylight.
     pub cloud_column_map: CachedTexture,
+    pub cloud_ground_sky: CachedTexture,
     /// Weather window around the camera (`weather_window.wesl`): A the art channels (the tiled
     /// map's), B the physical channels. [`WEATHER_WINDOW_SIZE`]^2, recomposed every frame.
     pub weather_window_art: CachedTexture,
@@ -1879,6 +1904,22 @@ pub(super) fn prepare_atmosphere_textures(
             sample_count: 1,
             dimension: TextureDimension::D2,
             // The storage slot it is written through (binding 13) is rgba16float.
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // The column map with the ground skylight in GBA (`cloud_shadow_map.wesl` ground_sky),
+        // which the haze reads in the column map's place.
+        let cloud_ground_sky = textures.get(TextureDescriptor {
+            label: Some("cloud_ground_sky"),
+            size: Extent3d {
+                width: CLOUD_COLUMN_MAP_SIZE,
+                height: CLOUD_COLUMN_MAP_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
             format: TextureFormat::Rgba16Float,
             usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
@@ -2137,6 +2178,7 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_esc,
                 cloud_far_grid,
                 cloud_column_map,
+                cloud_ground_sky,
                 weather_window_art,
                 weather_window_physical,
                 cloud_field_diff_src,
@@ -2339,6 +2381,7 @@ pub(crate) struct AtmosphereBindGroups {
     pub cloud_shadow_map: Option<BindGroup>,
     /// The cloud shadow map's layout with its storage slot on the column map.
     pub cloud_column_map: Option<BindGroup>,
+    pub cloud_ground_sky: Option<BindGroup>,
     // Accessed from the render-world graph; some tooling can miss the cross-module usage.
     #[allow(dead_code)]
     pub cloud_shadow_filter_a_to_b: Option<BindGroup>,
@@ -2869,7 +2912,11 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )
         };
 
-        let cloud_density_bind_group = |label: &'static str, trace_storage: &TextureView| {
+        // `column_read` (63): the ground column map as read by `ground_sky`; never the texture the
+        // group writes through 13.
+        let cloud_density_bind_group = |label: &'static str,
+                                        trace_storage: &TextureView,
+                                        column_read: &TextureView| {
             cloud_layer_binding.as_ref().map(|cloud_layer_binding| {
             render_device.create_bind_group(
                 label,
@@ -2877,8 +2924,13 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 &BindGroupEntries::with_indices((
                     (0, atmosphere_binding.clone()),
                     (1, settings_binding.clone()),
+                    (2, transforms_binding.clone()),
                     (3, view_binding.clone()),
                     (4, lights_binding.clone()),
+                    (8, &textures.transmittance_lut.default_view),
+                    (10, &textures.sky_view_lut.default_view),
+                    (12, &atmosphere_sampler.0),
+                    (63, column_read),
                     (20, cloud_layer_binding.clone()),
                     (21, &fbm_noise_texture.texture.default_view),
                     (22, &**cloud_noise_sampler),
@@ -2898,9 +2950,19 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )
             })
         };
-        let cloud_shadow_map = cloud_density_bind_group("cloud_shadow_map_bind_group", trace_storage);
+        let cloud_shadow_map = cloud_density_bind_group(
+            "cloud_shadow_map_bind_group",
+            trace_storage,
+            &textures.cloud_ground_sky.default_view,
+        );
         let cloud_column_map = cloud_density_bind_group(
             "cloud_column_map_bind_group",
+            &textures.cloud_column_map.default_view,
+            &textures.cloud_ground_sky.default_view,
+        );
+        let cloud_ground_sky = cloud_density_bind_group(
+            "cloud_ground_sky_bind_group",
+            &textures.cloud_ground_sky.default_view,
             &textures.cloud_column_map.default_view,
         );
 
@@ -3083,7 +3145,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (37, &textures.weather_window_physical.default_view),
                         (50, &textures.haze_history_inscattering.default_view),
                         (52, haze_params),
-                        (63, &textures.cloud_column_map.default_view),
+                        (63, &textures.cloud_ground_sky.default_view),
                     )),
                 )
             });
@@ -3329,6 +3391,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             aerial_view_lut_clouds,
             cloud_shadow_map,
             cloud_column_map,
+            cloud_ground_sky,
             cloud_shadow_filter_a_to_b,
             cloud_shadow_filter_b_to_a,
             cloud_shadow_temporal,

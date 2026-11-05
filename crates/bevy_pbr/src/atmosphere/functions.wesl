@@ -1168,10 +1168,33 @@ fn raymarch_atmosphere(
     return result;
 }
 
-/// Sky irradiance on a horizontal ground point: cosine-weighted directions (E = pi * mean(L)),
-/// each a short quadratically spaced single + LUT-multiple scattering march.
+/// Sky irradiance on a horizontal ground point under the clouds (E = pi * mean(L) over
+/// cosine-weighted directions). Where the column map covers the point (the haze pass), it reads
+/// the map's converged value (`cloud_shadow_map.wesl` ground_sky: 64 directions per texel, once
+/// per frame). Elsewhere 6 directions, rotated per pixel and frame for TAA to average: those were
+/// the rolling noise on cloud-shadowed ground (looking down from 400 m: temporal std 0.68 of 255,
+/// 0.04 with the directions fixed), where the skylight is most of the light, and far from
+/// converged (fixing them moved the image by 12 of 255).
+/// `ATM_DBG_GROUND_SKY_PER_PIXEL`: the 6 jittered directions everywhere.
 @if(CLOUDS_ENABLED)
 fn ground_sky_irradiance_clouds(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {
+    @if(CLOUD_COLUMN_MAP && !ATM_DBG_GROUND_SKY_PER_PIXEL) {
+        let camera_xz = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xz;
+        let uv = (p.xz - cloud_column_map_origin(camera_xz)) / (2.0 * CLOUD_COLUMN_MAP_EXTENT_M);
+        if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
+            // Stored pre-exposed, as the sky-view LUT, for f16.
+            return textureSampleLevel(cloud_column_map, atmosphere_lut_sampler, uv, 0.0).gba / view.exposure;
+        }
+    }
+    var j = interleaved_gradient_noise(pixel_coords, 3000u + view.frame_count % 64u);
+    @if(ATM_DBG_GROUND_SKY_FIXED) { j = 0.5; }
+    return ground_sky_irradiance_clouds_dirs(p, j, GROUND_SKY_DIRS);
+}
+
+/// `ground_sky_irradiance_clouds` with `n_dirs` directions, stratified in u = 1 - mu^2 and
+/// rotated by `j` in [0, 1).
+@if(CLOUDS_ENABLED)
+fn ground_sky_irradiance_clouds_dirs(p: vec3<f32>, j: f32, n_dirs: u32) -> vec3<f32> {
     let n = normalize(p);
     let tx = normalize(select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(n.x) > 0.9) - n * dot(n, select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(n.x) > 0.9)));
     let ty = cross(n, tx);
@@ -1199,16 +1222,13 @@ fn ground_sky_irradiance_clouds(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f
     // sky is open. Occluded directions see the cloud base lit by diffusely transmitted sunlight
     // (Lambertian, PI * L).
     let h_mid = 0.5 * (cloud_layer.cloud_layer_start + cloud_layer.cloud_layer_end) - length(p);
-    // The directions are randomly rotated and stratified per pixel and frame (TAA averages them).
-    // A fixed set of 6 gave 6 shifted hard-edged copies of each cloud's occlusion, stacked into
-    // plateaus of constant brightness inside the shadows; each direction stands for a cone of
-    // the hemisphere, and the jitter integrates over it.
-    var j = interleaved_gradient_noise(pixel_coords, 3000u + view.frame_count % 64u);
-    @if(ATM_DBG_GROUND_SKY_FIXED) { j = 0.5; }
+    // Few directions must be rotated per pixel and frame: a fixed set of 6 gave 6 shifted
+    // hard-edged copies of each cloud's occlusion, stacked into plateaus of constant brightness
+    // inside the shadows (each direction stands for a cone of the hemisphere).
     let phi0 = j * 6.2831853;
     var sky = vec3(0.0);
-    for (var k = 0u; k < GROUND_SKY_DIRS; k++) {
-        let u = (f32(k) + fract(j * 7.0 + f32(k) * 0.618034)) / f32(GROUND_SKY_DIRS);
+    for (var k = 0u; k < n_dirs; k++) {
+        let u = (f32(k) + fract(j * 7.0 + f32(k) * 0.618034)) / f32(n_dirs);
         let phi = phi0 + f32(k) * 2.399963;
         let horiz = tx * cos(phi) + ty * sin(phi);
         let mu = sqrt(1.0 - u);
@@ -1218,7 +1238,7 @@ fn ground_sky_irradiance_clouds(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f
         sky += sample_sky_view_lut(r_cam, direction_world_to_atmosphere(d)) * t_cloud
             + (1.0 - t_cloud) * e_top / (1.0 + 0.75 * (1.0 - CLOUD_MIE_MEAN_COS) * tau);
     }
-    return sky * (PI / f32(GROUND_SKY_DIRS));
+    return sky * (PI / f32(n_dirs));
 }
 
 /// Column optical depth above a ground point from a short vertical march through the cloud layer

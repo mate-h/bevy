@@ -25,6 +25,9 @@ import package::atmosphere::clouds::{
     CLOUD_COLUMN_MAP_SIZE,
     CLOUD_COLUMN_MAP_EXTENT_M,
 };
+// The ground skylight entry point (its pipeline alone sets CLOUDS_ENABLED).
+@if(CLOUDS_ENABLED)
+import package::atmosphere::functions::{ground_sky_irradiance_clouds_dirs, cloud_column_map};
 
 @group(0) @binding(25) var stbn_texture: texture_2d_array<f32>;
 @group(0) @binding(13) var out_cloud_shadow_map: texture_storage_2d<rgba16float, write>;
@@ -329,4 +332,26 @@ fn ground_column(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     od *= settings.cloud_shadow_map_strength;
     textureStore(out_cloud_shadow_map, vec2<i32>(gid.xy), vec4(od, 0.0, 0.0, 0.0));
+}
+
+/// Converged ground skylight under the clouds (`functions.wesl` ground_sky_irradiance_clouds) per
+/// column map texel, once per frame: R the column optical depth (copied, so the map's readers keep
+/// it), GBA the sky irradiance pre-exposed (as the sky-view LUT, for f16). 64 directions per
+/// texel, fixed (no per-frame rotation, so nothing for TAA to average): 6 rotated directions per
+/// ground pixel were the rolling noise on cloud-shadowed ground. Runs after `ground_column`, whose
+/// map it reads as `cloud_column_map`.
+const GROUND_SKY_MAP_DIRS: u32 = 32u;
+@if(CLOUDS_ENABLED)
+@compute @workgroup_size(8, 8, 1)
+fn ground_sky(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (any(gid.xy >= vec2(CLOUD_COLUMN_MAP_SIZE))) {
+        return;
+    }
+    let camera = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xyz;
+    let texel = 2.0 * CLOUD_COLUMN_MAP_EXTENT_M / f32(CLOUD_COLUMN_MAP_SIZE);
+    let xz = cloud_column_map_origin(camera.xz) + (vec2<f32>(gid.xy) + 0.5) * texel;
+    let p = normalize(vec3(xz.x, atmosphere.inner_radius, xz.y)) * atmosphere.inner_radius;
+    let od = textureLoad(cloud_column_map, vec2<i32>(gid.xy), 0).r;
+    let e_sky = ground_sky_irradiance_clouds_dirs(p, 0.5, GROUND_SKY_MAP_DIRS);
+    textureStore(out_cloud_shadow_map, vec2<i32>(gid.xy), vec4(od, e_sky * view.exposure));
 }
