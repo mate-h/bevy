@@ -19,7 +19,7 @@
 //! - Cloud shadows: `ATMOSPHERE_SHADOW_INTERLEAVE`, `ATMOSPHERE_SHADOW_SAMPLES`,
 //!   `ATMOSPHERE_SHADOW_TEMPORAL_ALPHA`.
 //! - Capture / runs: `ATMOSPHERE_BACKGROUND`, `ATMOSPHERE_SCREENSHOT`, `ATMOSPHERE_SCREENSHOT_SECS`,
-//!   `ATMOSPHERE_SCREENSHOT_FRAMES`, `ATMOSPHERE_EXIT_SECS`, `ATMOSPHERE_EXIT_FRAME`,
+//!   `ATMOSPHERE_SCREENSHOT_FRAMES`, `ATMOSPHERE_SCREENSHOT_FROM`, `ATMOSPHERE_EXIT_SECS`, `ATMOSPHERE_EXIT_FRAME`,
 //!   `ATMOSPHERE_DIAGNOSTICS`, `ATMOSPHERE_CLEAR`.
 //! - Read by `bevy_pbr`: `ATMOSPHERE_DBG` (comma-separated `ATM_DBG_*` shader defs, see
 //!   `atmosphere/resources.rs`), `ATMOSPHERE_GPU_TIMING` (per-pass CSV).
@@ -264,6 +264,7 @@ struct BenchSettings {
     sunset: bool,
     screenshot_taken: bool,
     startup_frames: Option<u32>,
+    frames_from: u32,
     frame: u32,
 }
 
@@ -282,6 +283,9 @@ impl BenchSettings {
             sunset: var("ATMOSPHERE_SUNSET").is_some(),
             screenshot_taken: false,
             startup_frames: var("ATMOSPHERE_SCREENSHOT_FRAMES").and_then(|v| v.parse().ok()),
+            frames_from: var("ATMOSPHERE_SCREENSHOT_FROM")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             frame: 0,
         }
     }
@@ -321,9 +325,11 @@ fn bench_hooks(
         }
     }
     // `ATMOSPHERE_SCREENSHOT_FRAMES=<n>` + `ATMOSPHERE_SCREENSHOT=<dir/prefix>`: also capture each
-    // of the first n frames (startup convergence debugging) to `<prefix>_fNN.png`.
+    // of the first n frames (startup convergence debugging) to `<prefix>_fNN.png`;
+    // `ATMOSPHERE_SCREENSHOT_FROM=<f>` starts the n frames at frame f (temporal noise).
     if let (Some(n), Some(prefix)) = (bench.startup_frames, bench.screenshot.clone())
-        && bench.frame < n
+        && bench.frame >= bench.frames_from
+        && bench.frame < bench.frames_from + n
     {
         commands
             .spawn(offscreen.0.clone().map_or_else(Screenshot::primary_window, Screenshot::image))
