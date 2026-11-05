@@ -29,7 +29,7 @@ import package::atmosphere::{
         cloud_profile_lut, CLOUD_PROFILE_TYPE_ROWS, CLOUD_SCHEME_ROW,
         cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
         cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
-        CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M,
+        CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M, cloud_shadow_lod, CLOUD_SHADOW_WARP_A,
     },
 };
 
@@ -300,7 +300,106 @@ fn cloud_diffuse_sun(tau_up: f32, tau_down: f32, mu0: f32) -> f32 {
 /// H sqrt(1 - mu^2) / mu. The ground's sun visibility is a sharp pattern, and the nodes sweep
 /// across it as the height changes: with 8 nodes each crossing stepped the average by 1/8 (16 nodes: 1/16),
 /// which showed as fixed horizontal bands on the shadowed sides of clouds (ambient-lit).
+///
+/// Area averages of the cloud shadow map's mip chain (`cloud_shadow_mips.wesl`, transmittance
+/// averaged per 2x2) replace the 16 point taps, which with their off-map branches were the
+/// largest inlined code in the cloud pass after the far-field march. The mean over mu of the ring
+/// averages, integrated by parts, is a mean of disc averages D(rho) around the point below p:
+///   V = int D(rho) w(rho) drho,  w = 1.5 H rho^3 / (H^2 + rho^2)^(5/2),
+/// whose distribution function is F = 1 - 1.5 mu + 0.5 mu^3 with mu = H / sqrt(H^2 + rho^2).
+/// Two equal-weight nodes at its quartile midpoints (F = 1/4, 3/4: mu = 0.5579, 0.1683) are the
+/// discs rho = 1.49 H and 5.86 H. Each disc is read at the mip whose texels cover the square of
+/// equal area, seen along the light (foreshortened by mu_sun). The mips filter over the whole
+/// disc, so nothing steps across the shadow pattern as the height changes.
+/// `ATM_DBG_GROUND_VIS_TAPS`: the 16 point taps. `ATM_DBG_GROUND_VIS_DENSE`: 512 taps (reference).
+/// `ATM_DBG_GROUND_VIS_ONE`: no cloud shadow (ablation).
+const GROUND_VIS_ZONE_RADII: vec2<f32> = vec2(1.4877, 5.8587);
 fn ground_sun_visibility(p: vec3<f32>, l: vec3<f32>) -> f32 {
+    @if(ATM_DBG_GROUND_VIS_ONE) { return 1.0; }
+    @if(ATM_DBG_GROUND_VIS_TAPS) { return ground_sun_visibility_taps(p, l); }
+    @if(ATM_DBG_GROUND_VIS_DENSE) { return ground_sun_visibility_dense(p, l); }
+    let r_g = atmosphere.inner_radius;
+    let up = normalize(p);
+    let height = max(length(p) - r_g, 0.0);
+    let p_g = up * r_g;
+    let frame = cloud_shadow_frame(l);
+    let uv = cloud_shadow_ground_uv(frame, p_g);
+    if (uv.x < 0.0) {
+        return cloud_far_transmittance(p_g, l, true);
+    }
+    let extent = settings.cloud_shadow_map_extent;
+    let size = f32(settings.cloud_shadow_map_size.x);
+    let levels = textureNumLevels(cloud_shadow_map);
+    // Side of the square with the area of a disc of radius 1 projected along the light, in units
+    // of the warped map's texel area: cloud_shadow_lod divides by the tangential texel size, and
+    // the radial one is (a + 3 (1 - a) rho^2) / (a + (1 - a) rho^2) times larger (up to 2.75 x at
+    // the rim), so selecting by the tangential size alone averaged over too large an area.
+    let rho_uv2 = dot(2.0 * uv - 1.0, 2.0 * uv - 1.0);
+    let radial = (CLOUD_SHADOW_WARP_A + 3.0 * (1.0 - CLOUD_SHADOW_WARP_A) * rho_uv2)
+        / (CLOUD_SHADOW_WARP_A + (1.0 - CLOUD_SHADOW_WARP_A) * rho_uv2);
+    let side = sqrt(PI * max(abs(dot(l, up)), 0.05) / radial);
+    var vis = 0.0;
+    for (var i = 0u; i < 2u; i++) {
+        let lod = cloud_shadow_lod(side * GROUND_VIS_ZONE_RADII[i] * height, uv, extent, size, levels);
+        let m = u32(lod);
+        var t = cloud_shadow_ground_bilinear(uv, m);
+        if (m + 1u < levels) {
+            t = mix(t, cloud_shadow_ground_bilinear(uv, m + 1u), lod - f32(m));
+        }
+        vis += 0.5 * t;
+    }
+    return vis;
+}
+
+/// Bilinear filter of the per-texel sun transmittance of the ground at mip `mip` (the texels'
+/// optical depths are averaged as transmittance, so they are interpolated as transmittance).
+fn cloud_shadow_ground_bilinear(uv: vec2<f32>, mip: u32) -> f32 {
+    let size = vec2<i32>(textureDimensions(cloud_shadow_map, mip));
+    let st = uv * vec2<f32>(size) - 0.5;
+    let i0 = vec2<i32>(floor(st));
+    let f = st - floor(st);
+    var t: array<f32, 4>;
+    for (var k = 0; k < 4; k++) {
+        let c = clamp(i0 + vec2(k & 1, k >> 1), vec2(0), size - 1);
+        let d = textureLoad(cloud_shadow_map, c, mip);
+        t[k] = cloud_shadow_optical_depth(d.rgb) * exp(-d.a);
+    }
+    return mix(mix(t[0], t[1], f.x), mix(t[2], t[3], f.x), f.y);
+}
+
+/// Validation (`ATM_DBG_GROUND_VIS_DENSE`): the mean over mu with 16 midpoint nodes x 32
+/// azimuths, the reference for the 2-zone mip lookup and the 16 taps.
+fn ground_sun_visibility_dense(p: vec3<f32>, l: vec3<f32>) -> f32 {
+    let r_g = atmosphere.inner_radius;
+    let up = normalize(p);
+    let height = max(length(p) - r_g, 0.0);
+    let t1 = normalize(cross(up, select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(up.x) > 0.9)));
+    let t2 = cross(up, t1);
+    var vis = 0.0;
+    var n_off_map = 0.0;
+    let frame = cloud_shadow_frame(l);
+    for (var i = 0u; i < 16u; i++) {
+        let mu = (f32(i) + 0.5) / 16.0;
+        let rho = height * sqrt(1.0 - mu * mu) / mu;
+        for (var k = 0u; k < 32u; k++) {
+            let a = (f32(k) + 0.5 * f32(i & 1u)) * (6.2831853 / 32.0);
+            let p_g = normalize(up * r_g + (t1 * cos(a) + t2 * sin(a)) * rho) * r_g;
+            let uv = cloud_shadow_ground_uv(frame, p_g);
+            if (uv.x < 0.0) {
+                n_off_map += 1.0;
+            } else {
+                let d = textureSampleLevel(cloud_shadow_map, atmosphere_lut_sampler, uv, 0.0);
+                vis += cloud_shadow_optical_depth(d.rgb) * exp(-d.a);
+            }
+        }
+    }
+    if (n_off_map > 0.0) {
+        vis += n_off_map * cloud_far_transmittance(up * r_g, l, true);
+    }
+    return vis / 512.0;
+}
+
+fn ground_sun_visibility_taps(p: vec3<f32>, l: vec3<f32>) -> f32 {
     let r_g = atmosphere.inner_radius;
     let up = normalize(p);
     let height = max(length(p) - r_g, 0.0);
