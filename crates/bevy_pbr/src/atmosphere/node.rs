@@ -82,9 +82,8 @@ pub fn atmosphere_luts(
         return;
     };
 
-    let (cloud_shadow_map_pipeline, cloud_shadow_filter_pipeline, cloud_shadow_temporal_pipeline) = (
+    let (cloud_shadow_map_pipeline, cloud_shadow_temporal_pipeline) = (
         pipeline_cache.get_compute_pipeline(pipelines.cloud_shadow_map),
-        pipeline_cache.get_compute_pipeline(pipelines.cloud_shadow_filter),
         pipeline_cache.get_compute_pipeline(pipelines.cloud_shadow_temporal),
     );
 
@@ -366,9 +365,7 @@ pub fn atmosphere_luts(
         });
         let pass_span = diagnostics.pass_span(&mut cloud_shadow_pass, "cloud_shadow_map");
         {
-            if let (Some(cloud_shadow_map_pipeline), Some(_cloud_shadow_filter_pipeline)) =
-                (cloud_shadow_map_pipeline, cloud_shadow_filter_pipeline)
-            {
+            if let Some(cloud_shadow_map_pipeline) = cloud_shadow_map_pipeline {
                 if let (Some(cloud_layer_uniforms_offset), Some(cloud_shadow_map_bg)) = (
                     cloud_layer_uniforms_offset.as_ref(),
                     bind_groups.cloud_shadow_map.as_ref(),
@@ -655,40 +652,6 @@ pub fn atmosphere_luts(
         );
         let n = super::resources::CLOUD_COLUMN_MAP_SIZE.div_ceil(8);
         pass.dispatch_workgroups(n, n, 1);
-    }
-
-    // IMPORTANT:
-    // We run the cloud shadow *filter* in a separate compute pass so the backend can insert the
-    // required resource state transitions (storage-write -> sampled-read) between tracing and filtering.
-    // Without this, the filter can appear to do nothing on some backends.
-    if settings.cloud_shadow_map_spatial_filter_iterations > 0
-        && settings.cloud_shadow_map_update_interleave <= 1
-        && cloud_layer_uniforms_offset.is_some()
-        && bind_groups.cloud_shadow_filter_a_to_b.is_some()
-        && bind_groups.cloud_shadow_filter_b_to_a.is_some()
-    {
-        let Some(cloud_shadow_filter_pipeline) = cloud_shadow_filter_pipeline else {
-            return;
-        };
-        let iters = settings.cloud_shadow_map_spatial_filter_iterations;
-        let iters_even = (iters + 1) & !1;
-        if iters_even > 0 {
-            let mut filter_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_shadow_filter"),
-                timestamp_writes: None,
-            });
-
-            filter_pass.set_pipeline(cloud_shadow_filter_pipeline);
-            for i in 0..iters_even {
-                let bg = if (i & 1) == 0 {
-                    bind_groups.cloud_shadow_filter_a_to_b.as_ref().unwrap()
-                } else {
-                    bind_groups.cloud_shadow_filter_b_to_a.as_ref().unwrap()
-                };
-                filter_pass.set_bind_group(0, bg, &[settings_uniforms_offset.index()]);
-                dispatch_2d(&mut filter_pass, settings.cloud_shadow_map_size);
-            }
-        }
     }
 
     // Temporal filter: blend current (tmp) with history, write to cloud_shadow_map.

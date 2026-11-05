@@ -32,7 +32,6 @@ use std::f32::consts::PI;
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     camera::Exposure,
-    color::palettes::css::BLACK,
     core_pipeline::tonemapping::Tonemapping,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     ecs::template::OptionTemplate,
@@ -42,10 +41,6 @@ use bevy::{
         display::{caption, label_small},
         theme::{ThemeBackgroundColor, ThemeBorderColor, UiTheme},
         tokens, FeathersPlugins,
-    },
-    image::{
-        ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
-        ImageSamplerDescriptor,
     },
     input::keyboard::KeyCode,
     light::{
@@ -61,16 +56,13 @@ use bevy::{
         AtmosphereDebugView, AtmosphereDebugViewPlugin,
         DefaultOpaqueRendererMethod,
         VolumetricCloudSettings,
-        ExtendedMaterial, MaterialExtension, ScreenSpaceReflections,
     },
     post_process::bloom::Bloom,
     prelude::*,
     render::{
         diagnostic::RenderDiagnosticsPlugin,
-        render_resource::{AsBindGroup, ShaderType},
         view::screenshot::{save_to_disk, Screenshot},
     },
-    shader::ShaderRef,
     ui_widgets::{tablist_self_update, SelectedTab, SliderPrecision, SliderValue, ValueChange},
 };
 
@@ -151,7 +143,6 @@ fn main() {
             #[cfg(feature = "free_camera")]
             FreeCameraPlugin,
         ))
-        .add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, Water>>::default())
         .add_plugins((AtmosphereDebugViewPlugin, FeathersPlugins))
         .insert_resource(UiTheme(create_dark_theme()))
         .init_resource::<WindControl>()
@@ -1065,13 +1056,6 @@ fn atmosphere_controls(
             exposure.ev100 += time.delta_secs() * 2.0;
         }
     }
-
-    // Animate clouds by updating noise offset
-    for (_, cloud_layer) in atmosphere_entities.iter_mut() {
-        if let Some(_cloud_layer) = cloud_layer {
-            // _cloud_layer.noise_offset.x += time.delta_secs() * 100.0;
-        }
-    }
 }
 
 /// Cycles the vertical cloud profiles of the cloud layer: the baked physical set, Nubis's
@@ -1099,7 +1083,7 @@ fn cycle_cloud_profiles(
 
 fn visibility_toggle(
     game_state: Res<GameState>,
-    mut visibility_query: Query<&mut Visibility, Or<(With<WaterPlane>, With<FogVolume>)>>,
+    mut visibility_query: Query<&mut Visibility, With<FogVolume>>,
 ) {
     let visibility = if game_state.planet_scale_view {
         Visibility::Hidden
@@ -1403,10 +1387,6 @@ fn setup_camera_fog(
                 ..preset
             }
         },
-        // ScreenSpaceReflections {
-        //     min_perceptual_roughness: 0.0..0.0,
-        //     ..default()
-        // },
     ));
     // `ATMOSPHERE_VIEWPORT=x,y,w,h`: render the camera into that physical-pixel sub-rectangle of
     // its target (split-screen / inset cameras).
@@ -1457,8 +1437,8 @@ fn setup_camera_fog(
                 // Its own environment map (inserted below), not the main camera's image.
                 builder.deny::<(
                     AtmosphereEnvironmentMapLight,
-                    bevy::light::GeneratedEnvironmentMapLight,
-                    bevy::light::EnvironmentMapLight,
+                    GeneratedEnvironmentMapLight,
+                    EnvironmentMapLight,
                 )>();
                 #[cfg(feature = "free_camera")]
                 builder.deny::<(FreeCamera, FreeCameraState)>();
@@ -1482,46 +1462,9 @@ struct SecondCameraTarget(Handle<Image>);
 #[derive(Component)]
 struct Terrain;
 
-#[derive(Component)]
-struct WaterPlane;
-
-/// A custom [`ExtendedMaterial`] that creates animated water ripples.
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-struct Water {
-    /// The normal map image.
-    ///
-    /// Note that, like all normal maps, this must not be loaded as sRGB.
-    #[texture(100)]
-    #[sampler(101)]
-    normals: Handle<Image>,
-
-    // Parameters to the water shader.
-    #[uniform(102)]
-    settings: WaterSettings,
-}
-
-/// Parameters to the water shader.
-#[derive(ShaderType, Debug, Clone)]
-struct WaterSettings {
-    /// How much to displace each octave each frame, in the u and v directions.
-    /// Two octaves are packed into each `vec4`.
-    octave_vectors: [Vec4; 2],
-    /// How wide the waves are in each octave.
-    octave_scales: Vec4,
-    /// How high the waves are in each octave.
-    octave_strengths: Vec4,
-}
-
-impl MaterialExtension for Water {
-    fn deferred_fragment_shader() -> ShaderRef {
-        "shaders/water_material.wesl".into()
-    }
-}
-
 fn setup_terrain_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut water_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, Water>>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
@@ -1663,62 +1606,6 @@ fn setup_terrain_scene(
         Transform::from_xyz(-1.0, 0.0, -0.5)
             .with_scale(Vec3::splat(0.5))
             .with_rotation(Quat::from_rotation_y(PI / 2.0)),
-    ));
-
-    // spawn_water(
-    //     &mut commands,
-    //     &asset_server,
-    //     &mut meshes,
-    //     &mut water_materials,
-    // );
-}
-
-// Spawns the water plane.
-fn spawn_water(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    meshes: &mut Assets<Mesh>,
-    water_materials: &mut Assets<ExtendedMaterial<StandardMaterial, Water>>,
-) {
-    commands.spawn((
-        WaterPlane,
-        Visibility::default(),
-        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(1.0)))),
-        MeshMaterial3d(
-            water_materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    base_color: BLACK.into(),
-                    perceptual_roughness: 0.0,
-                    ..default()
-                },
-                extension: Water {
-                    normals: asset_server
-                        .load_builder()
-                        .with_settings(|settings: &mut ImageLoaderSettings| {
-                            settings.is_srgb = false;
-                            settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                                address_mode_u: ImageAddressMode::Repeat,
-                                address_mode_v: ImageAddressMode::Repeat,
-                                mag_filter: ImageFilterMode::Linear,
-                                min_filter: ImageFilterMode::Linear,
-                                ..default()
-                            });
-                        })
-                        .load("textures/water_normals.png"),
-                    // These water settings are just random values to create some
-                    // variety.
-                    settings: WaterSettings {
-                        octave_vectors: [
-                            vec4(0.080, 0.059, 0.073, -0.062),
-                            vec4(0.153, 0.138, -0.149, -0.195),
-                        ],
-                        octave_scales: vec4(1.0, 2.1, 7.9, 14.9) * 500.0,
-                        octave_strengths: vec4(0.16, 0.18, 0.093, 0.044) * 0.2,
-                    },
-                },
-            }),
-        ),
-        Transform::from_scale(Vec3::splat(100.0)),
     ));
 }
 

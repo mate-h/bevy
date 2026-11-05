@@ -18,7 +18,6 @@ struct Params {
 
 const UI0: u32 = 1597334673u;
 const UI1: u32 = 3812015801u;
-const UI2: vec2<u32> = vec2<u32>(UI0, UI1);
 const UI3: vec3<u32> = vec3<u32>(UI0, UI1, 2798796415u);
 const UIF: f32 = 1.0 / 4294967295.0;
 

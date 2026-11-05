@@ -12,12 +12,6 @@ import package::{
 
 @group(0) @binding(13) var aerial_view_lut_out: texture_storage_3d<rgba16float, write>;
 
-@if(NO_CUBE_ARRAY_TEXTURES_SUPPORT)
-@group(0) @binding(14) var point_shadow_textures: texture_depth_cube;
-@else
-@group(0) @binding(14) var point_shadow_textures: texture_depth_cube_array;
-@group(0) @binding(15) var point_shadow_textures_comparison_sampler: sampler_comparison;
-
 @compute
 @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {

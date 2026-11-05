@@ -52,44 +52,8 @@ pub(crate) const CLOUD_FAR_GRID_RES_XY: u32 = 128;
 pub(crate) const CLOUD_COLUMN_MAP_SIZE: u32 = 256;
 pub(crate) const CLOUD_FAR_GRID_RES_Z: u32 = 8;
 
-/// Shadow map bind group layout entries
-fn shadow_map_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<4> {
-    (
-        (
-            14,
-            #[cfg(all(
-                not(target_abi = "sim"),
-                any(
-                    not(feature = "webgl"),
-                    not(target_arch = "wasm32"),
-                    feature = "webgpu"
-                )
-            ))]
-            texture_cube_array(TextureSampleType::Depth),
-            #[cfg(any(
-                target_abi = "sim",
-                all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
-            ))]
-            texture_cube(TextureSampleType::Depth),
-        ),
-        (15, sampler(SamplerBindingType::Comparison)),
-        (
-            16,
-            #[cfg(any(
-                not(feature = "webgl"),
-                not(target_arch = "wasm32"),
-                feature = "webgpu"
-            ))]
-            texture_2d_array(TextureSampleType::Depth),
-            #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
-            texture_2d(TextureSampleType::Depth),
-        ),
-        (17, sampler(SamplerBindingType::Comparison)),
-    )
-}
-
-/// The directional half of [`shadow_map_layout_entries`]: `render_sky` reads no point-light
-/// shadows, and the slot keeps its passes within 16 sampled textures.
+/// Directional light shadow map bind group layout entries (the atmosphere reads no point-light
+/// shadows).
 fn directional_shadow_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<2> {
     (
         (
@@ -215,9 +179,6 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub sky_view_lut_clouds: BindGroupLayoutDescriptor,
     pub aerial_view_lut_clouds: BindGroupLayoutDescriptor,
     pub cloud_shadow_map: BindGroupLayoutDescriptor,
-    // Accessed from the render-world graph; some tooling can miss the cross-module usage.
-    #[allow(dead_code)]
-    pub cloud_shadow_filter: BindGroupLayoutDescriptor,
     pub cloud_shadow_temporal: BindGroupLayoutDescriptor,
     pub clouds_raymarch: BindGroupLayoutDescriptor,
     pub clouds_raymarch_msaa: BindGroupLayoutDescriptor,
@@ -357,7 +318,7 @@ impl AtmosphereBindGroupLayouts {
                     (62, texture_2d(TextureSampleType::default())), // ground irradiance
                 ),
             )
-            .extend_with_indices(shadow_map_layout_entries())
+            .extend_with_indices(directional_shadow_layout_entries())
         };
         // Cloud-shadowed variants (Hillaire 2020 / UE5: the volumetric cloud shadow map darkens
         // the sky-view and aerial-perspective LUT in-scattering).
@@ -396,7 +357,7 @@ impl AtmosphereBindGroupLayouts {
                     ),
                 ),
             )
-            .extend_with_indices(shadow_map_layout_entries())
+            .extend_with_indices(directional_shadow_layout_entries())
         };
         let aerial_view_lut_clouds = BindGroupLayoutDescriptor::new(
             "aerial_view_lut_clouds_bind_group_layout",
@@ -506,30 +467,6 @@ impl AtmosphereBindGroupLayouts {
             ),
         );
 
-        // Cloud shadow spatial filter (ping-pong).
-        // Reads: sampled shadow map (rgba16f)
-        // Writes: storage shadow map (rgba16f)
-        let cloud_shadow_filter = BindGroupLayoutDescriptor::new(
-            "cloud_shadow_filter_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
-                ShaderStages::COMPUTE,
-                (
-                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
-                    (12, sampler(SamplerBindingType::Filtering)),
-                    (
-                        23,
-                        texture_2d(TextureSampleType::Float { filterable: true }),
-                    ),
-                    (
-                        13,
-                        texture_storage_2d(
-                            TextureFormat::Rgba16Float,
-                            StorageTextureAccess::WriteOnly,
-                        ),
-                    ),
-                ),
-            ),
-        );
 
         // Cloud shadow temporal filter.
         // Reads: traced output (storage), history (sampled)
@@ -548,7 +485,6 @@ impl AtmosphereBindGroupLayouts {
                         ),
                     ),
                     (2, texture_2d(TextureSampleType::Float { filterable: true })),
-                    (3, sampler(SamplerBindingType::Filtering)),
                     (
                         4,
                         texture_storage_2d(
@@ -691,7 +627,6 @@ impl AtmosphereBindGroupLayouts {
             sky_view_lut_clouds,
             aerial_view_lut_clouds,
             cloud_shadow_map,
-            cloud_shadow_filter,
             cloud_shadow_temporal,
             clouds_raymarch,
             clouds_raymarch_msaa,
@@ -1206,9 +1141,6 @@ pub(crate) struct AtmosphereLutPipelines {
     pub sky_view_lut_clouds: CachedComputePipelineId,
     pub aerial_view_lut_clouds: CachedComputePipelineId,
     pub cloud_shadow_map: CachedComputePipelineId,
-    // Accessed from the render-world graph; some tooling can miss the cross-module usage.
-    #[allow(dead_code)]
-    pub cloud_shadow_filter: CachedComputePipelineId,
     pub cloud_shadow_temporal: CachedComputePipelineId,
     pub clouds_raymarch: CachedComputePipelineId,
     /// `clouds_raymarch` for MSAA views (multisampled scene depth).
@@ -1335,14 +1267,6 @@ impl FromWorld for AtmosphereLutPipelines {
             ..default()
         });
 
-        let cloud_shadow_filter =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("cloud_shadow_filter_pipeline".into()),
-                layout: vec![layouts.cloud_shadow_filter.clone()],
-                shader: load_embedded_asset!(world, "cloud_shadow_filter.wesl"),
-                ..default()
-            });
-
         let cloud_shadow_temporal =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("cloud_shadow_temporal_pipeline".into()),
@@ -1420,7 +1344,6 @@ impl FromWorld for AtmosphereLutPipelines {
             sky_view_lut_clouds,
             aerial_view_lut_clouds,
             cloud_shadow_map,
-            cloud_shadow_filter,
             cloud_shadow_temporal,
             clouds_raymarch,
             clouds_raymarch_msaa,
@@ -2382,12 +2305,6 @@ pub(crate) struct AtmosphereBindGroups {
     /// The cloud shadow map's layout with its storage slot on the column map.
     pub cloud_column_map: Option<BindGroup>,
     pub cloud_ground_sky: Option<BindGroup>,
-    // Accessed from the render-world graph; some tooling can miss the cross-module usage.
-    #[allow(dead_code)]
-    pub cloud_shadow_filter_a_to_b: Option<BindGroup>,
-    // Accessed from the render-world graph; some tooling can miss the cross-module usage.
-    #[allow(dead_code)]
-    pub cloud_shadow_filter_b_to_a: Option<BindGroup>,
     /// Temporal filter bind group; present when cloud_shadow_temporal_enabled.
     pub cloud_shadow_temporal: Option<BindGroup>,
     pub render_sky_clouds: Option<BindGroup>,
@@ -2840,8 +2757,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (13, &textures.sky_view_lut.default_view),
                 (62, &textures.ground_irradiance_lut.default_view),
                 // shadow maps
-                (14, &shadow_bindings.point_light_depth_texture_view),
-                (15, &shadow_samplers.shadow_comparison_sampler),
                 (16, &shadow_bindings.directional_light_depth_texture_view),
                 (17, &shadow_samplers.shadow_comparison_sampler),
             )),
@@ -2867,8 +2782,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 // aerial view lut storage texture
                 (13, &textures.aerial_view_lut.default_view),
                 // shadow maps
-                (14, &shadow_bindings.point_light_depth_texture_view),
-                (15, &shadow_samplers.shadow_comparison_sampler),
                 (16, &shadow_bindings.directional_light_depth_texture_view),
                 (17, &shadow_samplers.shadow_comparison_sampler),
             )),
@@ -2882,36 +2795,12 @@ pub(super) fn prepare_atmosphere_bind_groups(
             mip_level_count: Some(1),
             ..default()
         });
-        // When temporal enabled: trace writes to tmp; filter reads tmp first.
-        // When temporal disabled: trace writes to cloud_shadow_map; filter reads cloud_shadow_map first.
+        // With the temporal pass the trace writes to tmp, which the pass blends into the map.
         let trace_storage = if temporal_enabled {
             &textures.cloud_shadow_map_tmp.default_view
         } else {
             &shadow_mip0
         };
-        let (filter_read_a, filter_write_a) = if temporal_enabled {
-            (
-                &textures.cloud_shadow_map_tmp.default_view,
-                &shadow_mip0,
-            )
-        } else {
-            (
-                &shadow_mip0,
-                &textures.cloud_shadow_map_tmp.default_view,
-            )
-        };
-        let (filter_read_b, filter_write_b) = if temporal_enabled {
-            (
-                &shadow_mip0,
-                &textures.cloud_shadow_map_tmp.default_view,
-            )
-        } else {
-            (
-                &textures.cloud_shadow_map_tmp.default_view,
-                &shadow_mip0,
-            )
-        };
-
         // `column_read` (63): the ground column map as read by `ground_sky`; never the texture the
         // group writes through 13.
         let cloud_density_bind_group = |label: &'static str,
@@ -2966,34 +2855,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
             &textures.cloud_column_map.default_view,
         );
 
-        // Cloud shadow spatial filter ping-pong bind groups.
-        // When temporal: A=tmp (trace output), B=cloud_shadow_map. When not: A=cloud_shadow_map, B=tmp.
-        let cloud_shadow_filter_a_to_b = cloud_shadow_map.as_ref().map(|_| {
-            render_device.create_bind_group(
-                "cloud_shadow_filter_a_to_b_bind_group",
-                &pipeline_cache.get_bind_group_layout(&layouts.cloud_shadow_filter),
-                &BindGroupEntries::with_indices((
-                    (1, settings_binding.clone()),
-                    (12, &atmosphere_sampler.0),
-                    (23, filter_read_a),
-                    (13, filter_write_a),
-                )),
-            )
-        });
-
-        let cloud_shadow_filter_b_to_a = cloud_shadow_map.as_ref().map(|_| {
-            render_device.create_bind_group(
-                "cloud_shadow_filter_b_to_a_bind_group",
-                &pipeline_cache.get_bind_group_layout(&layouts.cloud_shadow_filter),
-                &BindGroupEntries::with_indices((
-                    (1, settings_binding.clone()),
-                    (12, &atmosphere_sampler.0),
-                    (23, filter_read_b),
-                    (13, filter_write_b),
-                )),
-            )
-        });
-
         // Temporal filter: curr=tmp (or cloud_shadow_map when no filter), prev=history, out=cloud_shadow_map.
         let cloud_shadow_temporal = (cloud_shadow_map.is_some() && temporal_enabled)
             .then(|| {
@@ -3007,7 +2868,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
                                 (0, temporal_params_binding),
                                 (1, &textures.cloud_shadow_map_tmp.default_view),
                                 (2, &textures.cloud_shadow_map_history.default_view),
-                                (3, &atmosphere_sampler.0),
                                 (4, &shadow_mip0),
                             )),
                         )
@@ -3325,8 +3185,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (12, &atmosphere_sampler.0),
                         (13, &textures.sky_view_lut.default_view),
                         (62, &textures.ground_irradiance_lut.default_view),
-                        (14, &shadow_bindings.point_light_depth_texture_view),
-                        (15, &shadow_samplers.shadow_comparison_sampler),
                         (16, &shadow_bindings.directional_light_depth_texture_view),
                         (17, &shadow_samplers.shadow_comparison_sampler),
                         (20, cloud_layer_binding.clone()),
@@ -3362,8 +3220,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (9, &textures.multiscattering_lut.default_view),
                         (12, &atmosphere_sampler.0),
                         (13, &textures.aerial_view_lut.default_view),
-                        (14, &shadow_bindings.point_light_depth_texture_view),
-                        (15, &shadow_samplers.shadow_comparison_sampler),
                         (16, &shadow_bindings.directional_light_depth_texture_view),
                         (17, &shadow_samplers.shadow_comparison_sampler),
                         (20, cloud_layer_binding.clone()),
@@ -3392,8 +3248,6 @@ pub(super) fn prepare_atmosphere_bind_groups(
             cloud_shadow_map,
             cloud_column_map,
             cloud_ground_sky,
-            cloud_shadow_filter_a_to_b,
-            cloud_shadow_filter_b_to_a,
             cloud_shadow_temporal,
             render_sky_clouds,
             render_sky_haze,
@@ -3505,6 +3359,12 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_NO_HAZE_CLAMP`: no clamp of the haze history to this frame's nearby samples.
 /// - `ATM_DBG_GROUND_SKY_FIXED`: one fixed set of ground-skylight directions (no per-pixel/frame
 ///   jitter), to measure the jitter's temporal noise.
+/// - `ATM_DBG_GROUND_SKY_PER_PIXEL`: ground skylight from 6 jittered directions per pixel instead
+///   of the column map's converged skylight.
+/// - `ATM_DBG_GROUND_VIS_TAPS` / `ATM_DBG_GROUND_VIS_DENSE` / `ATM_DBG_GROUND_VIS_ONE`: ground sun
+///   visibility from 16 point taps / 512 taps (reference) / no cloud shadow (ablation).
+/// - `ATM_DBG_HAZE_AP_LUT`: haze in front of clouds from the aerial-perspective LUT instead of the
+///   cloud ray's own march.
 /// - `ATM_DBG_AP_BAL`: ballistic (non-similarity) aerial-perspective transmittance.
 /// - `ATM_DBG_TAP_ONE`: no aerial-perspective transmittance on cloud luminance (term split).
 /// - `ATM_DBG_NO_FAR_SHADOW`: drop the cloud shadow map beyond the local light march.

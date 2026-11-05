@@ -12,8 +12,6 @@
 // Note: We do NOT import bindings::settings here because it would conflict
 // with our binding 1 (curr_cloud_shadow). Size is passed via temporal_params.
 
-@group(0) @binding(3) var prev_cloud_sampler: sampler;
-
 @group(0) @binding(0) var<uniform> temporal_params: CloudShadowTemporalParams;
 // Traced output (storage, use textureLoad)
 @group(0) @binding(1) var curr_cloud_shadow: texture_storage_2d<rgba16float, read>;

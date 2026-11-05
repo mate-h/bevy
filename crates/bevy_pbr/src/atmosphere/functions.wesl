@@ -104,11 +104,6 @@ fn cloud_mie_phase(cos_theta: f32) -> f32 {
         draine_phase(cos_theta, CLOUD_MIE_G_D, CLOUD_MIE_ALPHA), CLOUD_MIE_W_D);
 }
 
-/// Dual-lobe HG phase (Frostbite-style): blend a forward and backward lobe.
-fn dual_lobe_hg_phase(cos_theta: f32, g_fwd: f32, g_bwd: f32, lobe_lerp: f32) -> f32 {
-    return mix(hg_phase(cos_theta, g_fwd), hg_phase(cos_theta, g_bwd), lobe_lerp);
-}
-
 /// During raymarching, each segment is sampled at a single point. This constant determines
 /// where in the segment that sample is taken (0.0 = start, 0.5 = middle, 1.0 = end).
 /// We use 0.3 to sample closer to the start of each segment, which better approximates

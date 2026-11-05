@@ -28,7 +28,6 @@
 @group(0) @binding(0) var noise: texture_3d<f32>;
 @group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>, 4096>;
 @group(0) @binding(2) var profile_lut: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(3) var detail: texture_3d<f32>;
 
 struct QuantileParams {
     _pad0: f32,
@@ -37,8 +36,8 @@ struct QuantileParams {
     _pad1: f32,
     _pad2: f32,
 }
-@group(0) @binding(4) var<uniform> params: QuantileParams;
-@group(0) @binding(5) var scheme_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> params: QuantileParams;
+@group(0) @binding(4) var scheme_out: texture_storage_3d<rgba16float, write>;
 
 // After the cloud-type rows (`cloud_profile.rs` CLOUD_PROFILE_TYPE_RES).
 const FIRST_DISTRIBUTION_ROW: u32 = 64u;

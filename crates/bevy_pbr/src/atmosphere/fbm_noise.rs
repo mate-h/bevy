@@ -27,7 +27,6 @@ use super::{
         physical_profile_texels, CloudProfiles,
         CLOUD_PROFILE_HEIGHT_RES, CLOUD_PROFILE_TYPE_RES,
     },
-    detail_noise::{DetailNoiseGenerated, DetailNoiseTexture},
     perlin_worley_noise::{PerlinWorleyNoiseGenerated, PerlinWorleyNoiseTexture},
     VolumetricCloudLayer,
 };
@@ -600,7 +599,6 @@ impl FromWorld for CloudNoiseQuantilePipeline {
                     texture_3d(TextureSampleType::Float { filterable: false }),
                     storage_buffer_sized(false, None),
                     texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
-                    texture_3d(TextureSampleType::Float { filterable: false }),
                     uniform_buffer::<CloudNoiseQuantileParams>(false),
                     texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
                 ),
@@ -639,21 +637,19 @@ pub fn compute_cloud_noise_quantiles(
     pipeline: Res<CloudNoiseQuantilePipeline>,
     profile: Option<Res<FbmNoiseTexture>>,
     noise: Option<Res<PerlinWorleyNoiseTexture>>,
-    detail: Option<Res<DetailNoiseTexture>>,
     generated: Res<PerlinWorleyNoiseGenerated>,
-    detail_generated: Res<DetailNoiseGenerated>,
     mip_pipeline: Res<super::perlin_worley_noise::NoiseMipDownsamplePipeline>,
     mip_layout: Res<super::perlin_worley_noise::NoiseMipDownsampleBindGroupLayout>,
     layers: Query<&crate::GpuCloudLayers>,
     mut last: Local<Option<u32>>,
 ) {
-    let (Some(profile), Some(noise), Some(detail)) = (profile, noise, detail) else {
+    let (Some(profile), Some(noise)) = (profile, noise) else {
         return;
     };
     let Some(layer) = layers.iter().next() else {
         return;
     };
-    if generated.0 < noise.mip_level_count || !detail_generated.0 {
+    if generated.0 < noise.mip_level_count {
         return;
     }
     let bubble_weight = cloud_bubble_weight(layer.detail_strength);
@@ -701,7 +697,6 @@ pub fn compute_cloud_noise_quantiles(
             &noise.texture.default_view,
             bins.as_entire_binding(),
             &profile.profile.default_view,
-            &detail.texture.default_view,
             params.as_entire_binding(),
             &profile.scheme_noise_mips[0],
         )),

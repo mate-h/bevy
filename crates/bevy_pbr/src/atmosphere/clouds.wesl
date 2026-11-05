@@ -897,103 +897,6 @@ fn cloud_mip_from_distance(dist_m: f32) -> f32 {
     return log2(1.0 + dist_m * (1.0 / 4000.0));
 }
 
-/// Raymarch through clouds towards the sun to compute volumetric shadow
-/// Returns the light transmittance factor [0,1] where 0 = fully shadowed, 1 = no shadow
-/// Properly handles viewer inside clouds and grazing angles
-fn compute_cloud_shadow(
-    world_pos: vec3<f32>,
-    sun_dir: vec3<f32>,
-    steps: u32,
-    pixel_coords: vec2<f32>,
-) -> f32 {
-    // Early exit if clouds are disabled
-    if (cloud_layer.cloud_density <= 0.0) {
-        return 1.0;
-    }
-
-    // March bounds: only integrate within the cloud layer shell along the sun ray.
-    let seg = cloud_layer_segment(world_pos, sun_dir);
-    if (seg.z < 0.5) {
-        return 1.0;
-    }
-
-    var march_start = max(seg.x, 0.0);
-    var march_end = seg.y;
-    if (march_start >= march_end || march_end <= 0.0) {
-        return 1.0;
-    }
-
-    // Earth (planet) shadow term:
-    // If the sun ray hits the planet surface before it exits the cloud layer,
-    // the sun is fully occluded and there is no direct lighting.
-    let r0 = length(world_pos);
-    let up0 = normalize(world_pos);
-    let mu0 = dot(sun_dir, up0);
-    let ground_i = ray_sphere_intersect(r0, mu0, atmosphere.inner_radius);
-    // `ground_i.x` is the nearest positive intersection along the ray, if any.
-    if (ground_i.x > 0.0 && ground_i.x < march_end) {
-        return 0.0;
-    }
-
-    let march_distance = march_end - march_start;
-
-    // Adaptive step count: long segments need more samples, otherwise we can miss small dense regions
-    // (especially with the repeating-sphere debug density field).
-    const TARGET_STEP_M: f32 = 1500.0;
-    const MAX_SHADOW_STEPS: f32 = 16.0;
-    let desired = clamp(ceil(march_distance / TARGET_STEP_M), f32(steps), MAX_SHADOW_STEPS);
-    let shadow_steps = max(1u, u32(desired));
-
-    let step_size = march_distance / f32(shadow_steps);
-    var optical_depth = 0.0;
-
-    // Raymarch through clouds towards sun with per-step jitter.
-    for (var i = 0u; i < shadow_steps; i++) {
-        let j = interleaved_gradient_noise(pixel_coords, 100u + i); // [0,1]
-        let t = march_start + (f32(i) + j) * step_size;
-        let sample_pos = world_pos + sun_dir * t;
-        let sample_r = length(sample_pos);
-
-        let density = get_cloud_medium_density(sample_r, sample_pos);
-        if (density > 0.0) {
-            let extinction = density * (cloud_layer.cloud_scattering + cloud_layer.cloud_absorption);
-            optical_depth += extinction * step_size;
-            // Early out when essentially fully shadowed
-            if (optical_depth > 8.0) {
-                return 0.0;
-            }
-        }
-    }
-
-    return exp(-optical_depth);
-}
-
-/// Simplified cloud contribution for a single sample point
-/// Returns (luminance_added, transmittance_multiplier)
-fn sample_cloud_contribution(
-    world_pos: vec3<f32>,
-    step_size: f32,
-) -> vec2<f32> {
-    let r = length(world_pos);
-    let density = get_cloud_medium_density(r, world_pos);
-    
-    if (density < 0.01) {
-        return vec2(0.0, 1.0);
-    }
-    
-    // Physically correct coefficients (units: m^-1 per unit density)
-    let extinction = density * (cloud_layer.cloud_scattering + cloud_layer.cloud_absorption);
-    let scattering = density * cloud_layer.cloud_scattering;
-    
-    // Beer's law
-    let transmittance = exp(-extinction * step_size);
-    
-    // Simple uniform scattering (could be enhanced with actual sun direction)
-    let in_scatter = scattering * (1.0 - transmittance);
-    
-    return vec2(in_scatter, transmittance);
-}
-
 // ---------------------------------------------------------------------------------------------
 // Coarse cloud signed-distance field (Nubis Cubed, Advances 2023: "SDF", 512x512x64 voxels,
 // -256 m .. 4096 m; GetVoxelCloudDistance feeds the secondary-scattering remap and SDF ray
@@ -1082,10 +985,6 @@ fn cloud_field_cell(cam: vec3<f32>) -> vec2<f32> {
 
 fn cloud_field_origin_from_cell(cell: vec2<f32>) -> vec2<f32> {
     return cell * cloud_field_voxel_m() - 0.5 * CLOUD_FIELD_EXTENT_M;
-}
-
-fn cloud_field_origin(cam: vec3<f32>) -> vec2<f32> {
-    return cloud_field_origin_from_cell(cloud_field_cell(cam));
 }
 
 /// Normalised field coordinate of an atmosphere-space point (through the cloud frame); outside

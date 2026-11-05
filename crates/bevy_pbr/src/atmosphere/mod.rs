@@ -161,7 +161,6 @@ impl Plugin for AtmospherePlugin {
         embedded_asset!(app, "noise_mip_downsample_3d.wesl");
         embedded_asset!(app, "cloud_shadow_map.wesl");
         embedded_asset!(app, "cloud_field.wesl");
-        embedded_asset!(app, "cloud_shadow_filter.wesl");
         embedded_asset!(app, "cloud_shadow_temporal.wesl");
         embedded_asset!(app, "clouds_raymarch.wesl");
         embedded_asset!(app, "clouds_reconstruct.wesl");
@@ -566,12 +565,6 @@ pub struct AtmosphereSettings {
     /// Strength multiplier applied to the cloud shadow map's stored extinction / optical depth.
     pub cloud_shadow_map_strength: f32,
 
-    /// Number of spatial filter iterations applied to the cloud shadow map after tracing.
-    ///
-    /// This is the main knob to trade performance for stability once the shadow map uses jittered sampling.
-    /// Values above 4 are usually not worth it.
-    pub cloud_shadow_map_spatial_filter_iterations: u32,
-
     /// Time-slices the cloud shadow map tracing: each frame only one texel out of every
     /// `N x N` tile is re-traced (in a Bayer order), and the remaining texels are reprojected
     /// from the previous frame's map (see Bauer 2019, "Creating the Atmospheric World of RDR2":
@@ -579,8 +572,7 @@ pub struct AtmosphereSettings {
     ///
     /// `1` traces every texel every frame. Values above `1` cut the tracing cost by roughly
     /// `N * N` and implicitly enable the temporal reprojection pass (blending of the traced texels
-    /// with history is still controlled by [`Self::cloud_shadow_temporal_enabled`]). The spatial
-    /// filter is skipped while time-slicing, since it would repeatedly blur the reprojected texels.
+    /// with history is still controlled by [`Self::cloud_shadow_temporal_enabled`]).
     /// Supported values: `1`, `2` and `4`.
     pub cloud_shadow_map_update_interleave: u32,
 
@@ -647,7 +639,6 @@ impl Default for AtmosphereSettings {
             cloud_shadow_map_extent: 64_000.0,
             cloud_shadow_map_samples: 24,
             cloud_shadow_map_strength: 1.0,
-            cloud_shadow_map_spatial_filter_iterations: 0,
             cloud_shadow_map_update_interleave: 4,
             cloud_shadow_temporal_enabled: false,
             cloud_shadow_temporal_alpha: 0.15,
@@ -681,7 +672,6 @@ pub struct GpuAtmosphereSettings {
     pub cloud_shadow_map_extent: f32,
     pub cloud_shadow_map_samples: u32,
     pub cloud_shadow_map_strength: f32,
-    pub cloud_shadow_map_spatial_filter_iterations: u32,
     pub cloud_shadow_map_update_interleave: u32,
     pub cloud_shadow_temporal_enabled: u32,
     pub cloud_shadow_temporal_alpha: f32,
@@ -761,8 +751,6 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             cloud_shadow_map_extent: s.cloud_shadow_map_extent,
             cloud_shadow_map_samples: s.cloud_shadow_map_samples,
             cloud_shadow_map_strength: s.cloud_shadow_map_strength,
-            cloud_shadow_map_spatial_filter_iterations: s
-                .cloud_shadow_map_spatial_filter_iterations,
             cloud_shadow_map_update_interleave: match s.cloud_shadow_map_update_interleave {
                 0 | 1 => 1,
                 2 | 3 => 2,
