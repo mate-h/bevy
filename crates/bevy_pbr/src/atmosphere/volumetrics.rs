@@ -10,7 +10,7 @@
 //! blend on scattered light, dithered lookups). See `reports/Unified volumetrics plan for Bevy.md`.
 
 use bevy_ecs::component::Component;
-use bevy_math::{UVec2, UVec3, Vec3};
+use bevy_math::{Mat4, UVec2, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_component::ExtractComponent,
@@ -20,9 +20,10 @@ use bevy_render::{
 
 /// Near-field froxel volumetrics for a camera with [`super::AtmosphereSettings`].
 ///
-/// Phase 1: air plus an optional height fog, sun-lit (directional shadow cascades and the cloud
-/// shadow map evaluated inline), no local lights, no ambient, no clouds in the grid. Runs only
-/// for views that render a `VolumetricCloudLayer` without MSAA (the half-res haze prepass path).
+/// Phase 2: air plus an optional height fog, sun-lit through a temporally filtered shadow volume
+/// (directional shadow cascades x the cloud shadow map), no local lights, no ambient, no clouds
+/// in the grid. Runs only for views that render a `VolumetricCloudLayer` without MSAA (the
+/// half-res haze prepass path).
 #[derive(Clone, Component, ExtractComponent, Reflect)]
 #[extract_app(RenderApp)]
 #[reflect(Clone, Default)]
@@ -66,6 +67,11 @@ pub struct VolumetricsSettings {
     /// Henyey-Greenstein asymmetry of the fog's single lobe (FB15 slide 16: one HG lobe).
     /// Default 0.5, Bevy's `FogVolume::scattering_asymmetry` default.
     pub fog_anisotropy: f32,
+    /// Weight of the current frame in the shadow volume's temporal filter (the history is
+    /// reprojected through the previous view; RDR2 slide 43 filters the shadow volume "to resolve
+    /// undersampling on high frequency shadow detail"). Default 0.05: FB15 slide 23 blends the
+    /// current frame into the previous at 5%. 1 disables the filter.
+    pub shadow_temporal_alpha: f32,
 }
 
 impl Default for VolumetricsSettings {
@@ -81,6 +87,7 @@ impl Default for VolumetricsSettings {
             fog_height_falloff: 0.0,
             fog_albedo: Vec3::ONE,
             fog_anisotropy: 0.5,
+            shadow_temporal_alpha: 0.05,
         }
     }
 }
@@ -99,7 +106,8 @@ impl VolumetricsSettings {
         )
     }
 
-    /// The GPU parameters for a grid of `grid` froxels.
+    /// The GPU parameters for a grid of `grid` froxels, with no history (the temporal fields
+    /// are filled by `prepare_volumetrics_uniforms` from the per-view state).
     pub fn gpu_params(&self, grid: UVec3) -> GpuVolumetricsParams {
         // HDRP: c = 2 - 2 * uniformity, clamped away from 0 (linear limit).
         let c = (2.0 - 2.0 * self.depth_uniformity.clamp(0.0, 1.0)).max(1e-3);
@@ -117,6 +125,11 @@ impl VolumetricsSettings {
             fog_anisotropy: self.fog_anisotropy.clamp(-0.99, 0.99),
             enabled: self.enabled as u32,
             _pad: 0,
+            prev_clip_from_world: Mat4::IDENTITY,
+            prev_world_position: Vec3::ZERO,
+            history_valid: 0,
+            shadow_temporal_alpha: self.shadow_temporal_alpha.clamp(0.0, 1.0),
+            _pad2: UVec3::ZERO,
         }
     }
 }
@@ -148,6 +161,16 @@ pub struct GpuVolumetricsParams {
     pub fog_anisotropy: f32,
     pub enabled: u32,
     pub _pad: u32,
+    /// The previous frame's view-projection and camera position: the shadow volume's history is
+    /// reprojected through them (world position -> previous clip -> previous grid uv, distance
+    /// to the previous camera -> previous slice).
+    pub prev_clip_from_world: Mat4,
+    pub prev_world_position: Vec3,
+    /// Whether the shadow history volume holds last frame's result for this grid (0 on the first
+    /// frame, after a resize, or when the passes did not run last frame).
+    pub history_valid: u32,
+    pub shadow_temporal_alpha: f32,
+    pub _pad2: UVec3,
 }
 
 /// Per-view uniform of [`GpuVolumetricsParams`] and the grid it was built for; present on views
@@ -156,6 +179,16 @@ pub struct GpuVolumetricsParams {
 pub struct VolumetricsUniform {
     pub buffer: UniformBuffer<GpuVolumetricsParams>,
     pub grid: UVec3,
+}
+
+/// Per-view state of the froxel grid across frames (`node::PerViewLutState`): what the shadow
+/// volume's temporal filter reprojects against.
+#[derive(Default)]
+pub struct VolumetricsViewState {
+    /// Last frame's view-projection and camera position, when its passes ran.
+    pub prev_view: Option<(Mat4, Vec3)>,
+    /// The shadow history texture the passes last wrote (a resize makes a new texture).
+    pub shadow_history: Option<bevy_render::render_resource::TextureId>,
 }
 
 #[cfg(test)]

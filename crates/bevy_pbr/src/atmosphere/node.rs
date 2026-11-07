@@ -721,8 +721,11 @@ pub fn atmosphere_luts(
     }
 
     // Near-field froxel volumetrics (`volumetrics.wesl`): after the shadow map and its mips (the
-    // scattering pass reads this frame's map) and before render_sky, which applies the integrated
-    // volume. Material -> scattering -> integrate, one compute pass each (timed separately).
+    // shadow pass reads this frame's map) and before render_sky, which applies the integrated
+    // volume. Material -> shadow -> scattering -> integrate, one compute pass each (timed
+    // separately), then the shadow volume is copied to its history for next frame's filter.
+    let froxel_state = &mut state.volumetrics;
+    froxel_state.shadow_history = None;
     if let (Some(volumetrics_uniform), Some(bind_groups), Some(cloud_offset)) = (
         volumetrics_uniform,
         bind_groups.volumetrics.as_ref(),
@@ -746,6 +749,7 @@ pub fn atmosphere_luts(
             let tiles = UVec3::new(grid.x.div_ceil(8), grid.y.div_ceil(8), 1);
             for (k, label) in [
                 "volumetrics_material",
+                "volumetrics_shadow",
                 "volumetrics_scattering",
                 "volumetrics_integrate",
             ]
@@ -756,9 +760,9 @@ pub fn atmosphere_luts(
                 let pass_span = diagnostics.pass_span(&mut pass, label);
                 pass.set_pipeline(resolved[k]);
                 pass.set_bind_group(0, &bind_groups[k], &offsets);
-                // The material and scattering passes cover every froxel; the slice scan is one
-                // thread per tile marching the slices.
-                let groups = if k < 2 {
+                // The material, shadow and scattering passes cover every froxel; the slice scan
+                // is one thread per tile marching the slices.
+                let groups = if k < 3 {
                     tiles.with_z(grid.z)
                 } else {
                     tiles
@@ -766,6 +770,16 @@ pub fn atmosphere_luts(
                 pass.dispatch_workgroups(groups.x, groups.y, groups.z);
                 pass_span.end(&mut pass);
             }
+            // The shadow volume becomes next frame's history (a blit encoder, as the cloud
+            // shadow map's history copy); the per-view state records which texture holds it.
+            command_encoder.push_debug_group("volumetrics_shadow_history_copy");
+            command_encoder.copy_texture_to_texture(
+                textures.volumetrics_shadow.texture.as_image_copy(),
+                textures.volumetrics_shadow_history.texture.as_image_copy(),
+                textures.volumetrics_shadow.texture.size(),
+            );
+            command_encoder.pop_debug_group();
+            froxel_state.shadow_history = Some(textures.volumetrics_shadow_history.texture.id());
         }
     }
 }
@@ -1189,9 +1203,20 @@ pub struct ViewLutState {
     field_texture: Option<bevy_render::render_resource::TextureId>,
     /// The far empty-space grid texture whose every slab has been built.
     far_grid_texture: Option<bevy_render::render_resource::TextureId>,
+    /// The froxel grid's temporal state (`volumetrics.rs`).
+    volumetrics: super::volumetrics::VolumetricsViewState,
 }
 
 impl PerViewLutState {
+    /// The froxel grid's temporal state of a view (`prepare_volumetrics_uniforms` reads last
+    /// frame's and records this frame's; the node records the shadow history it wrote).
+    pub(super) fn volumetrics(
+        &mut self,
+        view: RetainedViewEntity,
+    ) -> &mut super::volumetrics::VolumetricsViewState {
+        &mut self.views.entry(view).or_default().1.volumetrics
+    }
+
     /// Whether `view` has completed a full build of the cloud field into `field`. A field that
     /// was never built (its pipelines or bind groups were not ready yet) holds zeroed metadata
     /// and escape probabilities, which the cloud trace would read as a valid field (audit 20).

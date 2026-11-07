@@ -200,8 +200,9 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_shadow_mips: BindGroupLayoutDescriptor,
     /// Diffusion solve of the cloud field (`cloud_field.wesl` diffusion_*, sor_*).
     pub cloud_field_diffusion: BindGroupLayoutDescriptor,
-    /// Near-field froxel passes (`volumetrics.wesl`): material, scattering, integrate.
+    /// Near-field froxel passes (`volumetrics.wesl`): material, shadow, scattering, integrate.
     pub volumetrics_material: BindGroupLayoutDescriptor,
+    pub volumetrics_shadow: BindGroupLayoutDescriptor,
     pub volumetrics_scattering: BindGroupLayoutDescriptor,
     pub volumetrics_integrate: BindGroupLayoutDescriptor,
 }
@@ -672,9 +673,18 @@ impl AtmosphereBindGroupLayouts {
             "volumetrics_material_bind_group_layout",
             &volumetrics_entries().extend_with_indices(((71, volume_out()),)),
         );
+        // The shadow pass reads last frame's shadow volume (77) and writes this frame's (78).
+        let volumetrics_shadow = BindGroupLayoutDescriptor::new(
+            "volumetrics_shadow_bind_group_layout",
+            &volumetrics_entries().extend_with_indices(((77, volume_in()), (78, volume_out()))),
+        );
         let volumetrics_scattering = BindGroupLayoutDescriptor::new(
             "volumetrics_scattering_bind_group_layout",
-            &volumetrics_entries().extend_with_indices(((72, volume_in()), (73, volume_out()))),
+            &volumetrics_entries().extend_with_indices((
+                (72, volume_in()),
+                (73, volume_out()),
+                (79, volume_in()),
+            )),
         );
         let volumetrics_integrate = BindGroupLayoutDescriptor::new(
             "volumetrics_integrate_bind_group_layout",
@@ -695,6 +705,7 @@ impl AtmosphereBindGroupLayouts {
             clouds_raymarch_msaa,
             clouds_reconstruct,
             volumetrics_material,
+            volumetrics_shadow,
             volumetrics_scattering,
             volumetrics_integrate,
             cloud_field_edt: BindGroupLayoutDescriptor::new(
@@ -1271,8 +1282,8 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_shadow_mips: CachedComputePipelineId,
     /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
     pub cloud_field_diffusion: [CachedComputePipelineId; 8],
-    /// Near-field froxel passes (`volumetrics.wesl`): material, scattering, integrate.
-    pub volumetrics: [CachedComputePipelineId; 3],
+    /// Near-field froxel passes (`volumetrics.wesl`): material, shadow, scattering, integrate.
+    pub volumetrics: [CachedComputePipelineId; 4],
 }
 
 impl FromWorld for AtmosphereLutPipelines {
@@ -1534,6 +1545,7 @@ impl FromWorld for AtmosphereLutPipelines {
             // test) are bound; clouds themselves are not in the grid (Phase 1).
             volumetrics: [
                 ("material", "VOLUMETRICS_MATERIAL", &layouts.volumetrics_material),
+                ("shadow", "VOLUMETRICS_SHADOW", &layouts.volumetrics_shadow),
                 ("scattering", "VOLUMETRICS_SCATTERING", &layouts.volumetrics_scattering),
                 ("integrate", "VOLUMETRICS_INTEGRATE", &layouts.volumetrics_integrate),
             ]
@@ -1817,9 +1829,14 @@ pub struct AtmosphereTextures {
     /// The diffusion solve's build cell and pending shift (4 x 1 x 1).
     pub cloud_field_diff_state: CachedTexture,
     /// Near-field froxel volumes (`volumetrics.rs`, 1x1x1 placeholders when off): Material A
-    /// (sigma_s.rgb, sigma_t), Scattering (L.rgb pre-exposed, sigma_t), Integrated (in-scatter
-    /// to the camera, transmittance). Phase 2 adds Material B and a Shadow volume here.
+    /// (sigma_s.rgb, sigma_t), Shadow (sun visibility in .r, temporally filtered against its
+    /// history; RDR2 slide 43's R16F volume is RGBA16F here because core WGSL has no r16float
+    /// storage format and r32float is not filterable without `FLOAT32_FILTERABLE`; .gba are
+    /// reserved), Scattering (L.rgb pre-exposed, sigma_t), Integrated (in-scatter to the camera,
+    /// transmittance).
     pub volumetrics_material: CachedTexture,
+    pub volumetrics_shadow: CachedTexture,
+    pub volumetrics_shadow_history: CachedTexture,
     pub volumetrics_scattering: CachedTexture,
     pub volumetrics_integrated: CachedTexture,
     /// The froxel grid the volumes were sized for (zero when off).
@@ -2258,7 +2275,7 @@ pub(super) fn prepare_atmosphere_textures(
             .filter(|v| v.enabled && has_clouds && *msaa == Msaa::Off)
             .map(|v| v.grid_size(render_size, lut_settings.cloud_max_render_size))
             .unwrap_or(bevy_math::UVec3::ZERO);
-        let mut volume = |label: &'static str| {
+        let mut volume = |label: &'static str, usage: TextureUsages| {
             textures.get(TextureDescriptor {
                 label: Some(label),
                 size: Extent3d {
@@ -2272,13 +2289,17 @@ pub(super) fn prepare_atmosphere_textures(
                 format: TextureFormat::Rgba16Float,
                 usage: TextureUsages::STORAGE_BINDING
                     | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::COPY_SRC,
+                    | TextureUsages::COPY_SRC
+                    | usage,
                 view_formats: &[],
             })
         };
-        let volumetrics_material = volume("volumetrics_material");
-        let volumetrics_scattering = volume("volumetrics_scattering");
-        let volumetrics_integrated = volume("volumetrics_integrated");
+        let volumetrics_material = volume("volumetrics_material", TextureUsages::empty());
+        let volumetrics_shadow = volume("volumetrics_shadow", TextureUsages::empty());
+        let volumetrics_shadow_history =
+            volume("volumetrics_shadow_history", TextureUsages::COPY_DST);
+        let volumetrics_scattering = volume("volumetrics_scattering", TextureUsages::empty());
+        let volumetrics_integrated = volume("volumetrics_integrated", TextureUsages::empty());
 
         commands.entity(entity).insert({
             AtmosphereTextures {
@@ -2318,6 +2339,8 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_diff_tmp,
                 cloud_field_diff_state,
                 volumetrics_material,
+                volumetrics_shadow,
+                volumetrics_shadow_history,
                 volumetrics_scattering,
                 volumetrics_integrated,
                 volumetrics_grid,
@@ -2536,9 +2559,9 @@ pub(crate) struct AtmosphereBindGroups {
     pub cloud_field_edt: Option<[BindGroup; 4]>,
     /// Diffusion solve (`cloud_field.wesl`), dynamic offsets: atmosphere, lights.
     pub cloud_field_diffusion: Option<BindGroup>,
-    /// Near-field froxel passes (`volumetrics.wesl`): material, scattering, integrate; present
-    /// when the view's froxel grid runs this frame.
-    pub volumetrics: Option<[BindGroup; 3]>,
+    /// Near-field froxel passes (`volumetrics.wesl`): material, shadow, scattering, integrate;
+    /// present when the view's froxel grid runs this frame.
+    pub volumetrics: Option<[BindGroup; 4]>,
 }
 
 /// Writes each froxel view's [`super::volumetrics::VolumetricsUniform`] (`froxels.wesl`
@@ -2547,6 +2570,7 @@ pub(super) fn prepare_volumetrics_uniforms(
     views: Query<
         (
             Entity,
+            &ExtractedView,
             &AtmosphereTextures,
             Option<&super::volumetrics::VolumetricsSettings>,
         ),
@@ -2554,17 +2578,39 @@ pub(super) fn prepare_volumetrics_uniforms(
     >,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    mut per_view: ResMut<super::node::PerViewLutState>,
     mut commands: Commands,
 ) {
-    for (entity, textures, settings) in &views {
+    for (entity, view, textures, settings) in &views {
         let grid = textures.volumetrics_grid;
+        let state = per_view.volumetrics(view.retained_view_entity);
         let Some(settings) = settings.filter(|_| grid.cmpgt(bevy_math::UVec3::ZERO).all()) else {
+            state.prev_view = None;
             commands
                 .entity(entity)
                 .remove::<super::volumetrics::VolumetricsUniform>();
             continue;
         };
-        let mut buffer = UniformBuffer::from(settings.gpu_params(grid));
+        let mut params = settings.gpu_params(grid);
+        // The shadow volume's history is last frame's volume when the passes wrote it into the
+        // texture bound as history this frame (a resize is a new texture) and the previous view
+        // is known; its reprojection goes through last frame's view-projection.
+        let history_written =
+            state.shadow_history == Some(textures.volumetrics_shadow_history.texture.id());
+        if let Some((prev_clip_from_world, prev_world_position)) =
+            state.prev_view.filter(|_| history_written)
+        {
+            params.prev_clip_from_world = prev_clip_from_world;
+            params.prev_world_position = prev_world_position;
+            params.history_valid = 1;
+        }
+        let world_from_view = view.world_from_view.to_matrix();
+        state.prev_view = Some((
+            view.clip_from_world
+                .unwrap_or_else(|| view.clip_from_view * world_from_view.inverse()),
+            view.world_from_view.translation(),
+        ));
+        let mut buffer = UniformBuffer::from(params);
         buffer.write_buffer(&render_device, &render_queue);
         commands
             .entity(entity)
@@ -3338,6 +3384,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         ))
                 };
                 let material = &textures.volumetrics_material.default_view;
+                let shadow = &textures.volumetrics_shadow.default_view;
+                let shadow_history = &textures.volumetrics_shadow_history.default_view;
                 let scattering = &textures.volumetrics_scattering.default_view;
                 let integrated = &textures.volumetrics_integrated.default_view;
                 [
@@ -3347,9 +3395,18 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         &common().extend_with_indices(((71, material),)),
                     ),
                     render_device.create_bind_group(
+                        "volumetrics_shadow_bind_group",
+                        &pipeline_cache.get_bind_group_layout(&layouts.volumetrics_shadow),
+                        &common().extend_with_indices(((77, shadow_history), (78, shadow))),
+                    ),
+                    render_device.create_bind_group(
                         "volumetrics_scattering_bind_group",
                         &pipeline_cache.get_bind_group_layout(&layouts.volumetrics_scattering),
-                        &common().extend_with_indices(((72, material), (73, scattering))),
+                        &common().extend_with_indices((
+                            (72, material),
+                            (73, scattering),
+                            (79, shadow),
+                        )),
                     ),
                     render_device.create_bind_group(
                         "volumetrics_integrate_bind_group",
