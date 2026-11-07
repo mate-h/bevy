@@ -298,6 +298,40 @@ fn build_light_basis(light_dir: vec3<f32>) -> LightBasis {
     return LightBasis(x, y);
 }
 
+/// Fractional part of the golden ratio, (sqrt(5) - 1) / 2. fract(x + k * phi), k = 0, 1, ... is
+/// the Kronecker (additive-recurrence) sequence of lowest discrepancy: phi is the irrational
+/// worst approximated by rationals (Hurwitz 1891), so successive phases derived from one random
+/// start stay as spread as possible. Used wherever one blue-noise value seeds several quadratures.
+const GOLDEN_RATIO_FRAC: f32 = 0.618033988749895;
+
+/// Interleaved gradient noise stands in for the STBN channels when the texture is not bound
+/// (feature `bluenoise_texture` off: a 1x1 placeholder). IGN(p, f) is one pattern translated by
+/// 5.588238 px per frame over a 64-frame cycle (Jimenez 2014, see `interleaved_gradient_noise`),
+/// so channel c takes the frame index f + c * 64 / 3 (rounded): the three channels are the
+/// pattern at three phases a third of the cycle apart, never the same value at the same texel.
+const IGN_CHANNEL_FRAME_OFFSET: u32 = 21u;
+
+/// Three independent [0, 1) blue-noise values for `texel` (a dense texel lattice: the trace texel
+/// of the cloud pass, not the strided half-res pixel, which loses the blue spectrum) at `frame`.
+/// The STBN texture's channels are independent scalar masks (Wolfe et al. 2022; `ssr.wesl` reads
+/// xy as a 2D sample and z as a scalar), blue in space and, for a fixed texel, white over the
+/// layers, which `frame % layers` walks, so a temporal filter averages them without structure.
+/// A constant `frame` gives a frame-independent (static) value.
+@if(CLOUDS_ENABLED)
+fn stbn_vec3(texel: vec2<u32>, frame: u32) -> vec3<f32> {
+    let stbn_dims = textureDimensions(stbn_texture);
+    if (all(stbn_dims > vec2(1u))) {
+        let layer = i32(frame % u32(textureNumLayers(stbn_texture)));
+        return textureLoad(stbn_texture, vec2<i32>(texel) % vec2<i32>(stbn_dims), layer, 0).rgb;
+    }
+    let p = vec2<f32>(texel);
+    return vec3(
+        interleaved_gradient_noise(p, frame),
+        interleaved_gradient_noise(p, frame + IGN_CHANNEL_FRAME_OFFSET),
+        interleaved_gradient_noise(p, frame + 2u * IGN_CHANNEL_FRAME_OFFSET),
+    );
+}
+
 /// Helper for cloud shadow PCF: evaluates transmittance from shadow map data.
 @if(CLOUDS_ENABLED)
 fn cloud_shadow_transmittance(data: vec3<f32>, d_sample: f32) -> f32 {
@@ -934,6 +968,14 @@ struct RaymarchResult {
     transmittance: vec3<f32>,
 }
 
+/// The atmosphere march with its own jitter: one IGN value per pixel (and frame, in screen
+/// passes), golden-ratio stratified across the steps. Seeding IGN with the step index alone gave
+/// a fixed per-pixel pattern that TAA cannot average (dither visible in crepuscular rays,
+/// backlit:20). Screen passes vary it per frame (TAA / cloud reconstruction average it); the
+/// sky-view LUT has no temporal accumulation, so a per-frame jitter there flickered everything
+/// that samples the LUT (cloud ambient, ground skylight).
+/// Callers with a better-conditioned jitter (the cloud pass's dense-texel STBN value) use
+/// `raymarch_atmosphere_jittered` directly.
 fn raymarch_atmosphere(
     pos: vec3<f32>,
     ray_dir: vec3<f32>,
@@ -941,6 +983,23 @@ fn raymarch_atmosphere(
     max_samples: u32,
     uv: vec2<f32>,
     ground: bool
+) -> RaymarchResult {
+    var jitter_frame = view.frame_count % 64u;
+    @if(SKY_VIEW_LUT_PASS) { jitter_frame = 0u; }
+    let jitter0 = interleaved_gradient_noise(uv * view.viewport.zw, jitter_frame);
+    return raymarch_atmosphere_jittered(pos, ray_dir, t_max, max_samples, uv, ground, jitter0);
+}
+
+/// `jitter0` in [0, 1): the phase of the stratified march (step s samples its segment at
+/// fract(jitter0 + s * phi)). `uv` still locates the pixel for the shadow-map taps.
+fn raymarch_atmosphere_jittered(
+    pos: vec3<f32>,
+    ray_dir: vec3<f32>,
+    t_max: f32,
+    max_samples: u32,
+    uv: vec2<f32>,
+    ground: bool,
+    jitter0: f32,
 ) -> RaymarchResult {
     let r = length(pos);
     let up = normalize(pos);
@@ -1094,15 +1153,7 @@ fn raymarch_atmosphere(
     // (thousands of meters long on sky rays) skipped the dense near-surface Mie/haze layers and
     // dropped the last segment, leaving the sky 2-3x too dark and blue-shifted.
     let n_steps = max(1u, u32(sample_count));
-    // One IGN value per pixel (and frame, in screen passes), golden-ratio stratified across steps.
-    // Seeding IGN with the step index alone gave a fixed per-pixel pattern that TAA cannot average
-    // (dither visible in crepuscular rays, backlit:20).
-    // Screen passes vary it per frame (TAA / cloud reconstruction average it); the sky-view LUT
-    // has no temporal accumulation, so a per-frame jitter there flickered everything that samples
-    // the LUT (cloud ambient, ground skylight).
-    var jitter_frame = view.frame_count % 64u;
-    @if(SKY_VIEW_LUT_PASS) { jitter_frame = 0u; }
-    let jitter0 = interleaved_gradient_noise(pixel_coords, jitter_frame);
+    // `jitter0` (see `raymarch_atmosphere`), golden-ratio stratified across the steps.
     var mesh_shadow_t_max = -1.0;
     @if(!ATMOSPHERE_NO_SHADOW_MAPS) {
         mesh_shadow_t_max = directional_shadow_ray_t_max(pos, ray_dir);
