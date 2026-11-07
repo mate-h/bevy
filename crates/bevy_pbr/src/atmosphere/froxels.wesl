@@ -2,11 +2,16 @@
 //! lookup of the integrated volume, shared by the froxel compute passes (`volumetrics.wesl`) and
 //! the composite in `render_sky.wesl`.
 
-import package::atmosphere::bindings::{view, atmosphere, atmosphere_lut_sampler};
+import bevy_render::maths::PI;
+import package::atmosphere::bindings::{view, atmosphere, lights, atmosphere_lut_sampler};
+import package::atmosphere::functions::sample_transmittance_lut;
 import package::render::utils::interleaved_gradient_noise;
 
 @if(CLOUDS_ENABLED)
-import package::atmosphere::bindings::stbn_texture;
+import package::atmosphere::{
+    bindings::stbn_texture,
+    functions::{sample_cloud_shadow_ground, ground_sky_irradiance_clouds},
+};
 
 /// `GpuVolumetricsParams` (`volumetrics.rs`).
 struct VolumetricsParams {
@@ -104,4 +109,27 @@ fn sample_froxel_integrated(uv: vec2<f32>, t: f32, dither: f32) -> vec4<f32> {
     let w = (max(s, 1.0) - 0.5) / n;
     let v = textureSampleLevel(volumetrics_integrated, atmosphere_lut_sampler, vec3(uv, w), 0.0);
     return vec4(v.rgb * fade, mix(1.0, v.a, fade));
+}
+
+/// Radiance of the planet's surface at `p` (no mesh there): the sun through the transmittance
+/// LUT and the cloud shadow map plus the cloud-occluded skylight, Lambert, as
+/// `raymarch_atmosphere` adds it at the end of a ground-hitting ray (functions.wesl), but without
+/// the ray's own air transmittance: the near froxels apply theirs, and the far air segment its
+/// own. The far haze adds this instead of marching into the surface because the sphere
+/// intersection from a point metres above a 6.4e6 m planet is below f32 precision (0.4 m of
+/// radius), so shallow rays missed the ground and lost its radiance.
+@if(CLOUDS_ENABLED)
+fn froxel_planet_surface_radiance(p: vec3<f32>, pixel_coords: vec2<f32>) -> vec3<f32> {
+    let n = normalize(p);
+    var sun = vec3(0.0);
+    for (var light_i = 0u; light_i < lights.n_directional_lights; light_i++) {
+        let light = &lights.directional_lights[light_i];
+        let light_dir = (*light).direction_to_light;
+        let mu_light = dot(light_dir, n);
+        sun += (*light).color.rgb * max(mu_light, 0.0)
+            * sample_transmittance_lut(atmosphere.inner_radius, mu_light)
+            * sample_cloud_shadow_ground(p, light_dir);
+    }
+    let e_sky = ground_sky_irradiance_clouds(p, pixel_coords);
+    return atmosphere.ground_albedo / PI * (sun + e_sky);
 }

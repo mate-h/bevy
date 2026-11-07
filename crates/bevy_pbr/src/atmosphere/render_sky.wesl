@@ -6,9 +6,16 @@ import package::atmosphere::{
         sample_sky_view_lut, direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
         sample_sun_radiance, ndc_to_camera_dist, raymarch_atmosphere,
-        get_view_position, max_atmosphere_distance
+        get_view_position, max_atmosphere_distance, get_local_r
     },
 };
+
+// Near-field froxel volumetrics (`volumetrics.rs`, `froxels.wesl`): the grid's params in the haze
+// prepass (the far field starts at its end) and the integrated volume in the composite.
+@if(VOLUMETRICS_FROXELS)
+import package::atmosphere::froxels::{volumetrics, froxel_noise, froxel_planet_surface_radiance};
+@if(VOLUMETRICS_APPLY)
+import package::atmosphere::froxels::sample_froxel_integrated;
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
@@ -155,6 +162,47 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
     let mu = dot(ray_dir_ws, normalize(world_pos));
     var inscattering: vec3<f32>;
     var transmittance: vec3<f32>;
+    @if(VOLUMETRICS_FROXELS) {
+    // The froxel grid holds the media out to d_max, so the haze is the far segment [d_max, t]
+    // only, as seen from d_max (RDR2 slide 51: "Tracing starts where voxels end"; design.md §1.7
+    // "Transition"). Opaque pixels take it from the aerial-perspective LUT as AP(t) - AP(d_max),
+    // which is T_air(0, d_max) x the segment's in-scatter (AP integrates the camera-ray
+    // transmittance into every sample), so it is divided by that near air transmittance; the
+    // segment's transmittance is the LUT's from the point at d_max. Pixels inside the grid get no
+    // far term. Sky pixels march from d_max.
+    let d_max = volumetrics.max_distance;
+    if depth == 0.0 {
+        // The sky, or the planet's surface where no mesh covers it: the air from d_max on is
+        // marched (never into the surface: see `froxel_planet_surface_radiance`), and a surface
+        // hit adds its radiance behind that air; inside the grid only the surface is left.
+        let hits_ground = ray_intersects_ground(r, mu);
+        let pixel_coords = noise_uv * view.viewport.zw;
+        inscattering = vec3(0.0);
+        transmittance = vec3(1.0);
+        if t > d_max {
+            let far_pos = world_pos + ray_dir_ws * d_max;
+            let result = raymarch_atmosphere(far_pos, ray_dir_ws, t - d_max, samples, noise_uv, !hits_ground);
+            inscattering = result.inscattering;
+            transmittance = result.transmittance;
+        }
+        if hits_ground {
+            let surface = froxel_planet_surface_radiance(world_pos + ray_dir_ws * t, pixel_coords);
+            inscattering += transmittance * surface;
+            transmittance = vec3(0.0);
+        }
+    } else if t > d_max {
+        let t_air_near = sample_transmittance_lut_segment(r, mu, d_max);
+        inscattering = max(sample_aerial_view_lut(uv, t) - sample_aerial_view_lut(uv, d_max), vec3(0.0))
+            / max(t_air_near, vec3(1e-4));
+        let r_d = get_local_r(r, mu, d_max);
+        let mu_d = clamp((r * mu + d_max) / r_d, -1.0, 1.0);
+        transmittance = sample_transmittance_lut_segment(r_d, mu_d, t - d_max);
+    } else {
+        inscattering = vec3(0.0);
+        transmittance = vec3(1.0);
+    }
+    }
+    @if(!VOLUMETRICS_FROXELS) {
     if depth == 0.0 {
         transmittance = sample_transmittance_lut(r, mu);
         inscattering = sample_sky_view_lut(r, direction_world_to_atmosphere(ray_dir_ws));
@@ -171,6 +219,7 @@ fn haze(in: FullscreenVertexOutput) -> HazeOutput {
             inscattering = result.inscattering;
             transmittance = result.transmittance;
         }
+    }
     }
     return HazeOutput(vec4(inscattering, 0.0), vec4(transmittance, t * 0.001));
 }
@@ -470,7 +519,25 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
         transmittance *= t_c;
     }
     }
-    
+
+    @if(VOLUMETRICS_APPLY) {
+    // Near-field froxels in front of everything above (the far haze from d_max, the clouds, the
+    // sun): final = L_near + T_near (L_far + T_far L_surface), with L_far T_far from the far
+    // segment [d_max, t] (plan: "A near froxel grid plus the far AP LUT"; RDR2 slide 64). The
+    // volume is read at the pixel's own depth, dithered by +-0.5 slice with the STBN value of
+    // this pixel and frame (RDR2 slide 56), pre-exposed like `inscattering` is here. The cloud
+    // pass's own near haze (the air in its first 128 m, optical depth ~7e-4) is counted twice;
+    // Phase 4 moves the cloud trace's start to d_max.
+    var t_near = sky_ray_length(r, mu);
+    if depth != 0.0 {
+        t_near = ndc_to_camera_dist(vec3(uv_to_ndc(in.uv), depth));
+    }
+    let dither = froxel_noise(vec2<i32>(in.position.xy)) - 0.5;
+    let near = sample_froxel_integrated(in.uv, t_near, dither);
+    inscattering = near.rgb + near.a * inscattering;
+    transmittance *= near.a;
+    }
+
     @if(DUAL_SOURCE_BLENDING)
     return RenderSkyOutput(vec4(inscattering, 0.0), vec4(transmittance, 1.0));
     @if(!DUAL_SOURCE_BLENDING)
