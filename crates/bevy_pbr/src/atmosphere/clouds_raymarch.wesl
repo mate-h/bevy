@@ -17,7 +17,7 @@ import package::atmosphere::{
     functions::{
         uv_to_ray_direction, uv_to_ndc, ndc_to_camera_dist, get_view_position,
         sample_transmittance_lut, sample_multiscattering_lut, sample_sky_view_lut, direction_world_to_atmosphere, sample_cloud_shadow_map, cloud_shadow_frame, cloud_shadow_ground_uv, cloud_shadow_optical_depth, cloud_far_transmittance,
-        hg_phase, cloud_mie_phase, CLOUD_MIE_MEAN_COS, CLOUD_MIE_G_HG, CLOUD_MIE_G_D, CLOUD_MIE_ALPHA, CLOUD_MIE_W_D, sample_aerial_view_lut, raymarch_atmosphere, sample_density_lut, sample_scattering_lut,
+        hg_phase, cloud_mie_phase, CLOUD_MIE_MEAN_COS, CLOUD_MIE_G_HG, CLOUD_MIE_G_D, CLOUD_MIE_ALPHA, CLOUD_MIE_W_D, sample_aerial_view_lut, raymarch_atmosphere_jittered, sample_density_lut, sample_scattering_lut,
         ABSORPTION_DENSITY, SCATTERING_DENSITY, stbn_vec3, GOLDEN_RATIO_FRAC,
     },
     clouds::{
@@ -560,7 +560,11 @@ fn cloud_shadowed_haze(uv: vec2<f32>, origin: vec3<f32>, ray_dir: vec3<f32>, d: 
             return sample_aerial_view_lut(uv, d);
         }
     }
-    return raymarch_atmosphere(origin, ray_dir, d, settings.sky_max_samples, uv, false).inscattering;
+    // Marched with the trace texel's own jitter `j` (dense-texel STBN, per frame): the march's
+    // default IGN at `uv * viewport` is a full-resolution lattice read at this pass's half-res
+    // stride, the strided-IGN aliasing again (audit 5, the "faint far-haze checker").
+    // RDR2 offsets its haze march origin by blue noise the same way (Bauer 2019, slide 51).
+    return raymarch_atmosphere_jittered(origin, ray_dir, d, settings.sky_max_samples, uv, false, j).inscattering;
 }
 
 // ---------------------------------------------------------------------------------------------

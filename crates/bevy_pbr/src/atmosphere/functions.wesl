@@ -968,6 +968,14 @@ struct RaymarchResult {
     transmittance: vec3<f32>,
 }
 
+/// The atmosphere march with its own jitter: one IGN value per pixel (and frame, in screen
+/// passes), golden-ratio stratified across the steps. Seeding IGN with the step index alone gave
+/// a fixed per-pixel pattern that TAA cannot average (dither visible in crepuscular rays,
+/// backlit:20). Screen passes vary it per frame (TAA / cloud reconstruction average it); the
+/// sky-view LUT has no temporal accumulation, so a per-frame jitter there flickered everything
+/// that samples the LUT (cloud ambient, ground skylight).
+/// Callers with a better-conditioned jitter (the cloud pass's dense-texel STBN value) use
+/// `raymarch_atmosphere_jittered` directly.
 fn raymarch_atmosphere(
     pos: vec3<f32>,
     ray_dir: vec3<f32>,
@@ -975,6 +983,23 @@ fn raymarch_atmosphere(
     max_samples: u32,
     uv: vec2<f32>,
     ground: bool
+) -> RaymarchResult {
+    var jitter_frame = view.frame_count % 64u;
+    @if(SKY_VIEW_LUT_PASS) { jitter_frame = 0u; }
+    let jitter0 = interleaved_gradient_noise(uv * view.viewport.zw, jitter_frame);
+    return raymarch_atmosphere_jittered(pos, ray_dir, t_max, max_samples, uv, ground, jitter0);
+}
+
+/// `jitter0` in [0, 1): the phase of the stratified march (step s samples its segment at
+/// fract(jitter0 + s * phi)). `uv` still locates the pixel for the shadow-map taps.
+fn raymarch_atmosphere_jittered(
+    pos: vec3<f32>,
+    ray_dir: vec3<f32>,
+    t_max: f32,
+    max_samples: u32,
+    uv: vec2<f32>,
+    ground: bool,
+    jitter0: f32,
 ) -> RaymarchResult {
     let r = length(pos);
     let up = normalize(pos);
@@ -1128,15 +1153,7 @@ fn raymarch_atmosphere(
     // (thousands of meters long on sky rays) skipped the dense near-surface Mie/haze layers and
     // dropped the last segment, leaving the sky 2-3x too dark and blue-shifted.
     let n_steps = max(1u, u32(sample_count));
-    // One IGN value per pixel (and frame, in screen passes), golden-ratio stratified across steps.
-    // Seeding IGN with the step index alone gave a fixed per-pixel pattern that TAA cannot average
-    // (dither visible in crepuscular rays, backlit:20).
-    // Screen passes vary it per frame (TAA / cloud reconstruction average it); the sky-view LUT
-    // has no temporal accumulation, so a per-frame jitter there flickered everything that samples
-    // the LUT (cloud ambient, ground skylight).
-    var jitter_frame = view.frame_count % 64u;
-    @if(SKY_VIEW_LUT_PASS) { jitter_frame = 0u; }
-    let jitter0 = interleaved_gradient_noise(pixel_coords, jitter_frame);
+    // `jitter0` (see `raymarch_atmosphere`), golden-ratio stratified across the steps.
     var mesh_shadow_t_max = -1.0;
     @if(!ATMOSPHERE_NO_SHADOW_MAPS) {
         mesh_shadow_t_max = directional_shadow_ray_t_max(pos, ray_dir);
