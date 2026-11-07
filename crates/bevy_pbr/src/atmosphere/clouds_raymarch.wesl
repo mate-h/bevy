@@ -197,6 +197,22 @@ fn cloud_view_step(t: f32) -> f32 {
     @if(ATM_DBG_STEP_DIV16) { step *= 0.0625; }
     return step;
 }
+// Nubis Cubed near/far jitter split (Schneider, Advances 2023, voxel ray-marcher slide:
+// `jitter_offset = distance_from_camera < 250.0 ? animated_hash : static_hash`; talk 2:22:20:
+// the jitter "switches from an animated jitter close by to a static one far away to reduce
+// under sampling artifacts without making distant clouds shimmer"). Samples nearer than this
+// take the per-frame blue noise, which the reconstruction's history averages; beyond it a
+// frame-independent blue noise of the screen pixel, so the distant quadrature error is a fixed
+// pattern rather than shimmer. The 250 m is N3's value (its view steps are 8 % of the distance,
+// close to the 10 % `CLOUD_STEP_REL` here, so the step lengths it was chosen for match).
+const CLOUD_JITTER_ANIMATED_MAX_M: f32 = 250.0;
+
+/// The view-march jitter for a sample at distance `t`: `animated` (per frame) within
+/// `CLOUD_JITTER_ANIMATED_MAX_M`, `static_j` (per screen pixel, frame-independent) beyond.
+fn cloud_march_jitter(t: f32, animated: f32, static_j: f32) -> f32 {
+    return select(static_j, animated, t < CLOUD_JITTER_ANIMATED_MAX_M);
+}
+
 // In-cloud view steps longer than this take `settings.cloud_step_samples` density samples
 // (VolumetricCloudSettings::step_samples). Shorter steps are near the camera, where the
 // density changes little within one.
@@ -1025,6 +1041,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         let noise = stbn_vec3(id.xy, view.frame_count);
         let jitter = noise.r;
         let tap_jitter = noise.g;
+        // Static (frame-independent) view-march jitter for samples beyond
+        // CLOUD_JITTER_ANIMATED_MAX_M: STBN layer 0 of the *screen* pixel, which is the same
+        // whenever that pixel is traced (the trace texel `id.xy` maps to a different screen
+        // pixel each frame of the checkerboard cycle, so it cannot index a static value).
+        let jitter_static = stbn_vec3(half_px, 0u).r;
 
         let sigma_s_unit = get_cloud_scattering_coeff();
         let sigma_t_unit = sigma_s_unit + get_cloud_absorption_coeff();
@@ -1045,8 +1066,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // Coarse/fine march (HZD15 / Nubis17 / design.md §1.4): large steps with weather+profile
         // only; on hit, step back and switch to fine with full noise. After N empty fine samples
         // return to coarse. Light taps only in fine mode with density > 0.
-        var t = t_start + jitter * cloud_view_step(t_start);
+        var t = t_start + cloud_march_jitter(t_start, jitter, jitter_static) * cloud_view_step(t_start);
         var fine_mode = false;
+        // Count of coarse leaps and fine re-entries so far: the k-th gets the phase
+        // fract(jitter + k phi) (golden-ratio / Kronecker sequence, `GOLDEN_RATIO_FRAC`) instead
+        // of the ray-start jitter again. One value reused at every re-entry made all the fine
+        // runs of a ray share one sub-step phase (audit 3): neighbouring pixels decorrelated it
+        // into noise rather than bands, but with the 0.1 history weight on a 1-in-4 trace that
+        // noise took ~40 frames to converge.
+        var reentry_i = 0u;
         // Ground-truth march: no coarse gate at all.
         @if(ATM_DBG_NO_COARSE) { fine_mode = true; }
         @if(ATM_DBG_NO_COARSE) { fine_mode = true; }
@@ -1141,7 +1169,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 @if(!ATM_DBG_NO_FAR_GRID) {
                     let leap = cloud_far_leap(p, r_p, ray_dir);
                     if (leap > dt) {
-                        let past = jitter * dist_step;
+                        reentry_i += 1u;
+                        let phase = fract(cloud_march_jitter(t, jitter, jitter_static) + f32(reentry_i) * GOLDEN_RATIO_FRAC);
+                        let past = phase * dist_step;
                         t += leap + past;
                         last_leap = past;
                         continue;
@@ -1168,7 +1198,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     // jittered ray start) adding the jitter again moved the first fine sample by
                     // up to two steps and lost near-entry optical depth (audit 23).
                     if (last_leap > 0.0) {
-                        t = max(t_start, t - last_leap + jitter * dist_step);
+                        reentry_i += 1u;
+                        let phase = fract(cloud_march_jitter(t, jitter, jitter_static) + f32(reentry_i) * GOLDEN_RATIO_FRAC);
+                        t = max(t_start, t - last_leap + phase * dist_step);
                     }
                     fine_mode = true;
                     fine_empty = 0u;
