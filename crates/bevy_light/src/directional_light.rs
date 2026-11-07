@@ -92,7 +92,9 @@ pub struct DirectionalLight {
     /// light, [`illuminance`](Self::illuminance), stays the same. Use
     /// [`SunDisk::EARTH`]'s angular size for the sun as seen from Earth.
     ///
-    /// The default is `0.0`, an infinitely small light.
+    /// The default is `0.0`, an infinitely small light, unless the light also has a
+    /// [`SunDisk`]: then the disk drawn in the atmosphere and the disk the light is shaded
+    /// as share that component's angular size.
     pub angular_size: f32,
 
     /// Whether this light casts shadows.

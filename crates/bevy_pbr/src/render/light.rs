@@ -874,7 +874,13 @@ pub fn extract_lights(
             occlusion_culling,
             sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
             sun_disk_intensity: sun_disk.unwrap_or_default().intensity,
-            angular_size: directional_light.angular_size,
+            // One sun, one size: a light that draws a `SunDisk` in the atmosphere is shaded as a
+            // disk of the same angular size unless `DirectionalLight::angular_size` says otherwise.
+            angular_size: if directional_light.angular_size > 0.0 {
+                directional_light.angular_size
+            } else {
+                sun_disk.map_or(0.0, |disk| disk.angular_size)
+            },
         };
 
         let mut entity_commands = commands
