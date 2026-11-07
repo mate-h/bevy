@@ -15,12 +15,16 @@
 //!   `ATMOSPHERE_VOXEL_ONLY=1` (no sky cumulus or cirrus: the voxel cloud alone),
 //!   `ATMOSPHERE_VOXEL_BOUNDS=0` (start with its box hidden, B toggles),
 //!   `ATMOSPHERE_LUT_MODE`.
+//! - Near-field froxel volumetrics (`VolumetricsSettings`, Phase 1): `ATMOSPHERE_FROXELS=1`
+//!   enables the grid (8 px tiles x 64 slices to 128 m; the haze march then covers only the far
+//!   field), `ATMOSPHERE_FROXEL_DISTANCE=<m>` its range, `ATMOSPHERE_FROXEL_FOG=<1/m>` a height
+//!   fog extinction at the ground (`ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`, default 0.01).
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse),
 //!   `ATMOSPHERE_SUN_SWEEP=<deg/frame>,<first>,<last>` (turns the sun by a fixed angle per frame),
 //!   `ATMOSPHERE_WIND_SCALE=<x>` (wind profile multiplier, 0..2; `-` / `=`).
 //! - Settings panel (Tab): tabs of sliders for the wind, cumulus, cirrus, camera and the debug
-//!   view; `ATMOSPHERE_SETTINGS=wind|clouds|cirrus|scene|debug` starts with it open on that tab,
+//!   view; `ATMOSPHERE_SETTINGS=wind|clouds|cirrus|scene|froxels|debug` starts with it open on that tab,
 //!   `ATMOSPHERE_DEBUG_VIEW=1` on the LUT / buffer previews.
 //! - Cloud shadows: `ATMOSPHERE_SHADOW_INTERLEAVE`, `ATMOSPHERE_SHADOW_SAMPLES`,
 //!   `ATMOSPHERE_SHADOW_TEMPORAL_ALPHA`.
@@ -59,7 +63,7 @@ use bevy::{
         CloudProfiles, ThinCloudLayer, VolumetricCloudLayer, VoxelCloud,
         AtmosphereDebugView, AtmosphereDebugViewPlugin,
         DefaultOpaqueRendererMethod,
-        VolumetricCloudSettings,
+        VolumetricCloudSettings, VolumetricsSettings,
     },
     post_process::bloom::Bloom,
     prelude::*,
@@ -388,6 +392,7 @@ enum Page {
     Clouds,
     Cirrus,
     Scene,
+    Froxels,
     Debug,
 }
 
@@ -436,6 +441,11 @@ enum Setting {
     Exposure,
     MarchSteps,
     LightTaps,
+    FroxelEnabled,
+    FroxelDistance,
+    FroxelUniformity,
+    FroxelFogDensity,
+    FroxelFogFalloff,
     DebugSlice,
 }
 
@@ -627,6 +637,8 @@ fn settings_panel() -> impl Scene {
                 --
                 @settings_tab("Scene", Page::Scene)
                 --
+                @settings_tab("Froxels", Page::Froxels)
+                --
                 @settings_tab("Debug", Page::Debug)
             ]
             --
@@ -676,6 +688,19 @@ fn settings_panel() -> impl Scene {
                 @setting_row("Cloud light taps", Setting::LightTaps, 4.0, 24.0, 0)
             ]
             --
+            @settings_page(Page::Froxels)
+            Children [
+                @setting_row("Enabled (0 / 1; needs ATMOSPHERE_FROXELS=1)", Setting::FroxelEnabled, 0.0, 1.0, 0)
+                --
+                @setting_row("Grid range d_max (m)", Setting::FroxelDistance, 16.0, 512.0, 0)
+                --
+                @setting_row("Slice distribution uniformity", Setting::FroxelUniformity, 0.0, 1.0, 2)
+                --
+                @setting_row("Height fog extinction at ground (1e-3/m)", Setting::FroxelFogDensity, 0.0, 50.0, 1)
+                --
+                @setting_row("Height fog falloff (1e-3/m)", Setting::FroxelFogFalloff, 0.0, 100.0, 1)
+            ]
+            --
             @settings_page(Page::Debug)
             Children [
                 @setting_row("3D texture slice ([ / ])", Setting::DebugSlice, 0.0, 0.999, 2)
@@ -684,7 +709,7 @@ fn settings_panel() -> impl Scene {
     }
 }
 
-/// Spawns the settings panel, hidden until Tab; `ATMOSPHERE_SETTINGS=wind|clouds|cirrus|scene|debug`
+/// Spawns the settings panel, hidden until Tab; `ATMOSPHERE_SETTINGS=wind|clouds|cirrus|scene|froxels|debug`
 /// starts with it open on that page, `ATMOSPHERE_DEBUG_VIEW=1` on the debug view.
 fn setup_settings_panel(
     mut commands: Commands,
@@ -698,6 +723,7 @@ fn setup_settings_panel(
         Ok("clouds") => Some(Page::Clouds),
         Ok("cirrus") => Some(Page::Cirrus),
         Ok("scene") => Some(Page::Scene),
+        Ok("froxels") => Some(Page::Froxels),
         Ok("debug") => Some(Page::Debug),
         _ => None,
     };
@@ -893,6 +919,11 @@ fn read_setting(world: &mut World, setting: Setting) -> Option<f32> {
         Setting::Exposure => first(world, |e: &Exposure| e.ev100)?,
         Setting::MarchSteps => first(world, |s: &VolumetricCloudSettings| s.max_steps as f32)?,
         Setting::LightTaps => first(world, |s: &VolumetricCloudSettings| s.light_taps as f32)?,
+        Setting::FroxelEnabled => first(world, |s: &VolumetricsSettings| s.enabled as u32 as f32)?,
+        Setting::FroxelDistance => first(world, |s: &VolumetricsSettings| s.max_distance)?,
+        Setting::FroxelUniformity => first(world, |s: &VolumetricsSettings| s.depth_uniformity)?,
+        Setting::FroxelFogDensity => first(world, |s: &VolumetricsSettings| s.fog_density * 1e3)?,
+        Setting::FroxelFogFalloff => first(world, |s: &VolumetricsSettings| s.fog_height_falloff * 1e3)?,
         Setting::DebugSlice => world.resource::<AtmosphereDebugView>().panels.first()?.slice,
     })
 }
@@ -932,6 +963,11 @@ fn write_setting(world: &mut World, setting: Setting, value: f32) {
         Setting::Exposure => each(world, |e: &mut Exposure| e.ev100 = value),
         Setting::MarchSteps => each(world, |s: &mut VolumetricCloudSettings| s.max_steps = value.round() as u32),
         Setting::LightTaps => each(world, |s: &mut VolumetricCloudSettings| s.light_taps = value.round() as u32),
+        Setting::FroxelEnabled => each(world, |s: &mut VolumetricsSettings| s.enabled = value >= 0.5),
+        Setting::FroxelDistance => each(world, |s: &mut VolumetricsSettings| s.max_distance = value),
+        Setting::FroxelUniformity => each(world, |s: &mut VolumetricsSettings| s.depth_uniformity = value),
+        Setting::FroxelFogDensity => each(world, |s: &mut VolumetricsSettings| s.fog_density = value * 1e-3),
+        Setting::FroxelFogFalloff => each(world, |s: &mut VolumetricsSettings| s.fog_height_falloff = value * 1e-3),
         Setting::DebugSlice => {
             for panel in &mut world.resource_mut::<AtmosphereDebugView>().panels {
                 panel.slice = value;
@@ -1402,6 +1438,20 @@ fn setup_camera_fog(
             }
         },
     ));
+    // `ATMOSPHERE_FROXELS=1`: the near-field froxel grid (`VolumetricsSettings`), with an
+    // optional height fog (`ATMOSPHERE_FROXEL_FOG=<1/m>` extinction at the ground,
+    // `ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`) and range (`ATMOSPHERE_FROXEL_DISTANCE=<m>`).
+    if std::env::var("ATMOSPHERE_FROXELS").is_ok() {
+        let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok());
+        let defaults = VolumetricsSettings::default();
+        camera.insert(VolumetricsSettings {
+            enabled: true,
+            max_distance: env("ATMOSPHERE_FROXEL_DISTANCE").unwrap_or(defaults.max_distance),
+            fog_density: env("ATMOSPHERE_FROXEL_FOG").unwrap_or(0.0),
+            fog_height_falloff: env("ATMOSPHERE_FROXEL_FOG_FALLOFF").unwrap_or(0.01),
+            ..defaults
+        });
+    }
     // `ATMOSPHERE_VIEWPORT=x,y,w,h`: render the camera into that physical-pixel sub-rectangle of
     // its target (split-screen / inset cameras).
     if let Some(v) = std::env::var("ATMOSPHERE_VIEWPORT")
