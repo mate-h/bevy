@@ -1,5 +1,6 @@
 use crate::{
     detail_noise::DetailNoiseTexture, fbm_noise::FbmNoiseTexture,
+    light_probe::generate::{EnvironmentMapSh, EnvironmentMapShBuffers},
     perlin_worley_noise::PerlinWorleyNoiseTexture, Bluenoise, ExtractedAtmosphere,
     ExtractedDirectionalLight, GpuCloudLayers, GpuLights, GpuScatteringMedium, LightMeta,
     LinearSampler, ScatteringMediumSampler, ShadowSamplers, ViewShadowBindings,
@@ -571,6 +572,12 @@ impl AtmosphereBindGroupLayouts {
                     ),
                     // Far empty-space grid (`cloud_field.wesl` far_grid).
                     (61, texture_3d(TextureSampleType::Uint)),
+                    // Diffuse sky and ground light of the cloud field (`cloud_field.wesl`
+                    // diffusion solve, CLOUD_SKY_SH_BOUNDARY).
+                    (
+                        68,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
                 )),
             )
         };
@@ -709,6 +716,13 @@ impl AtmosphereBindGroupLayouts {
                         (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
                         (3, uniform_buffer::<ViewUniform>(true)),
                         (4, uniform_buffer::<GpuLights>(true)),
+                        // Transmittance LUT + sampler: the sun's irradiance on the ground under
+                        // the cloud base (CLOUD_SKY_SH_BOUNDARY).
+                        (
+                            8,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (12, sampler(SamplerBindingType::Filtering)),
                         (20, uniform_buffer::<GpuCloudLayers>(true)),
                         (
                             23,
@@ -722,17 +736,19 @@ impl AtmosphereBindGroupLayouts {
                             47,
                             texture_3d(TextureSampleType::Float { filterable: false }),
                         ),
+                        // r: the sun's diffuse light per unit irradiance; gba: the sky and
+                        // ground's (absolute radiance x 4 pi), see `cloud_field.wesl`.
                         (
                             55,
                             texture_storage_3d(
-                                TextureFormat::R32Float,
+                                TextureFormat::Rgba32Float,
                                 StorageTextureAccess::ReadWrite,
                             ),
                         ),
                         (
                             56,
                             texture_storage_3d(
-                                TextureFormat::R32Float,
+                                TextureFormat::Rgba32Float,
                                 StorageTextureAccess::ReadWrite,
                             ),
                         ),
@@ -746,8 +762,24 @@ impl AtmosphereBindGroupLayouts {
                         (
                             58,
                             texture_storage_3d(
-                                TextureFormat::R32Float,
+                                TextureFormat::Rgba32Float,
                                 StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                        // The ground skylight column map (`cloud_shadow_map.wesl` ground_sky).
+                        (
+                            63,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        // The sky's spherical harmonics (the atmosphere probe's
+                        // `EnvironmentMapSh`; zero without a probe).
+                        (66, storage_buffer_read_only::<EnvironmentMapSh>(false)),
+                        // The published sky and ground diffuse light (`diffusion_publish`).
+                        (
+                            67,
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
                             ),
                         ),
                         (
@@ -1321,6 +1353,7 @@ impl FromWorld for AtmosphereLutPipelines {
             .into_iter()
             .chain(cloud_reference_def())
             .chain(cloud_term_defs())
+            .chain(cloud_sky_sh_defs())
             .chain(atm_dbg_defs())
             .collect(),
             ..default()
@@ -1340,6 +1373,7 @@ impl FromWorld for AtmosphereLutPipelines {
                 .into_iter()
                 .chain(cloud_reference_def())
                 .chain(cloud_term_defs())
+                .chain(cloud_sky_sh_defs())
                 .chain(atm_dbg_defs())
                 .collect(),
                 ..default()
@@ -1428,7 +1462,12 @@ impl FromWorld for AtmosphereLutPipelines {
                     label: Some(format!("cloud_{entry}_pipeline").into()),
                     layout: vec![layouts.cloud_field_diffusion.clone()],
                     shader: load_embedded_asset!(world, "cloud_field.wesl"),
-                    shader_defs: [atm_dbg_defs(), vec!["CLOUDS_ENABLED".into()]].concat(),
+                    shader_defs: [
+                        atm_dbg_defs(),
+                        cloud_sky_sh_defs(),
+                        vec!["CLOUDS_ENABLED".into(), "CLOUD_COLUMN_MAP".into()],
+                    ]
+                    .concat(),
                     entry_point: Some(entry.into()),
                     ..default()
                 })
@@ -1676,6 +1715,9 @@ pub struct AtmosphereTextures {
     pub cloud_field_diff_src: CachedTexture,
     pub cloud_field_diff_u: CachedTexture,
     pub cloud_field_diff: CachedTexture,
+    /// The published sky and ground diffuse light of the solve (`CLOUD_SKY_SH_BOUNDARY`):
+    /// rgb pre-exposed radiance x 4 pi, a = 1 where the solve has a value.
+    pub cloud_field_diff_amb: CachedTexture,
     /// The diffusion solution and source moved with the grid (`cloud_field.wesl` diffusion_shift).
     pub cloud_field_diff_tmp: CachedTexture,
     /// The diffusion solve's build cell and pending shift (4 x 1 x 1).
@@ -1897,14 +1939,16 @@ pub(super) fn prepare_atmosphere_textures(
                     view_formats: &[],
                 })
             };
+        // r: the sun's diffuse light per unit irradiance, gba: the sky and ground's (one
+        // operator, four right-hand sides: `cloud_field.wesl` sor).
         let cloud_field_diff_src = field_volume(
             "cloud_field_diff_src",
-            TextureFormat::R32Float,
+            TextureFormat::Rgba32Float,
             TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
         );
         let cloud_field_diff_u = field_volume(
             "cloud_field_diff_u",
-            TextureFormat::R32Float,
+            TextureFormat::Rgba32Float,
             TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
         );
         let cloud_field_diff = field_volume(
@@ -1914,14 +1958,21 @@ pub(super) fn prepare_atmosphere_textures(
                 | TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_SRC,
         );
-        let mut diff_aux = |label: &'static str, size: Extent3d| {
+        let cloud_field_diff_amb = field_volume(
+            "cloud_field_diff_amb",
+            TextureFormat::Rgba16Float,
+            TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+        );
+        let mut diff_aux = |label: &'static str, size: Extent3d, format: TextureFormat| {
             textures.get(TextureDescriptor {
                 label: Some(label),
                 size: cloud_extent(size),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D3,
-                format: TextureFormat::R32Float,
+                format,
                 usage: TextureUsages::STORAGE_BINDING,
                 view_formats: &[],
             })
@@ -1933,6 +1984,7 @@ pub(super) fn prepare_atmosphere_textures(
                 height: CLOUD_FIELD_RES_XY,
                 depth_or_array_layers: 2 * CLOUD_FIELD_RES_Z,
             },
+            TextureFormat::Rgba32Float,
         );
         let cloud_field_diff_state = diff_aux(
             "cloud_field_diff_state",
@@ -1941,6 +1993,7 @@ pub(super) fn prepare_atmosphere_textures(
                 height: 1,
                 depth_or_array_layers: 1,
             },
+            TextureFormat::R32Float,
         );
         let mut window = |label: &'static str| {
             textures.get(TextureDescriptor {
@@ -2139,6 +2192,7 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_diff_src,
                 cloud_field_diff_u,
                 cloud_field_diff,
+                cloud_field_diff_amb,
                 cloud_field_diff_tmp,
                 cloud_field_diff_state,
             }
@@ -2629,11 +2683,17 @@ pub(super) fn prepare_atmosphere_bind_groups(
         Res<ShadowSamplers>,
         Res<VoxelCloudSampler>,
     ),
-    (bluenoise, render_images, fallback_image, extracted_voxel): (
+    (bluenoise, render_images, fallback_image, extracted_voxel, sky_sh): (
         Res<Bluenoise>,
         Res<RenderAssets<GpuImage>>,
         Res<FallbackImage>,
         Res<super::voxel_cloud::ExtractedVoxelCloud>,
+        (
+            Res<EnvironmentMapShBuffers>,
+            Res<CloudSkyShFallback>,
+            Query<(Entity, &super::environment::AtmosphereEnvironmentMap)>,
+            Res<super::environment::AtmosphereProbeSource>,
+        ),
     ),
     view_uniforms: Res<ViewUniforms>,
     lights_uniforms: Res<LightMeta>,
@@ -2720,6 +2780,18 @@ pub(super) fn prepare_atmosphere_bind_groups(
         let gpu_medium = gpu_media
             .get(atmosphere.medium)
             .ok_or(ScatteringMediumMissingError(atmosphere.medium))?;
+        // The sky's spherical harmonics: those of the atmosphere probe this view renders
+        // (`probe_view`), the raymarched cloudy sky as seen from the camera; zero without one
+        // (or with an unfiltered probe, which has no harmonics).
+        let (sh_buffers, sky_sh_fallback, probes, probe_source) = &sky_sh;
+        let sky_sh: &Buffer = probes
+            .iter()
+            .find(|(probe, _)| {
+                super::environment::probe_view(*probe, views.contains(*probe), probe_source)
+                    == Some(entity)
+            })
+            .and_then(|(_, env_map)| sh_buffers.get(env_map.environment_map.id()))
+            .unwrap_or(&sky_sh_fallback.0);
         let transmittance_lut = render_device.create_bind_group(
             "transmittance_lut_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.transmittance_lut),
@@ -3120,6 +3192,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (49, &fbm_noise_texture.cirrus.default_view),
                         (59, &textures.cloud_field_diff.default_view),
                         (61, &textures.cloud_far_grid.default_view),
+                        (68, &textures.cloud_field_diff_amb.default_view),
                     )),
                 )
             });
@@ -3198,6 +3271,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (1, settings_binding.clone()),
                         (3, view_binding.clone()),
                         (4, lights_binding.clone()),
+                        (8, &textures.transmittance_lut.default_view),
+                        (12, &atmosphere_sampler.0),
                         (20, cloud_layer_binding),
                         (23, &textures.cloud_shadow_map.default_view),
                         (44, &textures.cloud_field_sdf.default_view),
@@ -3207,6 +3282,9 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (57, &textures.cloud_field_diff.default_view),
                         (58, &textures.cloud_field_diff_tmp.default_view),
                         (60, &textures.cloud_field_diff_state.default_view),
+                        (63, &textures.cloud_ground_sky.default_view),
+                        (66, sky_sh.as_entire_binding()),
+                        (67, &textures.cloud_field_diff_amb.default_view),
                     )),
                 )
             });
@@ -3459,7 +3537,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   scatter (the clouds' own sunlight, all orders; no sky, ground or haze light).
 /// - `ATM_DBG_NO_COARSE`: fine samples everywhere from the ray start, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
-/// See also `CLOUD_TERMS=s1|sun|amb` and `CLOUD_REFERENCE=1`.
+/// See also `CLOUD_TERMS=s1|sun|amb`, `CLOUD_REFERENCE=1` and `CLOUD_SKY_SH_BOUNDARY=0`
+/// ([`cloud_sky_sh_defs`]).
 /// Texels of the ground irradiance LUT (`GROUND_IRRADIANCE_LUT_SIZE` in `functions.wesl`).
 pub(crate) const GROUND_IRRADIANCE_LUT_SIZE: u32 = 128;
 
@@ -3489,6 +3568,37 @@ fn cloud_term_defs() -> Vec<bevy_shader::ShaderDefVal> {
         defs.push("CLOUD_NO_HAZE".into());
     }
     defs
+}
+
+/// `CLOUD_SKY_SH_BOUNDARY` (default on; `CLOUD_SKY_SH_BOUNDARY=0` turns it off): the cloud
+/// field's diffusion solve takes the sky's and the ground's diffuse light in through its Marshak
+/// boundary (the sky from the atmosphere probe's spherical harmonics, the ground from the shadow
+/// and column maps), and the cloud pass reads that solution as its ambient where the solve has
+/// one (`cloud_field.wesl` diffusion_source_cell, `clouds_raymarch.wesl`). Off: the two-stream
+/// slab ambient of the clear-sky LUT everywhere. Set for the diffusion and cloud pipelines alike.
+pub(crate) fn cloud_sky_sh_defs() -> Vec<bevy_shader::ShaderDefVal> {
+    match std::env::var("CLOUD_SKY_SH_BOUNDARY").as_deref() {
+        Ok("0") | Ok("off") | Ok("false") => Vec::new(),
+        _ => vec!["CLOUD_SKY_SH_BOUNDARY".into()],
+    }
+}
+
+/// A zeroed [`EnvironmentMapSh`] buffer, bound as the sky's harmonics for views without an
+/// atmosphere probe (no sky light enters the diffusion solve's boundary then).
+#[derive(Resource)]
+pub struct CloudSkyShFallback(pub Buffer);
+
+impl FromWorld for CloudSkyShFallback {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+        // Buffers are zero-initialised.
+        Self(render_device.create_buffer(&BufferDescriptor {
+            label: Some("cloud_sky_sh_fallback"),
+            size: EnvironmentMapSh::min_size().get(),
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }))
+    }
 }
 
 /// f32 running-sum accumulator of a view for the reference path tracer (`CLOUD_REFERENCE`):

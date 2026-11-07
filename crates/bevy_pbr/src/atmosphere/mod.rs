@@ -225,6 +225,7 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<RenderSkyBindGroupLayouts>()
             .init_resource::<CloudNoiseSampler>()
             .init_resource::<resources::VoxelCloudSampler>()
+            .init_resource::<resources::CloudSkyShFallback>()
             .init_resource::<voxel_cloud::ExtractedVoxelCloud>()
             .init_resource::<environment::AtmosphereProbeSource>()
             .init_resource::<fbm_noise::CloudNoiseFormats>()
