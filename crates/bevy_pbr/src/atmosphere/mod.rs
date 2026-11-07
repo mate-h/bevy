@@ -151,6 +151,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "froxels.wesl");
 
         embedded_asset!(app, "transmittance_lut.wesl");
+        embedded_asset!(app, "volumetrics.wesl");
         embedded_asset!(app, "multiscattering_lut.wesl");
         embedded_asset!(app, "ground_irradiance_lut.wesl");
         embedded_asset!(app, "sky_view_lut.wesl");
@@ -288,7 +289,11 @@ impl Plugin for AtmospherePlugin {
                         .before(RenderSystems::PrepareResources),
                     prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
-                    prepare_cloud_shadow_temporal_params
+                    // (A tuple: the system list is at the 20-element limit.)
+                    (
+                        prepare_cloud_shadow_temporal_params,
+                        resources::prepare_volumetrics_uniforms,
+                    )
                         .in_set(RenderSystems::PrepareBindGroups)
                         .before(prepare_atmosphere_bind_groups),
                     (prepare_clouds_temporal_params, resources::prepare_cloud_reference_accumulators)

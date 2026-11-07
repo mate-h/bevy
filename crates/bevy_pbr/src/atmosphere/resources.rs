@@ -200,6 +200,10 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_shadow_mips: BindGroupLayoutDescriptor,
     /// Diffusion solve of the cloud field (`cloud_field.wesl` diffusion_*, sor_*).
     pub cloud_field_diffusion: BindGroupLayoutDescriptor,
+    /// Near-field froxel passes (`volumetrics.wesl`): material, scattering, integrate.
+    pub volumetrics_material: BindGroupLayoutDescriptor,
+    pub volumetrics_scattering: BindGroupLayoutDescriptor,
+    pub volumetrics_integrate: BindGroupLayoutDescriptor,
 }
 
 #[derive(Resource)]
@@ -215,6 +219,10 @@ pub(crate) struct RenderSkyBindGroupLayouts {
     pub render_sky_msaa_clouds: BindGroupLayoutDescriptor,
     pub render_sky_no_clouds: BindGroupLayoutDescriptor,
     pub render_sky_msaa_no_clouds: BindGroupLayoutDescriptor,
+    /// `render_sky_clouds` / `render_sky_haze` with the froxel volumetrics (`VOLUMETRICS_FROXELS`):
+    /// the params uniform (70) and, for the composite, the integrated volume (76) and STBN (25).
+    pub render_sky_clouds_froxels: BindGroupLayoutDescriptor,
+    pub render_sky_haze_froxels: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
     pub fragment_shader: Handle<Shader>,
 }
@@ -630,6 +638,49 @@ impl AtmosphereBindGroupLayouts {
             ),
         );
 
+        // Near-field froxel passes (`volumetrics.wesl`): the aerial-perspective LUT's inputs
+        // (medium and atmosphere LUTs, cascades) plus the cloud inputs (the shadow-map lookup
+        // compiles the whole density model, as the cloud-shadowed LUTs do), the params uniform
+        // (70) and each pass's volumes. One layout per pass: a volume cannot be bound both as
+        // this pass's storage output and as the next pass's sampled input in one bind group.
+        let volumetrics_entries = || {
+            DynamicBindGroupLayoutEntries::new_with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuAtmosphere>(true)),
+                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
+                    (3, uniform_buffer::<ViewUniform>(true)),
+                    (4, uniform_buffer::<GpuLights>(true)),
+                    (5, texture_2d(TextureSampleType::default())),
+                    (6, texture_2d(TextureSampleType::default())),
+                    (7, sampler(SamplerBindingType::Filtering)),
+                    (8, texture_2d(TextureSampleType::default())), // transmittance
+                    (9, texture_2d(TextureSampleType::default())), // multiscattering
+                    (12, sampler(SamplerBindingType::Filtering)),
+                    (70, uniform_buffer::<super::volumetrics::GpuVolumetricsParams>(false)),
+                ),
+            )
+            .extend_with_indices(directional_shadow_layout_entries())
+            .extend_with_indices(cloud_layout_entries())
+        };
+        let volume_out = || {
+            texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly)
+        };
+        let volume_in = || texture_3d(TextureSampleType::Float { filterable: true });
+        let volumetrics_material = BindGroupLayoutDescriptor::new(
+            "volumetrics_material_bind_group_layout",
+            &volumetrics_entries().extend_with_indices(((71, volume_out()),)),
+        );
+        let volumetrics_scattering = BindGroupLayoutDescriptor::new(
+            "volumetrics_scattering_bind_group_layout",
+            &volumetrics_entries().extend_with_indices(((72, volume_in()), (73, volume_out()))),
+        );
+        let volumetrics_integrate = BindGroupLayoutDescriptor::new(
+            "volumetrics_integrate_bind_group_layout",
+            &volumetrics_entries().extend_with_indices(((74, volume_in()), (75, volume_out()))),
+        );
+
         Self {
             transmittance_lut,
             multiscattering_lut,
@@ -643,6 +694,9 @@ impl AtmosphereBindGroupLayouts {
             clouds_raymarch,
             clouds_raymarch_msaa,
             clouds_reconstruct,
+            volumetrics_material,
+            volumetrics_scattering,
+            volumetrics_integrate,
             cloud_field_edt: BindGroupLayoutDescriptor::new(
                 "cloud_field_edt_bind_group_layout",
                 &BindGroupLayoutEntries::with_indices(
@@ -1108,6 +1162,31 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                 .extend_with_indices(cloud_layout_entries())
                 .extend_with_indices(cloud_pass_output_entries()),
         );
+        // Froxel volumetrics: composite 13 + integrated volume + STBN (dither) = 15 textures; the
+        // haze prepass only adds the params uniform (its 16 textures are the limit).
+        let render_sky_clouds_froxels = BindGroupLayoutDescriptor::new(
+            "render_sky_bind_group_layout_clouds_froxels",
+            &base_entries(texture_2d(TextureSampleType::Depth))
+                .extend_with_indices(render_sky_composite_cloud_entries())
+                .extend_with_indices(cloud_pass_output_entries())
+                .extend_with_indices(haze_entries())
+                .extend_with_indices((
+                    (25, texture_2d_array(TextureSampleType::Float { filterable: true })),
+                    (70, uniform_buffer::<super::volumetrics::GpuVolumetricsParams>(false)),
+                    (76, texture_3d(TextureSampleType::Float { filterable: true })),
+                )),
+        );
+        let render_sky_haze_froxels = BindGroupLayoutDescriptor::new(
+            "render_sky_haze_bind_group_layout_froxels",
+            &base_entries(texture_2d(TextureSampleType::Depth))
+                .extend_with_indices(cloud_layout_entries())
+                .extend_with_indices((
+                    (50, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (52, uniform_buffer::<CloudsTemporalParams>(false)),
+                    (63, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (70, uniform_buffer::<super::volumetrics::GpuVolumetricsParams>(false)),
+                )),
+        );
 
         Self {
             render_sky_clouds,
@@ -1116,6 +1195,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
             render_sky_msaa_clouds,
             render_sky_no_clouds,
             render_sky_msaa_no_clouds,
+            render_sky_clouds_froxels,
+            render_sky_haze_froxels,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             fragment_shader: load_embedded_asset!(world, "render_sky.wesl"),
         }
@@ -1190,6 +1271,8 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_shadow_mips: CachedComputePipelineId,
     /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
     pub cloud_field_diffusion: [CachedComputePipelineId; 8],
+    /// Near-field froxel passes (`volumetrics.wesl`): material, scattering, integrate.
+    pub volumetrics: [CachedComputePipelineId; 3],
 }
 
 impl FromWorld for AtmosphereLutPipelines {
@@ -1447,6 +1530,31 @@ impl FromWorld for AtmosphereLutPipelines {
                 entry_point: Some("compose".into()),
                 ..default()
             }),
+            // The cloud defs: the shadow-map lookup, STBN and the cloud layer (the above-clouds
+            // test) are bound; clouds themselves are not in the grid (Phase 1).
+            volumetrics: [
+                ("material", "VOLUMETRICS_MATERIAL", &layouts.volumetrics_material),
+                ("scattering", "VOLUMETRICS_SCATTERING", &layouts.volumetrics_scattering),
+                ("integrate", "VOLUMETRICS_INTEGRATE", &layouts.volumetrics_integrate),
+            ]
+            .map(|(entry, def, layout)| {
+                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some(format!("volumetrics_{entry}_pipeline").into()),
+                    layout: vec![layout.clone()],
+                    shader: load_embedded_asset!(world, "volumetrics.wesl"),
+                    shader_defs: [
+                        atm_dbg_defs(),
+                        vec![
+                            "CLOUDS_ENABLED".into(),
+                            "CLOUD_SHADOW_SIMPLE_SAMPLING".into(),
+                            def.into(),
+                        ],
+                    ]
+                    .concat(),
+                    entry_point: Some(entry.into()),
+                    ..default()
+                })
+            }),
         }
     }
 }
@@ -1463,6 +1571,9 @@ pub(crate) struct RenderSkyPipelineKey {
     pub haze_prepass: bool,
     /// With `haze_prepass`: its resolve (`haze_resolve`) instead of the checkerboard march.
     pub haze_resolve: bool,
+    /// Near-field froxel volumetrics (`VOLUMETRICS_FROXELS`, `volumetrics.rs`): the composite
+    /// applies the integrated volume and the haze prepass covers only the far field.
+    pub froxels: bool,
 }
 
 impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
@@ -1488,6 +1599,12 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
             // The atmosphere march at half resolution (prepass) + depth-aware upsample.
             if key.msaa_samples == 1 {
                 shader_defs.push("SKY_HAZE_HALF_RES".into());
+                if key.froxels {
+                    shader_defs.push("VOLUMETRICS_FROXELS".into());
+                    if !key.haze_prepass {
+                        shader_defs.push("VOLUMETRICS_APPLY".into());
+                    }
+                }
             }
         } else {
             shader_defs.extend(atm_dbg_defs());
@@ -1512,6 +1629,13 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
                     self.render_sky_haze_resolve.clone(),
                     "haze_resolve",
                 )
+            } else if key.froxels {
+                shader_defs.push("CLOUD_COLUMN_MAP".into());
+                (
+                    "render_sky_haze_froxels_pipeline",
+                    self.render_sky_haze_froxels.clone(),
+                    "haze",
+                )
             } else {
                 shader_defs.push("CLOUD_COLUMN_MAP".into());
                 ("render_sky_haze_pipeline", self.render_sky_haze.clone(), "haze")
@@ -1534,6 +1658,7 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
         RenderPipelineDescriptor {
             label: Some(format!("render_sky_pipeline_{}", key.msaa_samples).into()),
             layout: vec![match (key.msaa_samples == 1, key.clouds_enabled) {
+                (true, true) if key.froxels => self.render_sky_clouds_froxels.clone(),
                 (true, true) => self.render_sky_clouds.clone(),
                 (false, true) => self.render_sky_msaa_clouds.clone(),
                 (true, false) => self.render_sky_no_clouds.clone(),
@@ -1573,7 +1698,12 @@ impl SpecializedRenderPipeline for RenderSkyBindGroupLayouts {
 
 pub(super) fn queue_render_sky_pipelines(
     views: Query<
-        (Entity, &Msaa, Option<&GpuCloudLayers>),
+        (
+            Entity,
+            &Msaa,
+            Option<&GpuCloudLayers>,
+            Option<&super::volumetrics::VolumetricsSettings>,
+        ),
         (With<Camera>, With<ExtractedAtmosphere>),
     >,
     pipeline_cache: Res<PipelineCache>,
@@ -1582,7 +1712,11 @@ pub(super) fn queue_render_sky_pipelines(
     render_device: Res<RenderDevice>,
     mut commands: Commands,
 ) {
-    for (entity, msaa, cloud_layer) in &views {
+    for (entity, msaa, cloud_layer, volumetrics) in &views {
+        // The froxel grid runs on the half-res haze path of views with clouds (`volumetrics.rs`).
+        let froxels = volumetrics.is_some_and(|v| v.enabled)
+            && cloud_layer.is_some()
+            && msaa.samples() == 1;
         let id = specializer.specialize(
             &pipeline_cache,
             &layouts,
@@ -1594,6 +1728,7 @@ pub(super) fn queue_render_sky_pipelines(
                 clouds_enabled: cloud_layer.is_some(),
                 haze_prepass: false,
                 haze_resolve: false,
+                froxels,
             },
         );
         commands.entity(entity).insert(RenderSkyPipelineId(id));
@@ -1604,6 +1739,7 @@ pub(super) fn queue_render_sky_pipelines(
                 clouds_enabled: true,
                 haze_prepass: true,
                 haze_resolve,
+                froxels: froxels && !haze_resolve,
             };
             let march = specializer.specialize(&pipeline_cache, &layouts, haze_key(false));
             let resolve = specializer.specialize(&pipeline_cache, &layouts, haze_key(true));
@@ -1680,6 +1816,14 @@ pub struct AtmosphereTextures {
     pub cloud_field_diff_tmp: CachedTexture,
     /// The diffusion solve's build cell and pending shift (4 x 1 x 1).
     pub cloud_field_diff_state: CachedTexture,
+    /// Near-field froxel volumes (`volumetrics.rs`, 1x1x1 placeholders when off): Material A
+    /// (sigma_s.rgb, sigma_t), Scattering (L.rgb pre-exposed, sigma_t), Integrated (in-scatter
+    /// to the camera, transmittance). Phase 2 adds Material B and a Shadow volume here.
+    pub volumetrics_material: CachedTexture,
+    pub volumetrics_scattering: CachedTexture,
+    pub volumetrics_integrated: CachedTexture,
+    /// The froxel grid the volumes were sized for (zero when off).
+    pub volumetrics_grid: bevy_math::UVec3,
 }
 
 pub(super) fn prepare_atmosphere_textures(
@@ -1691,6 +1835,8 @@ pub(super) fn prepare_atmosphere_textures(
             Option<&ExtractedCamera>,
             Option<&MainPassResolutionOverride>,
             bevy_ecs::query::Has<GpuCloudLayers>,
+            Option<&super::volumetrics::VolumetricsSettings>,
+            &Msaa,
         ),
         With<ExtractedAtmosphere>,
     >,
@@ -1706,7 +1852,9 @@ pub(super) fn prepare_atmosphere_textures(
     // 5). A texture is only reallocated when its descriptor changes, and a reallocation is a
     // new texture id, which the history validity checks compare.
     let mut seen: HashMap<RetainedViewEntity, ViewTextureStore> = HashMap::default();
-    for (entity, view, lut_settings, camera, resolution_override, has_clouds) in &views {
+    for (entity, view, lut_settings, camera, resolution_override, has_clouds, volumetrics, msaa) in
+        &views
+    {
         let mut textures = store.remove(&view.retained_view_entity).unwrap_or_default();
         textures.device = Some(render_device.clone());
         // Views without cloud layers bind 1x1 placeholders for every cloud texture (their
@@ -2104,6 +2252,34 @@ pub(super) fn prepare_atmosphere_textures(
             TextureUsages::empty(),
         );
 
+        // Near-field froxel volumes, sized from the render size and the cloud render-size cap
+        // (`VolumetricsSettings::grid_size`); RGBA16F each (FB15 slide 12: ~7 MB at 160x90x64).
+        let volumetrics_grid = volumetrics
+            .filter(|v| v.enabled && has_clouds && *msaa == Msaa::Off)
+            .map(|v| v.grid_size(render_size, lut_settings.cloud_max_render_size))
+            .unwrap_or(bevy_math::UVec3::ZERO);
+        let mut volume = |label: &'static str| {
+            textures.get(TextureDescriptor {
+                label: Some(label),
+                size: Extent3d {
+                    width: volumetrics_grid.x.max(1),
+                    height: volumetrics_grid.y.max(1),
+                    depth_or_array_layers: volumetrics_grid.z.max(1),
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::STORAGE_BINDING
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        let volumetrics_material = volume("volumetrics_material");
+        let volumetrics_scattering = volume("volumetrics_scattering");
+        let volumetrics_integrated = volume("volumetrics_integrated");
+
         commands.entity(entity).insert({
             AtmosphereTextures {
                 transmittance_lut,
@@ -2141,6 +2317,10 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_diff,
                 cloud_field_diff_tmp,
                 cloud_field_diff_state,
+                volumetrics_material,
+                volumetrics_scattering,
+                volumetrics_integrated,
+                volumetrics_grid,
             }
         });
         seen.insert(view.retained_view_entity, textures);
@@ -2356,6 +2536,40 @@ pub(crate) struct AtmosphereBindGroups {
     pub cloud_field_edt: Option<[BindGroup; 4]>,
     /// Diffusion solve (`cloud_field.wesl`), dynamic offsets: atmosphere, lights.
     pub cloud_field_diffusion: Option<BindGroup>,
+    /// Near-field froxel passes (`volumetrics.wesl`): material, scattering, integrate; present
+    /// when the view's froxel grid runs this frame.
+    pub volumetrics: Option<[BindGroup; 3]>,
+}
+
+/// Writes each froxel view's [`super::volumetrics::VolumetricsUniform`] (`froxels.wesl`
+/// `VolumetricsParams`) for the grid its volumes were sized for.
+pub(super) fn prepare_volumetrics_uniforms(
+    views: Query<
+        (
+            Entity,
+            &AtmosphereTextures,
+            Option<&super::volumetrics::VolumetricsSettings>,
+        ),
+        (With<Camera3d>, With<ExtractedAtmosphere>),
+    >,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut commands: Commands,
+) {
+    for (entity, textures, settings) in &views {
+        let grid = textures.volumetrics_grid;
+        let Some(settings) = settings.filter(|_| grid.cmpgt(bevy_math::UVec3::ZERO).all()) else {
+            commands
+                .entity(entity)
+                .remove::<super::volumetrics::VolumetricsUniform>();
+            continue;
+        };
+        let mut buffer = UniformBuffer::from(settings.gpu_params(grid));
+        buffer.write_buffer(&render_device, &render_queue);
+        commands
+            .entity(entity)
+            .insert(super::volumetrics::VolumetricsUniform { buffer, grid });
+    }
 }
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
@@ -2617,6 +2831,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             Option<&CloudsTemporalParamsUniform>,
             Option<&CloudShadowTemporalParamsUniform>,
             Option<&CloudReferenceAccumulator>,
+            Option<&super::volumetrics::VolumetricsUniform>,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
@@ -2705,6 +2920,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         temporal_uniform,
         shadow_temporal_uniform,
         reference_accumulator,
+        volumetrics_uniform,
     ) in &views
     {
         let Some(depth_view) = view_depth_texture
@@ -2976,15 +3192,19 @@ pub(super) fn prepare_atmosphere_bind_groups(
             .as_ref()
             .filter(|_| cloud_layer.is_some());
         let haze_params = temporal_uniform.and_then(|u| u.0.binding());
+        // The froxel grid's params, when its volumes were built for this view this frame
+        // (`prepare_volumetrics_uniforms`): the composite and the haze prepass then take their
+        // froxel layouts.
+        let froxel_params = volumetrics_uniform
+            .filter(|_| cloud_layer.is_some() && *msaa == Msaa::Off)
+            .and_then(|u| u.buffer.binding());
         // Composite pass (full resolution). Without MSAA the atmosphere march runs in the half-res
         // haze prepass, and this pass only upsamples the haze and composites the clouds.
         let render_sky_clouds = cloud_inputs.and_then(|cloud_layer_binding| {
             if *msaa == Msaa::Off {
                 let haze_params = haze_params.clone()?;
-                Some(render_device.create_bind_group(
-                    "render_sky_bind_group_clouds",
-                    &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky_clouds),
-                    &base_sky_entries().extend_with_indices((
+                let composite_entries = || {
+                    base_sky_entries().extend_with_indices((
                         (20, cloud_layer_binding.clone()),
                         (22, &**cloud_noise_sampler),
                         (23, &textures.cloud_shadow_map.default_view),
@@ -2992,8 +3212,25 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (27, &textures.clouds_depth.default_view),
                         (50, &textures.haze_inscattering.default_view),
                         (51, &textures.haze_transmittance.default_view),
-                        (52, haze_params),
-                    )),
+                        (52, haze_params.clone()),
+                    ))
+                };
+                if let Some(params) = froxel_params.clone() {
+                    return Some(render_device.create_bind_group(
+                        "render_sky_bind_group_clouds_froxels",
+                        &pipeline_cache
+                            .get_bind_group_layout(&render_sky_layouts.render_sky_clouds_froxels),
+                        &composite_entries().extend_with_indices((
+                            (25, stbn_view.as_ref()),
+                            (70, params),
+                            (76, &textures.volumetrics_integrated.default_view),
+                        )),
+                    ));
+                }
+                Some(render_device.create_bind_group(
+                    "render_sky_bind_group_clouds",
+                    &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky_clouds),
+                    &composite_entries(),
                 ))
             } else {
                 Some(
@@ -3028,10 +3265,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
             .filter(|_| *msaa == Msaa::Off)
             .zip(haze_params.clone())
             .map(|(cloud_layer_binding, haze_params)| {
-                render_device.create_bind_group(
-                    "render_sky_haze_bind_group",
-                    &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky_haze),
-                    &base_sky_entries().extend_with_indices((
+                let haze_entries = || {
+                    base_sky_entries().extend_with_indices((
                         (20, cloud_layer_binding.clone()),
                         (21, &fbm_noise_texture.texture.default_view),
                         (22, &**cloud_noise_sampler),
@@ -3046,10 +3281,82 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (36, &textures.weather_window_art.default_view),
                         (37, &textures.weather_window_physical.default_view),
                         (50, &textures.haze_history_inscattering.default_view),
-                        (52, haze_params),
+                        (52, haze_params.clone()),
                         (63, &textures.cloud_ground_sky.default_view),
-                    )),
+                    ))
+                };
+                if let Some(params) = froxel_params.clone() {
+                    return render_device.create_bind_group(
+                        "render_sky_haze_bind_group_froxels",
+                        &pipeline_cache
+                            .get_bind_group_layout(&render_sky_layouts.render_sky_haze_froxels),
+                        &haze_entries().extend_with_indices(((70, params),)),
+                    );
+                }
+                render_device.create_bind_group(
+                    "render_sky_haze_bind_group",
+                    &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky_haze),
+                    &haze_entries(),
                 )
+            });
+
+        // Near-field froxel passes: the aerial LUT's inputs, the cloud inputs, the params and
+        // each pass's volumes (`volumetrics.wesl`).
+        let volumetrics = froxel_params
+            .clone()
+            .zip(cloud_layer_binding.as_ref())
+            .map(|(params, cloud_layer_binding)| {
+                let common = || {
+                    DynamicBindGroupEntries::new_with_indices((
+                            (0, atmosphere_binding.clone()),
+                            (1, settings_binding.clone()),
+                            (2, transforms_binding.clone()),
+                            (3, view_binding.clone()),
+                            (4, lights_binding.clone()),
+                            (5, &gpu_medium.density_lut_view),
+                            (6, &gpu_medium.scattering_lut_view),
+                            (7, medium_sampler.sampler()),
+                            (8, &textures.transmittance_lut.default_view),
+                            (9, &textures.multiscattering_lut.default_view),
+                            (12, &atmosphere_sampler.0),
+                            (70, params.clone()),
+                            (16, &shadow_bindings.directional_light_depth_texture_view),
+                            (17, &shadow_samplers.shadow_comparison_sampler),
+                            (20, cloud_layer_binding.clone()),
+                            (21, &fbm_noise_texture.texture.default_view),
+                            (22, &**cloud_noise_sampler),
+                            (23, &textures.cloud_shadow_map.default_view),
+                            (24, &perlin_worley_noise_texture.texture.default_view),
+                            (25, stbn_view.as_ref()),
+                            (33, &detail_noise_texture.texture.default_view),
+                            (34, &fbm_noise_texture.profile.default_view),
+                            (35, &fbm_noise_texture.scheme_noise.default_view),
+                            (36, &textures.weather_window_art.default_view),
+                            (37, &textures.weather_window_physical.default_view),
+                            (64, voxel_view),
+                            (65, &**voxel_sampler),
+                        ))
+                };
+                let material = &textures.volumetrics_material.default_view;
+                let scattering = &textures.volumetrics_scattering.default_view;
+                let integrated = &textures.volumetrics_integrated.default_view;
+                [
+                    render_device.create_bind_group(
+                        "volumetrics_material_bind_group",
+                        &pipeline_cache.get_bind_group_layout(&layouts.volumetrics_material),
+                        &common().extend_with_indices(((71, material),)),
+                    ),
+                    render_device.create_bind_group(
+                        "volumetrics_scattering_bind_group",
+                        &pipeline_cache.get_bind_group_layout(&layouts.volumetrics_scattering),
+                        &common().extend_with_indices(((72, material), (73, scattering))),
+                    ),
+                    render_device.create_bind_group(
+                        "volumetrics_integrate_bind_group",
+                        &pipeline_cache.get_bind_group_layout(&layouts.volumetrics_integrate),
+                        &common().extend_with_indices(((74, scattering), (75, integrated))),
+                    ),
+                ]
             });
 
         let render_sky_haze_resolve = render_sky_haze
@@ -3309,6 +3616,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             clouds_reconstruct,
             cloud_field_edt,
             cloud_field_diffusion,
+            volumetrics,
         });
     }
 

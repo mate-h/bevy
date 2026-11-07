@@ -24,8 +24,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-// Passes timed per frame (each LUT, field stage and diffusion step has its own pass: ~20).
-const MAX_PASSES: u32 = 32;
+// Passes timed per frame (each LUT, field stage, diffusion step and froxel pass has its own
+// pass: ~25).
+const MAX_PASSES: u32 = 48;
 
 struct State {
     query_set: QuerySet,
