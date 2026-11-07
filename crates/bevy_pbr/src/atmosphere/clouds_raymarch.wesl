@@ -12,6 +12,10 @@
 
 import bevy_render::maths::{PI, ray_sphere_intersect};
 import package::render::utils::interleaved_gradient_noise;
+// The cloud field's sky and ground light (cloud_field.wesl diffusion solve), the ambient where it
+// has a value.
+@if(CLOUD_SKY_SH_BOUNDARY)
+import package::atmosphere::bindings::cloud_field_diff_amb;
 import package::atmosphere::{
     bindings::{atmosphere, settings, view, lights, stbn_texture, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map, medium_density_lut},
     bruneton_functions::{ray_intersects_ground, sample_transmittance_lut_segment, sample_transmittance_lut_segment_tau_red, distance_to_top_atmosphere_boundary},
@@ -260,6 +264,52 @@ fn cloud_ambient_term(sky_rad: vec3<f32>, ground_rad: vec3<f32>, tau_up: f32, ta
     let k = 1.0 - CLOUD_MIE_MEAN_COS;
     let w = (k * tau_up + CLOUD_DIFFUSION_Z0) / (k * (tau_up + tau_down) + 2.0 * CLOUD_DIFFUSION_Z0);
     return mix(sky_rad, ground_rad, w);
+}
+
+/// The cloud field's published sky and ground light at p (`cloud_field.wesl` diffusion_publish):
+/// rgb = 4 pi J pre-exposed times a, a = the interpolated weight of the cells that hold a value
+/// (so rgb / a interpolates over those cells only); 0 outside the grid.
+@if(CLOUD_SKY_SH_BOUNDARY)
+fn cloud_field_ambient_sample(p: vec3<f32>, cell: vec2<f32>) -> vec4<f32> {
+    let uvw = cloud_field_uvw(p, cell);
+    if (any(uvw.xy < vec2(0.0)) || any(uvw.xy > vec2(1.0))) {
+        return vec4(0.0);
+    }
+    return textureSampleLevel(cloud_field_diff_amb, atmosphere_lut_sampler, saturate(uvw), 0.0);
+}
+
+/// The sky and ground light's in-scatter toward the camera from the cloud field's diffusion
+/// solve (CLOUD_SKY_SH_BOUNDARY): rgb = 4 pi J + 3 g F.w in absolute radiance (the ambient
+/// mean intensity is rgb / (4 pi), in place of `cloud_ambient_term`), a = 1 where the solve has a
+/// value, 0 where it has none (beyond the grid, or farther than a cell from the solve's cloud
+/// cells: the slab term stands in there). The flux term is `cloud_field_diffuse_toward`'s, per
+/// channel, with the same Levermore-Pomraning limiter: the sky's diffuse field obeys the same
+/// P1 radiance I = (U + 3 F.w) / (4 pi), and like the sun's it grows inward from the Marshak
+/// faces, so faces seen from outside send more than U / (4 pi).
+@if(CLOUD_SKY_SH_BOUNDARY)
+fn cloud_field_ambient_toward(p: vec3<f32>, ray_dir: vec3<f32>) -> vec4<f32> {
+    let cell = textureLoad(cloud_field_diff, vec3(0), 0).gb;
+    let s = cloud_field_ambient_sample(p, cell);
+    if (s.a <= 0.0) {
+        return vec4(0.0);
+    }
+    let u = s.rgb / s.a;
+    let c = cloud_field_diffuse_sample(p, cell);
+    let up = normalize(p);
+    let v = dot(ray_dir, up);
+    let hz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_FIELD_RES_Z);
+    let eps = 0.5 / length(vec2(sqrt(max(1.0 - v * v, 0.0)) / cloud_field_voxel_m(), v / hz));
+    let s_far = cloud_field_ambient_sample(p + ray_dir * eps, cell);
+    let s_near = cloud_field_ambient_sample(p - ray_dir * eps, cell);
+    let u_far = select(u, s_far.rgb / max(s_far.a, 1e-6), s_far.a > 0.0);
+    let u_near = select(u, s_near.rgb / max(s_near.a, 1e-6), s_near.a > 0.0);
+    let g = CLOUD_MIE_MEAN_COS;
+    let sigma_p = (1.0 - g * g) * max(c.a, 1e-6);
+    let du = (u_far - u_near) / (2.0 * eps);
+    let r = abs(du) / (sigma_p * max(u, vec3(1e-9)));
+    let r_safe = max(r, vec3(1e-2));
+    let lambda = select((1.0 / tanh(r_safe) - 1.0 / r_safe) / r_safe, vec3(1.0 / 3.0) - r * r / 45.0, r < vec3(1e-2));
+    return vec4(max(u + 3.0 * g * lambda / sigma_p * du, vec3(0.0)) / view.exposure, 1.0);
 }
 
 /// Diffuse (multiply scattered) sunlight in a conservative cloud slab lit from above at cosine
@@ -1378,6 +1428,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     ground_rad = atmosphere.ground_albedo * (e_sun / PI + sky_irr);
                 }
                 var ambient = cloud_ambient_term(sky_irr, ground_rad, esc_col.y, esc_col.z);
+                // The cloud field's diffusion solve where it has a value (CLOUD_SKY_SH_BOUNDARY):
+                // there the sky and ground light enter once, through the solve's Marshak
+                // boundary (cloud_field.wesl), and the slab term above stands in only beyond it.
+                @if(CLOUD_SKY_SH_BOUNDARY) {
+                    let amb_field = cloud_field_ambient_toward(p, ray_dir);
+                    if (amb_field.a > 0.0) {
+                        ambient = amb_field.rgb * (0.25 / PI);
+                    }
+                }
                 // Validation term toggles (CLOUD_TERMS=s1|sun|amb, see resources.rs).
                 @if(CLOUD_TERM_NO_AMB) { ambient = vec3(0.0); }
                 @if(CLOUD_TERM_NO_SUN) { direct_sum = vec3(0.0); }
