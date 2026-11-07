@@ -51,6 +51,7 @@ pub mod detail_noise;
 pub mod resources;
 pub mod weather;
 mod voxel_cloud;
+pub mod volumetrics;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::{embedded_asset, AssetId, Handle};
@@ -103,6 +104,7 @@ pub use cloud_profile::{
 };
 pub use weather::{CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues};
 pub use voxel_cloud::VoxelCloud;
+pub use volumetrics::VolumetricsSettings;
 pub use debug_view::{
     AtmosphereDebugPanel, AtmosphereDebugSource, AtmosphereDebugView, AtmosphereDebugViewPlugin,
     DebugChannels, DebugDecode, DebugMapping,
@@ -146,6 +148,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "bindings.wesl");
         load_shader_library!(app, "shadows.wesl");
         load_shader_library!(app, "clouds.wesl");
+        load_shader_library!(app, "froxels.wesl");
 
         embedded_asset!(app, "transmittance_lut.wesl");
         embedded_asset!(app, "multiscattering_lut.wesl");
@@ -169,6 +172,7 @@ impl Plugin for AtmospherePlugin {
 
         app.add_plugins((
             ExtractComponentPlugin::<AtmosphereEnvironmentMap>::default(),
+            ExtractComponentPlugin::<VolumetricsSettings>::default(),
             SyncComponentPlugin::<AtmosphereSettings>::default(),
             UniformComponentPlugin::<GpuAtmosphere>::default(),
             UniformComponentPlugin::<GpuAtmosphereSettings>::default(),
