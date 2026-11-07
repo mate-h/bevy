@@ -11,6 +11,10 @@ use bevy_transform::components::Transform;
 /// (`shadow_maps_enabled: true`) to make volumetric fog interact with it.
 ///
 /// This allows the light to generate light shafts/god rays.
+///
+/// With the atmosphere's froxel volumetrics (`bevy_pbr::VolumetricsSettings`) the marker
+/// selects the point and spot lights that scatter in the grid; its directional lights (the
+/// atmosphere's suns) always scatter.
 #[derive(Clone, Copy, Component, Default, Debug, Reflect)]
 #[reflect(Component, Default, Debug, Clone)]
 pub struct VolumetricLight;
@@ -20,6 +24,12 @@ pub struct VolumetricLight;
 /// rays.
 ///
 /// Requires using WebGPU on Wasm builds.
+///
+/// A camera that also has the atmosphere's froxel volumetrics enabled
+/// (`bevy_pbr::VolumetricsSettings { enabled: true }`) skips the per-pixel
+/// volumetric fog pass: the froxel grid consumes the scene's [`FogVolume`]s and
+/// scatters the [`VolumetricLight`] point and spot lights instead, with the
+/// settings below (ambient, jitter, step count) unused.
 #[derive(Clone, Copy, Component, Debug, Reflect)]
 #[reflect(Component, Default, Debug, Clone)]
 pub struct VolumetricFog {

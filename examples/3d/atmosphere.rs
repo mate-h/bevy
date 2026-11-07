@@ -15,10 +15,16 @@
 //!   `ATMOSPHERE_VOXEL_ONLY=1` (no sky cumulus or cirrus: the voxel cloud alone),
 //!   `ATMOSPHERE_VOXEL_BOUNDS=0` (start with its box hidden, B toggles),
 //!   `ATMOSPHERE_LUT_MODE`.
-//! - Near-field froxel volumetrics (`VolumetricsSettings`, Phase 1): `ATMOSPHERE_FROXELS=1`
+//! - Near-field froxel volumetrics (`VolumetricsSettings`, Phase 2): `ATMOSPHERE_FROXELS=1`
 //!   enables the grid (8 px tiles x 64 slices to 128 m; the haze march then covers only the far
-//!   field), `ATMOSPHERE_FROXEL_DISTANCE=<m>` its range, `ATMOSPHERE_FROXEL_FOG=<1/m>` a height
-//!   fog extinction at the ground (`ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`, default 0.01).
+//!   field, and the camera's `VolumetricFog` per-pixel pass is skipped: the grid consumes the
+//!   `FogVolume`s), `ATMOSPHERE_FROXEL_DISTANCE=<m>` its range, `ATMOSPHERE_FROXEL_FOG=<1/m>` a
+//!   height fog extinction at the ground (`ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`, default 0.01).
+//!   `ATMOSPHERE_FROXEL_TEST_LIGHT=1|<lm>` spawns a shadow-casting `VolumetricLight` point light
+//!   (1e9 lm, or the given flux), a `FogVolume` box (sigma_t 0.02/m, a ~200 m visibility fog;
+//!   `ATMOSPHERE_FROXEL_TEST_FOG=<1/m>`) and occluders in front of the hero camera so local-light
+//!   shafts and shadowed fog are visible (works without the grid too, via the per-pixel
+//!   `VolumetricFog` pass).
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse),
 //!   `ATMOSPHERE_SUN_SWEEP=<deg/frame>,<first>,<last>` (turns the sun by a fixed angle per frame),
@@ -1579,11 +1585,65 @@ fn setup_terrain_scene(
         ));
     }
 
-    // // spawn the fog volume
-    // commands.spawn((
-    //     FogVolume::default(),
-    //     Transform::from_scale(Vec3::new(10.0, 1.0, 10.0)).with_translation(Vec3::Y * 0.5),
-    // ));
+    // `ATMOSPHERE_FROXEL_TEST_LIGHT=1`: a local-light / fog-volume test in front of the hero
+    // camera (at (-2.8, 1.8, 0) looking +x): a 12 x 4 x 12 m `FogVolume` box over the ground, a
+    // shadow-casting point light with `VolumetricLight` above it, and three occluders between
+    // the light and the fog so its shadow maps cut shafts into the fog.
+    if let Ok(test_light) = std::env::var("ATMOSPHERE_FROXEL_TEST_LIGHT") {
+        // Extinction 0.02/m (`ATMOSPHERE_FROXEL_TEST_FOG=<1/m>` overrides): Koschmieder's law
+        // (visibility V = 3.912 / sigma_t for a 2% contrast threshold) gives V = 196 m, a fog by
+        // the WMO definition (visibility below 1 km; RDR2 slide 31 uses g = 0.9 for low- and
+        // high-density fog, Bevy's default g is 0.5). `FogVolume` scales `absorption +
+        // scattering` (0.6 by default) by `density_factor`.
+        let fog_extinction = env_f32("ATMOSPHERE_FROXEL_TEST_FOG").unwrap_or(0.02);
+        let fog = FogVolume::default();
+        commands.spawn((
+            FogVolume {
+                density_factor: fog_extinction / (fog.absorption + fog.scattering),
+                ..fog
+            },
+            Transform::from_xyz(3.0, 2.0, 0.0).with_scale(Vec3::new(12.0, 4.0, 12.0)),
+        ));
+        // Luminous flux (lm; `ATMOSPHERE_FROXEL_TEST_LIGHT=<lm>` sets it, any other value the
+        // default 1e9): against the ~1e4 nit daylight sky at EV100 13, the fog's in-scatter
+        // sigma_s x p_HG x E ~ 0.01/m x 0.08/sr x E must reach ~1e4 nit, so E ~ 1e7 lux at the
+        // fog's top 3 m below the light: I = E d^2 ~ 1e8 cd, 4 pi I ~ 1e9 lm (about 100 suns;
+        // a physical lamp is only visible in fog at night).
+        let intensity = test_light.parse::<f32>().unwrap_or(1e9);
+        commands.spawn((
+            PointLight {
+                intensity,
+                range: 60.0,
+                shadow_maps_enabled: true,
+                ..default()
+            },
+            Transform::from_xyz(3.0, 5.0, 0.0),
+            VolumetricLight,
+        ));
+        let occluder = std_materials.add(StandardMaterial {
+            base_color: Color::srgb(0.6, 0.6, 0.6),
+            perceptual_roughness: 0.8,
+            // The example's default is deferred; the camera has no deferred prepass.
+            opaque_render_method: bevy::material::OpaqueRendererMethod::Forward,
+            ..default()
+        });
+        let slab = meshes.add(Cuboid::new(1.6, 0.2, 1.6));
+        for (i, position) in [
+            Vec3::new(3.0, 3.6, 0.0),
+            Vec3::new(1.4, 3.2, -1.6),
+            Vec3::new(4.6, 3.0, 1.4),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            commands.spawn((
+                Mesh3d(slab.clone()),
+                MeshMaterial3d(occluder.clone()),
+                Transform::from_translation(position)
+                    .with_rotation(Quat::from_rotation_y(0.4 * i as f32)),
+            ));
+        }
+    }
 
     // `ATMOSPHERE_MESH_PLANE=1`: a 40 km grey mesh plane over x < 0, 2 m above the ground, to
     // compare mesh (PBR) cloud shadows with the planet ground's across its edge at x = 0.

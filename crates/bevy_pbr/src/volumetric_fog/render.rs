@@ -47,7 +47,18 @@ use bevy_transform::components::GlobalTransform;
 use bevy_utils::prelude::default;
 use bitflags::bitflags;
 
-use crate::{MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, ViewKeyCache};
+use crate::{
+    MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, ViewKeyCache,
+    VolumetricsSettings,
+};
+
+/// Whether a view's fog is rendered by the atmosphere's froxel grid instead of this pass: the
+/// camera has [`VolumetricsSettings`] enabled (the grid voxelizes the view's `FogVolume`s and
+/// scatters its `VolumetricLight` point and spot lights; the per-pixel pass would draw the same
+/// volumes a second time).
+fn froxels_take_over(settings: Option<&VolumetricsSettings>) -> bool {
+    settings.is_some_and(|s| s.enabled)
+}
 
 use super::FogAssets;
 
@@ -606,7 +617,7 @@ pub fn prepare_volumetric_fog_pipelines(
     mut pipelines: ResMut<SpecializedRenderPipelines<VolumetricFogPipeline>>,
     volumetric_lighting_pipeline: Res<VolumetricFogPipeline>,
     fog_assets: Res<FogAssets>,
-    view_targets: Query<(Entity, &ExtractedView), With<VolumetricFog>>,
+    view_targets: Query<(Entity, &ExtractedView, Option<&VolumetricsSettings>), With<VolumetricFog>>,
     meshes: Res<RenderAssets<RenderMesh>>,
     view_key_cache: Res<ViewKeyCache>,
 ) {
@@ -615,7 +626,11 @@ pub fn prepare_volumetric_fog_pipelines(
         return;
     };
 
-    for (entity, view) in view_targets.iter() {
+    for (entity, view, volumetrics) in view_targets.iter() {
+        if froxels_take_over(volumetrics) {
+            commands.entity(entity).remove::<ViewVolumetricFogPipelines>();
+            continue;
+        }
         let Some(mesh_pipeline_key) = view_key_cache.get(&view.retained_view_entity) else {
             continue;
         };
@@ -652,7 +667,12 @@ pub fn prepare_volumetric_fog_pipelines(
 pub fn prepare_volumetric_fog_uniforms(
     mut commands: Commands,
     mut volumetric_lighting_uniform_buffer: ResMut<VolumetricFogUniformBuffer>,
-    view_targets: Query<(Entity, &ExtractedView, &VolumetricFog)>,
+    view_targets: Query<(
+        Entity,
+        &ExtractedView,
+        &VolumetricFog,
+        Option<&VolumetricsSettings>,
+    )>,
     fog_volumes: Query<(Entity, &FogVolume, &GlobalTransform)>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -672,7 +692,12 @@ pub fn prepare_volumetric_fog_uniforms(
         return;
     };
 
-    for (view_entity, extracted_view, volumetric_fog) in view_targets.iter() {
+    for (view_entity, extracted_view, volumetric_fog, volumetrics) in view_targets.iter() {
+        if froxels_take_over(volumetrics) {
+            // The froxel grid renders this view's fog volumes (`VolumetricsSettings`).
+            commands.entity(view_entity).remove::<ViewVolumetricFog>();
+            continue;
+        }
         let world_from_view = extracted_view.world_from_view.affine();
 
         let mut view_fog_volumes = vec![];

@@ -30,8 +30,19 @@ struct VolumetricsParams {
     fog_anisotropy: f32,
     enabled: u32,
     _pad: u32,
+    /// Last frame's view-projection and camera position (the shadow volume's reprojection).
+    prev_clip_from_world: mat4x4<f32>,
+    prev_world_position: vec3<f32>,
+    /// Whether the shadow history holds last frame's volume for this grid.
+    history_valid: u32,
+    /// Weight of the current frame in the shadow volume's EMA (FB15 slide 23: 5%).
+    shadow_temporal_alpha: f32,
+    _pad2: vec3<u32>,
 }
 @group(0) @binding(70) var<uniform> volumetrics: VolumetricsParams;
+
+/// Most `FogVolume`s injected per frame (`volumetrics.rs` `MAX_FOG_VOLUMES`; RDR2 slide 45).
+const MAX_FOG_VOLUMES: u32 = 32u;
 
 /// Integrated volume (in-scatter to the camera, pre-exposed, and transmittance), read by the apply.
 @if(VOLUMETRICS_APPLY)
