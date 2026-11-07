@@ -40,7 +40,13 @@ struct GpuCloudLayers {
     // Voxel cloud (mod.rs VoxelCloud): atmosphere space to its texture coordinates, and 1 when
     // one is rendered.
     voxel_uvw_from_atmosphere: mat4x4<f32>,
+    voxel_atmosphere_from_uvw: mat4x4<f32>,
+    // Box edges (m), and its lighting field (`voxel_cloud_field.wesl`): cells per axis, and the
+    // data mip that matches a cell.
+    voxel_box_size: vec3<f32>,
     voxel_enabled: u32,
+    voxel_field_dims: vec3<u32>,
+    voxel_field_lod: f32,
 }
 
 /// One thin (ice) layer (mod.rs GpuThinCloudLayer).
@@ -654,16 +660,48 @@ const VOXEL_DETAIL_TILE_M: f32 = 100.0;
 
 /// The voxel cloud's data at an atmosphere-space point: (dimensional profile, detail type, density
 /// scale, signed distance), all 0 outside its box or without a voxel cloud. The box is fixed in the
-/// world (the wind moves only its detail noise). Sampled at the top level: the data is ~8 m voxels.
-fn voxel_cloud_at(world_pos: vec3<f32>) -> vec4<f32> {
+/// world (the wind moves only its detail noise). The march samples the top level (the data is
+/// ~8 m voxels); the lighting field the level of its cells (`lod`).
+fn voxel_cloud_at(world_pos: vec3<f32>, lod: f32) -> vec4<f32> {
     if (cloud_layer.voxel_enabled == 0u) {
         return vec4(0.0);
     }
-    let uvw = (cloud_layer.voxel_uvw_from_atmosphere * vec4(world_pos, 1.0)).xyz;
+    let uvw = voxel_cloud_uvw(world_pos);
     if (any(uvw < vec3(0.0)) || any(uvw > vec3(1.0))) {
         return vec4(0.0);
     }
-    return textureSampleLevel(voxel_cloud_data, voxel_cloud_sampler, uvw, 0.0);
+    return textureSampleLevel(voxel_cloud_data, voxel_cloud_sampler, uvw, lod);
+}
+
+/// The voxel cloud's box coordinates of an atmosphere-space point ([0, 1]^3 inside).
+fn voxel_cloud_uvw(world_pos: vec3<f32>) -> vec3<f32> {
+    return (cloud_layer.voxel_uvw_from_atmosphere * vec4(world_pos, 1.0)).xyz;
+}
+
+/// Whether an atmosphere-space point is in the voxel cloud's box.
+fn voxel_cloud_box_contains(world_pos: vec3<f32>) -> bool {
+    let uvw = voxel_cloud_uvw(world_pos);
+    return cloud_layer.voxel_enabled != 0u && all(uvw >= vec3(0.0)) && all(uvw <= vec3(1.0));
+}
+
+/// The voxel cloud data's signed distance (m, negative inside) at a point in its box: Nubis
+/// Cubed's SDF channel (-256 m .. 4096 m as 0 .. 1, in the pack's 7.8125 m voxels), scaled with
+/// the box (a texel of the data spans voxel_box_size / texels). Less one 8-bit step of the
+/// encoding (4352 m / 255, ~17 m), so the distance stays a lower bound for empty-space skipping.
+fn voxel_cloud_distance(world_pos: vec3<f32>) -> f32 {
+    let a = textureSampleLevel(voxel_cloud_data, voxel_cloud_sampler, voxel_cloud_uvw(world_pos), 0.0).a;
+    let texels = vec3<f32>(textureDimensions(voxel_cloud_data));
+    let voxel_m = min(min(cloud_layer.voxel_box_size.x / texels.x, cloud_layer.voxel_box_size.y / texels.y),
+        cloud_layer.voxel_box_size.z / texels.z);
+    return (a * 4352.0 - 256.0 - 4352.0 / 255.0) * voxel_m / 7.8125;
+}
+
+/// Distance (m) from an atmosphere-space point outside the voxel cloud's box to the box (0 inside;
+/// a lower bound for a rotated box: the box's axes measured in its own frame).
+fn voxel_cloud_box_distance(world_pos: vec3<f32>) -> f32 {
+    let uvw = voxel_cloud_uvw(world_pos);
+    let outside = max(max(vec3(0.0) - uvw, uvw - vec3(1.0)), vec3(0.0)) * cloud_layer.voxel_box_size;
+    return length(outside);
 }
 
 /// Whether a box of `footprint` m around an atmosphere-space point can overlap the voxel cloud's
@@ -684,6 +722,12 @@ fn voxel_cloud_near(world_pos: vec3<f32>, footprint: f32) -> bool {
 }
 
 fn cloud_column_at(r: f32, world_pos: vec3<f32>) -> CloudColumn {
+    return cloud_column_at_lod(r, world_pos, 0.0);
+}
+
+/// `cloud_column_at` with the voxel cloud's data read at mip `voxel_lod` (the lighting field's
+/// cells, prefiltered).
+fn cloud_column_at_lod(r: f32, world_pos: vec3<f32>, voxel_lod: f32) -> CloudColumn {
     let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
     let height_in_layer = r - cloud_layer.cloud_layer_start;
     let h = clamp(height_in_layer / max(1.0, layer_thickness), 0.0, 1.0);
@@ -691,7 +735,7 @@ fn cloud_column_at(r: f32, world_pos: vec3<f32>) -> CloudColumn {
     // Inside the voxel cloud its data replaces the sky's weather and profile (Nubis Cubed: the
     // modeling data gives the dimensional profile directly; liquid water and droplets at the
     // layer's reference).
-    let voxel = voxel_cloud_at(world_pos);
+    let voxel = voxel_cloud_at(world_pos, voxel_lod);
     if (voxel.x > 0.0) {
         return CloudColumn(sample_pos, h, vec4(1.0, voxel.y, voxel.z, 1.0), vec2(voxel.x, 1.0), true);
     }

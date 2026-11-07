@@ -365,11 +365,16 @@ pub fn atmosphere_luts(
         });
         let pass_span = diagnostics.pass_span(&mut cloud_shadow_pass, "cloud_shadow_map");
         {
-            if let Some(cloud_shadow_map_pipeline) = cloud_shadow_map_pipeline {
-                if let (Some(cloud_layer_uniforms_offset), Some(cloud_shadow_map_bg)) = (
-                    cloud_layer_uniforms_offset.as_ref(),
-                    bind_groups.cloud_shadow_map.as_ref(),
-                ) {
+            if let (
+                Some(cloud_shadow_map_pipeline),
+                Some(cloud_layer_uniforms_offset),
+                Some(cloud_shadow_map_bg),
+            ) = (
+                cloud_shadow_map_pipeline,
+                cloud_layer_uniforms_offset.as_ref(),
+                bind_groups.cloud_shadow_map.as_ref(),
+            ) {
+                {
                     cloud_shadow_pass.set_pipeline(cloud_shadow_map_pipeline);
                     cloud_shadow_pass.set_bind_group(
                         0,
@@ -570,6 +575,85 @@ pub fn atmosphere_luts(
                 }
             }
         }
+    }
+
+    // The voxel cloud's lighting field (`voxel_cloud_field.wesl`), every frame while a voxel
+    // cloud is rendered: its extinction follows the detail noise's motion and the cloud's
+    // settings, the escape probability and the diffusion source follow the extinction and the
+    // sun. The diffusion solve is warm-started: 8 red-black SOR iterations per frame, 48 after
+    // the box, its grid or the textures changed (from the previous solution or zero).
+    if let (
+        Some(cloud_layer_uniforms_offset),
+        Some(layers),
+        Some(extinction_bg),
+        Some(solve_bg),
+        [Some(extinction), Some(escape), Some(source), Some(red), Some(black), Some(publish)],
+    ) = (
+        cloud_layer_uniforms_offset.as_ref(),
+        gpu_cloud_layers.filter(|l| l.voxel_enabled != 0),
+        bind_groups.voxel_field_extinction.as_ref(),
+        bind_groups.voxel_field_solve.as_ref(),
+        pipelines
+            .voxel_field
+            .map(|id| pipeline_cache.get_compute_pipeline(id)),
+    ) {
+        use core::hash::{BuildHasher, Hash, Hasher};
+        let mut hasher = bevy_platform::hash::FixedState::default().build_hasher();
+        layers
+            .voxel_uvw_from_atmosphere
+            .to_cols_array()
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        layers.voxel_field_dims.to_array().hash(&mut hasher);
+        textures.voxel_field_diff_u.texture.id().hash(&mut hasher);
+        let key = hasher.finish();
+        let iterations = if state.voxel_field_key == Some(key) { 8 } else { 48 };
+        state.voxel_field_key = Some(key);
+
+        let dims = layers.voxel_field_dims;
+        let g = (dims + UVec3::splat(3)) / 4;
+        let half_x = UVec3::new(g.x.div_ceil(2), g.y, g.z);
+        let mut pass = labelled_compute_pass!("voxel_cloud_field");
+        pass.set_bind_group(
+            0,
+            extinction_bg,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
+            ],
+        );
+        pass.set_pipeline(extinction);
+        pass.dispatch_workgroups(g.x, g.y, g.z);
+        drop(pass);
+        // A new pass: the extinction is written through storage and read as a texture next.
+        let mut pass = labelled_compute_pass!("voxel_cloud_field_solve");
+        pass.set_bind_group(
+            0,
+            solve_bg,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
+            ],
+        );
+        for (pipeline, n) in [(escape, g), (source, g)] {
+            pass.set_pipeline(pipeline);
+            pass.dispatch_workgroups(n.x, n.y, n.z);
+        }
+        for _ in 0..iterations {
+            for pipeline in [red, black] {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(half_x.x, half_x.y, half_x.z);
+            }
+        }
+        pass.set_pipeline(publish);
+        pass.dispatch_workgroups(g.x, g.y, g.z);
     }
 
     // Far empty-space grid (`cloud_field.wesl` far_grid): one slab per frame (the shader picks it
@@ -1136,6 +1220,9 @@ pub struct ViewLutState {
     field_texture: Option<bevy_render::render_resource::TextureId>,
     /// The far empty-space grid texture whose every slab has been built.
     far_grid_texture: Option<bevy_render::render_resource::TextureId>,
+    /// What the voxel cloud's diffusion solution was converged for (box, grid, textures): on a
+    /// change the solve takes more iterations.
+    voxel_field_key: Option<u64>,
 }
 
 impl PerViewLutState {

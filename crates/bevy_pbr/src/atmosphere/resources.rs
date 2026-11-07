@@ -200,6 +200,10 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_shadow_mips: BindGroupLayoutDescriptor,
     /// Diffusion solve of the cloud field (`cloud_field.wesl` diffusion_*, sor_*).
     pub cloud_field_diffusion: BindGroupLayoutDescriptor,
+    /// The voxel cloud's lighting field (`voxel_cloud_field.wesl`): the extinction pass (reads
+    /// the cloud density) and the other passes (read the extinction).
+    pub voxel_field_extinction: BindGroupLayoutDescriptor,
+    pub voxel_field_solve: BindGroupLayoutDescriptor,
 }
 
 #[derive(Resource)]
@@ -571,6 +575,10 @@ impl AtmosphereBindGroupLayouts {
                     ),
                     // Far empty-space grid (`cloud_field.wesl` far_grid).
                     (61, texture_3d(TextureSampleType::Uint)),
+                    // The voxel cloud's escape probability and diffuse sunlight
+                    // (`voxel_cloud_field.wesl`).
+                    (72, texture_3d(TextureSampleType::Float { filterable: true })),
+                    (73, texture_3d(TextureSampleType::Float { filterable: true })),
                 )),
             )
         };
@@ -788,6 +796,76 @@ impl AtmosphereBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                         uniform_buffer_sized(false, None),
+                    ),
+                ),
+            ),
+            voxel_field_extinction: BindGroupLayoutDescriptor::new(
+                "voxel_field_extinction_bind_group_layout",
+                &DynamicBindGroupLayoutEntries::new_with_indices(
+                    ShaderStages::COMPUTE,
+                    (
+                        (0, uniform_buffer::<GpuAtmosphere>(true)),
+                        (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                        (2, uniform_buffer::<AtmosphereTransform>(true)),
+                        (3, uniform_buffer::<ViewUniform>(true)),
+                        (4, uniform_buffer::<GpuLights>(true)),
+                        (
+                            66,
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
+                        ),
+                    ),
+                )
+                .extend_with_indices(cloud_layout_entries()),
+            ),
+            voxel_field_solve: BindGroupLayoutDescriptor::new(
+                "voxel_field_solve_bind_group_layout",
+                &BindGroupLayoutEntries::with_indices(
+                    ShaderStages::COMPUTE,
+                    (
+                        (0, uniform_buffer::<GpuAtmosphere>(true)),
+                        (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                        (3, uniform_buffer::<ViewUniform>(true)),
+                        (4, uniform_buffer::<GpuLights>(true)),
+                        (20, uniform_buffer::<GpuCloudLayers>(true)),
+                        (
+                            23,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            67,
+                            texture_3d(TextureSampleType::Float { filterable: false }),
+                        ),
+                        (
+                            68,
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
+                        ),
+                        (
+                            69,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                        (
+                            70,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                        (
+                            71,
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
+                        ),
                     ),
                 ),
             ),
@@ -1190,6 +1268,9 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_shadow_mips: CachedComputePipelineId,
     /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
     pub cloud_field_diffusion: [CachedComputePipelineId; 8],
+    /// The voxel cloud's lighting field: extinction, escape, diffusion source, red and black SOR
+    /// sweeps, publish (`voxel_cloud_field.wesl`).
+    pub voxel_field: [CachedComputePipelineId; 6],
 }
 
 impl FromWorld for AtmosphereLutPipelines {
@@ -1429,6 +1510,29 @@ impl FromWorld for AtmosphereLutPipelines {
                     layout: vec![layouts.cloud_field_diffusion.clone()],
                     shader: load_embedded_asset!(world, "cloud_field.wesl"),
                     shader_defs: [atm_dbg_defs(), vec!["CLOUDS_ENABLED".into()]].concat(),
+                    entry_point: Some(entry.into()),
+                    ..default()
+                })
+            }),
+            voxel_field: [
+                "extinction",
+                "escape",
+                "diffusion_source",
+                "sor_red",
+                "sor_black",
+                "diffusion_publish",
+            ]
+            .map(|entry| {
+                let layout = if entry == "extinction" {
+                    &layouts.voxel_field_extinction
+                } else {
+                    &layouts.voxel_field_solve
+                };
+                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some(format!("voxel_field_{entry}_pipeline").into()),
+                    layout: vec![layout.clone()],
+                    shader: load_embedded_asset!(world, "voxel_cloud_field.wesl"),
+                    shader_defs: vec!["CLOUDS_ENABLED".into()],
                     entry_point: Some(entry.into()),
                     ..default()
                 })
@@ -1680,6 +1784,14 @@ pub struct AtmosphereTextures {
     pub cloud_field_diff_tmp: CachedTexture,
     /// The diffusion solve's build cell and pending shift (4 x 1 x 1).
     pub cloud_field_diff_state: CachedTexture,
+    /// The voxel cloud's lighting field (`voxel_cloud_field.wesl`), up to
+    /// `VOXEL_FIELD_MAX`^3 cells: extinction, escape probability (filterable), diffusion source
+    /// and solution (R32Float), and the published solution (filterable).
+    pub voxel_field_ext: CachedTexture,
+    pub voxel_field_esc: CachedTexture,
+    pub voxel_field_diff_src: CachedTexture,
+    pub voxel_field_diff_u: CachedTexture,
+    pub voxel_field_diff: CachedTexture,
 }
 
 pub(super) fn prepare_atmosphere_textures(
@@ -1942,6 +2054,33 @@ pub(super) fn prepare_atmosphere_textures(
                 depth_or_array_layers: 1,
             },
         );
+        let mut voxel_field = |label: &'static str, format: TextureFormat, sampled: bool| {
+            let n = super::voxel_cloud::VOXEL_FIELD_MAX;
+            textures.get(TextureDescriptor {
+                label: Some(label),
+                size: cloud_extent(Extent3d {
+                    width: n,
+                    height: n,
+                    depth_or_array_layers: n,
+                }),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                format,
+                usage: if sampled {
+                    TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING
+                } else {
+                    TextureUsages::STORAGE_BINDING
+                },
+                view_formats: &[],
+            })
+        };
+        let voxel_field_ext = voxel_field("voxel_field_ext", TextureFormat::Rgba16Float, true);
+        let voxel_field_esc = voxel_field("voxel_field_esc", TextureFormat::Rgba16Float, true);
+        let voxel_field_diff_src =
+            voxel_field("voxel_field_diff_src", TextureFormat::R32Float, false);
+        let voxel_field_diff_u = voxel_field("voxel_field_diff_u", TextureFormat::R32Float, false);
+        let voxel_field_diff = voxel_field("voxel_field_diff", TextureFormat::Rgba16Float, true);
         let mut window = |label: &'static str| {
             textures.get(TextureDescriptor {
                 label: Some(label),
@@ -2141,6 +2280,11 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_diff,
                 cloud_field_diff_tmp,
                 cloud_field_diff_state,
+                voxel_field_ext,
+                voxel_field_esc,
+                voxel_field_diff_src,
+                voxel_field_diff_u,
+                voxel_field_diff,
             }
         });
         seen.insert(view.retained_view_entity, textures);
@@ -2356,6 +2500,9 @@ pub(crate) struct AtmosphereBindGroups {
     pub cloud_field_edt: Option<[BindGroup; 4]>,
     /// Diffusion solve (`cloud_field.wesl`), dynamic offsets: atmosphere, lights.
     pub cloud_field_diffusion: Option<BindGroup>,
+    /// The voxel cloud's lighting field (`voxel_cloud_field.wesl`): extinction and the rest.
+    pub voxel_field_extinction: Option<BindGroup>,
+    pub voxel_field_solve: Option<BindGroup>,
 }
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
@@ -3120,6 +3267,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (49, &fbm_noise_texture.cirrus.default_view),
                         (59, &textures.cloud_field_diff.default_view),
                         (61, &textures.cloud_far_grid.default_view),
+                        (72, &textures.voxel_field_esc.default_view),
+                        (73, &textures.voxel_field_diff.default_view),
                     )),
                 )
             });
@@ -3210,6 +3359,53 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     )),
                 )
             });
+
+        let voxel_field_extinction = cloud_layer_binding.as_ref().map(|cloud_layer_binding| {
+            render_device.create_bind_group(
+                "voxel_field_extinction_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.voxel_field_extinction),
+                &BindGroupEntries::with_indices((
+                    (0, atmosphere_binding.clone()),
+                    (1, settings_binding.clone()),
+                    (2, transforms_binding.clone()),
+                    (3, view_binding.clone()),
+                    (4, lights_binding.clone()),
+                    (20, cloud_layer_binding.clone()),
+                    (21, &fbm_noise_texture.texture.default_view),
+                    (22, &**cloud_noise_sampler),
+                    (23, &textures.cloud_shadow_map.default_view),
+                    (24, &perlin_worley_noise_texture.texture.default_view),
+                    (25, stbn_view.as_ref()),
+                    (33, &detail_noise_texture.texture.default_view),
+                    (34, &fbm_noise_texture.profile.default_view),
+                    (35, &fbm_noise_texture.scheme_noise.default_view),
+                    (36, &textures.weather_window_art.default_view),
+                    (37, &textures.weather_window_physical.default_view),
+                    (64, voxel_view),
+                    (65, &**voxel_sampler),
+                    (66, &textures.voxel_field_ext.default_view),
+                )),
+            )
+        });
+        let voxel_field_solve = cloud_layer_binding.as_ref().map(|cloud_layer_binding| {
+            render_device.create_bind_group(
+                "voxel_field_solve_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.voxel_field_solve),
+                &BindGroupEntries::with_indices((
+                    (0, atmosphere_binding.clone()),
+                    (1, settings_binding.clone()),
+                    (3, view_binding.clone()),
+                    (4, lights_binding.clone()),
+                    (20, cloud_layer_binding.clone()),
+                    (23, &textures.cloud_shadow_map.default_view),
+                    (67, &textures.voxel_field_ext.default_view),
+                    (68, &textures.voxel_field_esc.default_view),
+                    (69, &textures.voxel_field_diff_src.default_view),
+                    (70, &textures.voxel_field_diff_u.default_view),
+                    (71, &textures.voxel_field_diff.default_view),
+                )),
+            )
+        });
 
         let sky_view_lut_clouds = cloud_layer_binding
             .as_ref()
@@ -3309,6 +3505,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
             clouds_reconstruct,
             cloud_field_edt,
             cloud_field_diffusion,
+            voxel_field_extinction,
+            voxel_field_solve,
         });
     }
 
@@ -3416,6 +3614,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   visibility from 16 point taps / 512 taps (reference) / no cloud shadow (ablation).
 /// - `ATM_DBG_HAZE_AP_LUT`: haze in front of clouds from the aerial-perspective LUT instead of the
 ///   cloud ray's own march.
+/// - `ATM_DBG_NO_VOXEL_FIELD`: the sky's cloud field also inside the voxel cloud's box, instead of
+///   the voxel cloud's own lighting field (`voxel_cloud_field.wesl`).
 /// - `ATM_DBG_AP_BAL`: ballistic (non-similarity) aerial-perspective transmittance.
 /// - `ATM_DBG_TAP_ONE`: no aerial-perspective transmittance on cloud luminance (term split).
 /// - `ATM_DBG_NO_FAR_SHADOW`: drop the cloud shadow map beyond the local light march.

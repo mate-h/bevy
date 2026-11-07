@@ -4,7 +4,7 @@
 use bevy_asset::{AssetId, Handle};
 use bevy_ecs::{component::Component, reflect::ReflectComponent, resource::Resource};
 use bevy_image::Image;
-use bevy_math::{Mat4, Vec3};
+use bevy_math::{Mat4, UVec3, Vec3};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_transform::components::{GlobalTransform, Transform};
 
@@ -100,7 +100,9 @@ pub(crate) fn voxel_cloud_view<'a>(
     fallback: &'a bevy_render::texture::FallbackImage,
 ) -> &'a bevy_render::render_resource::TextureView {
     match extracted.image.and_then(|id| images.get(id)) {
-        Some(gpu) if gpu.texture.dimension() == bevy_render::render_resource::TextureDimension::D3 => {
+        Some(gpu)
+            if gpu.texture.dimension() == bevy_render::render_resource::TextureDimension::D3 =>
+        {
             &gpu.texture_view
         }
         Some(_) => {
@@ -109,4 +111,17 @@ pub(crate) fn voxel_cloud_view<'a>(
         }
         None => &fallback.d3.texture_view,
     }
+}
+
+/// Largest edge of the voxel cloud's lighting field in cells (`voxel_cloud_field.wesl`); its
+/// textures are allocated at this size.
+pub(crate) const VOXEL_FIELD_MAX: u32 = 64;
+
+/// Cells of the voxel cloud's lighting field for a texture of `texels`: one cell per 2 x 2 x 2
+/// texels (the Nubis pack's ~15.6 m), at most [`VOXEL_FIELD_MAX`] per axis; and the data mip whose
+/// texels match a cell along the coarsest axis (the field's extinction reads it, prefiltered).
+pub(crate) fn field_dims(texels: UVec3) -> (UVec3, f32) {
+    let dims = texels.map(|n| n.div_ceil(2).clamp(1, VOXEL_FIELD_MAX));
+    let ratio = (texels.as_vec3() / dims.as_vec3()).max_element();
+    (dims, bevy_math::ops::log2(ratio.max(1.0)))
 }

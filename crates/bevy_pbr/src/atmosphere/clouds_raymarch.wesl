@@ -30,6 +30,7 @@ import package::atmosphere::{
         cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
         cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
         CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M, cloud_shadow_lod, CLOUD_SHADOW_WARP_A,
+        voxel_cloud_uvw, voxel_cloud_box_contains, voxel_cloud_distance, voxel_cloud_box_distance,
     },
 };
 
@@ -51,6 +52,43 @@ const CLOUD_SDF_SKIP_MARGIN_VOXELS: f32 = 2.5;
 // Diffuse sunlight of the cloud field per unit sun irradiance, U = 4 pi J_diff / E (r), and its
 // build cell (gb) (cloud_field.wesl diffusion solve).
 @group(0) @binding(59) var cloud_field_diff: texture_3d<f32>;
+// The voxel cloud's lighting field (`voxel_cloud_field.wesl`) over its box: escape probability
+// and vertical optical depths (rgb), and the diffuse sunlight U (r) with the extinction (a). The
+// textures hold up to their size in cells; the field uses `cloud_layer.voxel_field_dims`.
+@group(0) @binding(72) var voxel_field_esc: texture_3d<f32>;
+@group(0) @binding(73) var voxel_field_diff: texture_3d<f32>;
+
+/// Whether the march reads the voxel cloud's lighting field at p (in its box;
+/// `ATM_DBG_NO_VOXEL_FIELD` keeps the sky field there, for comparison).
+fn voxel_field_covers(p: vec3<f32>) -> bool {
+    @if(ATM_DBG_NO_VOXEL_FIELD) { return false; }
+    return voxel_cloud_box_contains(p);
+}
+
+/// Texture coordinates in the voxel field's textures of a point in the box (clamped to the
+/// outer cells' centres: the textures are larger than the field).
+fn voxel_field_tex_uvw(p: vec3<f32>) -> vec3<f32> {
+    let dims = vec3<f32>(cloud_layer.voxel_field_dims);
+    let cells = clamp(voxel_cloud_uvw(p) * dims, vec3(0.5), dims - 0.5);
+    return cells / vec3<f32>(textureDimensions(voxel_field_esc));
+}
+
+/// `cloud_field_diffuse_toward` from the voxel field: U and its first-moment (diffuse flux) term
+/// along the ray, the derivative over half a cell.
+fn voxel_field_diffuse_toward(p: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
+    let c = textureSampleLevel(voxel_field_diff, atmosphere_lut_sampler, voxel_field_tex_uvw(p), 0.0);
+    let cell = cloud_layer.voxel_box_size / vec3<f32>(cloud_layer.voxel_field_dims);
+    let eps = 0.5 * min(min(cell.x, cell.y), cell.z);
+    let u_far = textureSampleLevel(voxel_field_diff, atmosphere_lut_sampler, voxel_field_tex_uvw(p + ray_dir * eps), 0.0).r;
+    let u_near = textureSampleLevel(voxel_field_diff, atmosphere_lut_sampler, voxel_field_tex_uvw(p - ray_dir * eps), 0.0).r;
+    let g = CLOUD_MIE_MEAN_COS;
+    let sigma_p = (1.0 - g * g) * max(c.a, 1e-6);
+    let du = (u_far - u_near) / (2.0 * eps);
+    let r = abs(du) / (sigma_p * max(c.r, 1e-9));
+    let r_safe = max(r, 1e-2);
+    let lambda = select((1.0 / tanh(r_safe) - 1.0 / r_safe) / r_safe, 1.0 / 3.0 - r * r / 45.0, r < 1e-2);
+    return vec2(max(c.r + 3.0 * g * lambda / sigma_p * du, 0.0), c.r);
+}
 // Far empty-space grid (cloud_field.wesl `far_grid`): r = 1 where the cell is clear, g its tag.
 @group(0) @binding(61) var cloud_far_grid: texture_3d<u32>;
 
@@ -82,6 +120,9 @@ fn cloud_far_leap(p: vec3<f32>, r_p: f32, ray_dir: vec3<f32>) -> f32 {
 
 /// The cloud field's diffusion solution at p (0 outside the grid).
 fn cloud_field_diffuse(p: vec3<f32>) -> f32 {
+    if (voxel_field_covers(p)) {
+        return textureSampleLevel(voxel_field_diff, atmosphere_lut_sampler, voxel_field_tex_uvw(p), 0.0).r;
+    }
     return cloud_field_diffuse_sample(p, textureLoad(cloud_field_diff, vec3(0), 0).gb).r;
 }
 
@@ -108,6 +149,10 @@ fn cloud_field_diffuse_sample(p: vec3<f32>, cell: vec2<f32>) -> vec4<f32> {
 /// forward-peak beam term. IPRT C2 cube vs MYSTIC on this grid, all 9 views
 /// (.clouds-handoff/validation/iprt_c2/c2_grid.py): 0.79 -> 0.89, 0.79-1.06 per view.
 fn cloud_field_diffuse_toward(p: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
+    // In the voxel cloud's box its own field (the sky field's cells are coarser than the cloud).
+    if (voxel_field_covers(p)) {
+        return voxel_field_diffuse_toward(p, ray_dir);
+    }
     let cell = textureLoad(cloud_field_diff, vec3(0), 0).gb;
     let c = cloud_field_diffuse_sample(p, cell);
     let up = normalize(p);
@@ -142,6 +187,9 @@ fn exp_integral_e2(x: f32) -> f32 {
 /// (P_esc, tau_up, tau_down). Outside the grid: the plane-parallel P_esc from the coarse march
 /// toward the layer top and bottom (cloud_far_transmittance).
 fn cloud_escape_and_column(p: vec3<f32>) -> vec3<f32> {
+    if (voxel_field_covers(p)) {
+        return textureSampleLevel(voxel_field_esc, atmosphere_lut_sampler, voxel_field_tex_uvw(p), 0.0).rgb;
+    }
     let uvw = cloud_field_uvw(p, textureLoad(cloud_field_sdf, vec3(0), 0).ba);
     var outside = any(uvw.xy < vec2(0.0)) || any(uvw.xy > vec2(1.0));
     @if(ATM_DBG_ESC_FALLBACK) { outside = true; }
@@ -1190,6 +1238,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     if (d_sdf < CLOUD_DIST_UNKNOWN) {
                         skip = max(dist_step,
                             d_sdf - CLOUD_SDF_SKIP_MARGIN_VOXELS * cloud_field_voxel_m());
+                    }
+                    // The voxel cloud: no further than its box, and inside the box than its
+                    // data's own distance (the sky SDF's cells are coarser than the cloud).
+                    if (cloud_layer.voxel_enabled != 0u) {
+                        let d_box = voxel_cloud_box_distance(p);
+                        let d_voxel = select(d_box, voxel_cloud_distance(p), d_box <= 0.0);
+                        skip = min(skip, max(dist_step, d_voxel));
                     }
                 }
                 t += skip;
