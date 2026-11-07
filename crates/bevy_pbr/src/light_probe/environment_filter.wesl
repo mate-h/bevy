@@ -23,7 +23,9 @@ const TAPS_PER_AXIS_DIV_4: u32 = 2u;
 @group(0) @binding(2) var output_texture: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(3) var<uniform> constants: FilteringConstants;
 @group(0) @binding(4) var<storage, read> filter_table: array<vec4f, 210>;
-// The probe's spherical harmonics, written by `project_irradiance_sh`.
+// The probe's spherical harmonics: written by `project_irradiance_sh`, read by
+// `generate_irradiance_map`.
+@group(0) @binding(6) var<storage, read> environment_sh: EnvironmentMapSh;
 @group(0) @binding(7) var<storage, read_write> environment_sh_out: EnvironmentMapSh;
 
 /// Sample an environment map with a specific LOD
@@ -129,8 +131,6 @@ const IRRADIANCE_MAX_EXCESS: u32 = ENVIRONMENT_SH_MAX_EXCESS;
 
 var<workgroup> sh_partial_sums: array<vec3f, 64>;
 var<workgroup> excess_count: atomic<u32>;
-var<workgroup> excess_directions: array<vec3f, IRRADIANCE_MAX_EXCESS>;
-var<workgroup> excess_radiances: array<vec3f, IRRADIANCE_MAX_EXCESS>;
 
 /// The solid angle of the part of a cube face between its center and the
 /// position `(x, y)` on it, in [-1, 1].
@@ -157,8 +157,8 @@ fn workgroup_sum(local_index: u32, value: vec3f) -> vec3f {
 /// Hanrahan 2001), convolved with the clamped cosine and divided by π, so that
 /// the irradiance over π at the normal `n` is their dot product with the basis
 /// at `n`. The excess of texels brighter than `IRRADIANCE_EXCESS_SCALE` times
-/// the mean is left out and stored in `excess_directions` and
-/// `excess_radiances`, as radiance times solid angle.
+/// the mean is left out and stored in the excess lights of `environment_sh_out`,
+/// as radiance times solid angle. Needs a workgroup of 64 invocations.
 fn project_irradiance(local_index: u32) -> array<vec3f, 9> {
     let base_size = textureDimensions(input_texture).x;
     let size = min(IRRADIANCE_SOURCE_SIZE, base_size);
@@ -197,8 +197,8 @@ fn project_irradiance(local_index: u32) -> array<vec3f, 9> {
             let slot = atomicAdd(&excess_count, 1u);
             if (slot < IRRADIANCE_MAX_EXCESS) {
                 let clamped = radiance * (max_luminance / luminance);
-                excess_directions[slot] = direction;
-                excess_radiances[slot] = radiance - clamped;
+                environment_sh_out.excess_directions[slot] = vec4f(direction, 0.0);
+                environment_sh_out.excess_radiances[slot] = vec4f(radiance - clamped, 0.0);
                 radiance = clamped;
             }
         }
@@ -225,30 +225,20 @@ fn project_irradiance(local_index: u32) -> array<vec3f, 9> {
 @workgroup_size(64, 1, 1)
 fn project_irradiance_sh(@builtin(local_invocation_index) local_index: u32) {
     let coefficients = project_irradiance(local_index);
-    let excess_texel_count = min(atomicLoad(&excess_count), IRRADIANCE_MAX_EXCESS);
 
     if (local_index < 9u) {
         environment_sh_out.coefficients[local_index] = vec4f(coefficients[local_index], 0.0);
     }
     if (local_index == 0u) {
-        environment_sh_out.excess_count = excess_texel_count;
-    }
-    for (var i = local_index; i < excess_texel_count; i += 64u) {
-        environment_sh_out.excess_directions[i] = vec4f(excess_directions[i], 0.0);
-        environment_sh_out.excess_radiances[i] = vec4f(excess_radiances[i], 0.0);
+        environment_sh_out.excess_count = min(atomicLoad(&excess_count), IRRADIANCE_MAX_EXCESS);
     }
 }
 
-/// Computes the diffuse map from a projection of the source onto spherical
-/// harmonics, which every workgroup computes in full before writing its texels.
+/// Computes the diffuse map by evaluating the spherical harmonics and excess
+/// lights that `project_irradiance_sh` wrote for this probe.
 @compute
 @workgroup_size(8, 8, 1)
-fn generate_irradiance_map(
-    @builtin(global_invocation_id) global_id: vec3u,
-    @builtin(local_invocation_index) local_index: u32,
-) {
-    let coefficients = project_irradiance(local_index);
-
+fn generate_irradiance_map(@builtin(global_invocation_id) global_id: vec3u) {
     let size = textureDimensions(output_texture).xy;
     let coords = global_id.xy;
     let face = global_id.z + constants.face_offset;
@@ -260,14 +250,15 @@ fn generate_irradiance_map(
     let basis = sh9_basis(normal);
     var irradiance = vec3f(0.0);
     for (var i = 0u; i < 9u; i++) {
-        irradiance += coefficients[i] * basis[i];
+        irradiance += environment_sh.coefficients[i].rgb * basis[i];
     }
     // Two bands can ring below zero around what the clamp leaves.
     irradiance = max(irradiance, vec3f(0.0));
 
-    let excess_texel_count = min(atomicLoad(&excess_count), IRRADIANCE_MAX_EXCESS);
+    let excess_texel_count = min(environment_sh.excess_count, IRRADIANCE_MAX_EXCESS);
     for (var i = 0u; i < excess_texel_count; i++) {
-        irradiance += excess_radiances[i] * max(dot(normal, excess_directions[i]), 0.0) / PI;
+        irradiance += environment_sh.excess_radiances[i].rgb
+            * max(dot(normal, environment_sh.excess_directions[i].xyz), 0.0) / PI;
     }
 
     textureStore(output_texture, coords, face, vec4f(irradiance, 1.0));

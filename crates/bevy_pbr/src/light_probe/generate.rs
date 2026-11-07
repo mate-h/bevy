@@ -271,6 +271,8 @@ pub fn initialize_generated_environment_map_resources(
                     ),
                 ),
                 (3, uniform_buffer::<FilteringConstants>(false)), // Uniforms (face offset)
+                // The probe's spherical harmonics
+                (6, storage_buffer_read_only::<EnvironmentMapSh>(false)),
             ),
         ),
     );
@@ -730,6 +732,7 @@ pub fn prepare_generated_environment_map_bind_groups(
                 (0, &textures.environment_map.default_view),
                 (2, &irradiance_map),
                 (3, &irradiance_constants_buffer),
+                (6, sh_buffer.buffer.as_entire_binding()),
             )),
         );
 
