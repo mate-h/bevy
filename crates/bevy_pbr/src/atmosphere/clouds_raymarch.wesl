@@ -29,6 +29,7 @@ import package::atmosphere::{
         cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
         cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
         CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M, cloud_shadow_lod, CLOUD_SHADOW_WARP_A,
+        voxel_cloud_sdf, VOXEL_SDF_UNKNOWN, NVDF_SDF_QUANTUM_M,
     },
 };
 
@@ -1221,6 +1222,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     if (d_sdf < CLOUD_DIST_UNKNOWN) {
                         skip = max(dist_step,
                             d_sdf - CLOUD_SDF_SKIP_MARGIN_VOXELS * cloud_field_voxel_m());
+                    }
+                    // Inside the voxel cloud's box the coarse field marks every cell occupied
+                    // (`cloud_possible_footprint`), so its SDF makes no leap there: the NVDF's own
+                    // signed distance does (Nubis Cubed voxel ray-marcher, Advances 2023 slides
+                    // l.832-858: `step_size = max(sdf_cloud_distance, adaptive_step_size) +
+                    // jitter_offset`, with the density sampled only where `sdf_cloud_distance <
+                    // 0`). The leap is the larger of the two fields' (both bound the distance to
+                    // a cloud: the coarse one to any cloud, the NVDF's to this one inside its
+                    // box, capped by the box's side). Surface band: the NVDF stores the distance
+                    // in steps of NVDF_SDF_QUANTUM_M (17.07 m, 8-bit codes rounded to the step),
+                    // so the cloud (profile > 0) extends up to one step past the decoded 0 (the
+                    // pack's parkouring cloud: every occupied voxel has a code <= 16, i.e. a
+                    // distance <= one step); the leap stops one step short of the surface and the
+                    // band [0, one step) is marched at the fine spacing, so the coarse predicate
+                    // meets the first occupied voxel as without the leap.
+                    let d_nvdf = voxel_cloud_sdf(p);
+                    if (d_nvdf < VOXEL_SDF_UNKNOWN) {
+                        skip = max(skip, max(dist_step, d_nvdf - NVDF_SDF_QUANTUM_M));
                     }
                 }
                 t += skip;
