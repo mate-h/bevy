@@ -41,6 +41,9 @@ struct VolumetricsParams {
 }
 @group(0) @binding(70) var<uniform> volumetrics: VolumetricsParams;
 
+/// Most `FogVolume`s injected per frame (`volumetrics.rs` `MAX_FOG_VOLUMES`; RDR2 slide 45).
+const MAX_FOG_VOLUMES: u32 = 32u;
+
 /// Integrated volume (in-scatter to the camera, pre-exposed, and transmittance), read by the apply.
 @if(VOLUMETRICS_APPLY)
 @group(0) @binding(76) var volumetrics_integrated: texture_3d<f32>;

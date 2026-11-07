@@ -187,7 +187,16 @@ impl Plugin for AtmospherePlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_resource::<weather::ExtractedCloudInfluences>()
-                .add_systems(ExtractSchedule, (extract_atmosphere, weather::extract_cloud_influences));
+                .init_resource::<volumetrics::ExtractedFogVolumes>()
+                .init_resource::<volumetrics::FogVolumesUniform>()
+                .add_systems(
+                    ExtractSchedule,
+                    (
+                        extract_atmosphere,
+                        weather::extract_cloud_influences,
+                        volumetrics::extract_fog_volumes,
+                    ),
+                );
         }
     }
 
