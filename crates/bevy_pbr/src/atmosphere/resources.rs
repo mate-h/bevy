@@ -3428,10 +3428,6 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_ESC_FALLBACK`: the out-of-field escape/column estimate everywhere (validation).
 /// - `ATM_DBG_ESC_FIELD_ONLY`: the cloud field's escape probability only (no local estimate).
 /// - `ATM_DBG_ESC_ZERO`: zero escape probability (the infinitely thick multiple-scattering limit).
-/// - `ATM_DBG_SHADOW_JITTER`: rotate the cloud shadow map's per-step sample phases per texel and
-///   frame instead of the fixed phases, and accumulate optical depth (audit 1 validation: after
-///   convergence half the mean error and 40 % of the edge error of the fixed phases, with
-///   frame-to-frame noise of 0.02 in edge transmittance).
 /// - `ATM_DBG_HAZE_FAR_MARCH`: off the cloud shadow map, the atmosphere's in-scattering marches
 ///   the cloud layer toward the light instead of taking the map's mean transmittance.
 /// - `ATM_DBG_STEP_DIV2`, `ATM_DBG_STEP_DIV4`, `ATM_DBG_STEP_DIV16`: a 2x / 4x / 16x shorter

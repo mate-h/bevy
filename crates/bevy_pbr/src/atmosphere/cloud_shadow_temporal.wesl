@@ -371,17 +371,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let trust = cloud_shadow_history_trust(uv, light_turned_over(interleave * interleave));
             let alpha = 1.0 - (1.0 - temporal_params.temporal_alpha) * trust;
             filtered_data.g = prev.g + alpha * (curr_data.g - prev.g);
-            // The cumulus optical depth blends as transmittance (see `sample_history`): a linear
-            // blend of depths is darker than the blend of the transmittances (exp is convex), so
-            // a history that differs from the trace (after a reset, or blurred by reprojection
-            // under motion) darkened and dilated the shadows. With the fixed quadrature the trace
-            // is deterministic and either space converges to it; transmittance recovers faster
-            // from a reset (audit 1: 0.05 vs 0.11 mean error 300 frames after startup).
-            let vis = mix(exp(-max(prev.b, 0.0)), exp(-max(curr_data.b, 0.0)), alpha);
-            filtered_data.b = select(prev.b + alpha * (curr_data.b - prev.b), -log(vis), vis > 1e-30);
-            // ATM_DBG_SHADOW_JITTER: the traces are noisy, unbiased estimates of the optical depth,
-            // and only their depth average is unbiased (an average of transmittances is too bright).
-            @if(ATM_DBG_SHADOW_JITTER) { filtered_data.b = prev.b + alpha * (curr_data.b - prev.b); }
+            // The cumulus optical depth blends linearly: the traces are jittered per texel and
+            // frame (`cloud_shadow_map.wesl`), so each is a noisy, unbiased estimate of the optical
+            // depth, and only their depth average is unbiased. An average of transmittances is
+            // too bright (Jensen: E[exp(-X)] >= exp(-E[X])). The former transmittance-space
+            // blend was chosen for the fixed (deterministic) quadrature, which either space
+            // converged to; it recovered faster from a reset (audit 1: 0.05 vs 0.11 mean error
+            // 300 frames after startup) but is biased on jittered traces.
+            filtered_data.b = prev.b + alpha * (curr_data.b - prev.b);
             filtered_data.a = prev.a + alpha * (curr_data.a - prev.a);
             filtered_data.r = curr_data.r;
         }

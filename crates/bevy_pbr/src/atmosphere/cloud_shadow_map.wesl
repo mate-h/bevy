@@ -33,6 +33,9 @@ import package::atmosphere::functions::{ground_sky_irradiance_clouds_dirs, cloud
 @group(0) @binding(13) var out_cloud_shadow_map: texture_storage_2d<rgba16float, write>;
 
 const EPSILON_M: f32 = 1.0;
+// Fractional part of the golden ratio, (sqrt(5) - 1) / 2: step of the Kronecker sequence
+// fract(x + i * phi) used to stratify one blue-noise phase over the march steps.
+const GOLDEN_RATIO_FRAC: f32 = 0.618033988749895;
 
 // Simple deterministic hash utilities (no frame index required).
 // Used to jitter integration per shadow-map texel to mitigate banding.
@@ -248,24 +251,31 @@ fn main(@builtin(global_invocation_id) thread_id: vec3<u32>) {
     // Units: optical depth is unitless.
     const HIT_OPTICAL_DEPTH_THRESHOLD: f32 = 1e-3;
 
+    // Per-texel, per-frame phase of the stratified quadrature: spatiotemporal blue noise (STBN,
+    // Wolfe et al. 2022) indexed by the shadow-map texel and `frame % layers`, as the cloud view
+    // ray is (`clouds_raymarch.wesl`). A phase fixed over texels and frames (the previous
+    // `fract(i * phi)`) aliased every density feature thinner than dt identically in every
+    // texel and frame, so shadow iso-lines showed as bands that moved with the light, and the
+    // temporal pass (Bayer 1-of-16 slicing + history) had nothing to average; with the phase
+    // varying per texel and frame the per-trace error is noise, which that history averages
+    // (audit 1: after convergence half the mean error and 40 % of the edge error of the fixed
+    // phases). FB16 §5.5.2 jitters its progressive sun-shadow samples per frame the same way.
+    // Without the texture (feature `bluenoise_texture` off): a white-noise hash of texel and frame.
+    var phase: f32;
+    let stbn_dims = textureDimensions(stbn_texture);
+    if (all(stbn_dims > vec2(1u))) {
+        let stbn_layer = i32(view.frame_count % u32(textureNumLayers(stbn_texture)));
+        phase = textureLoad(stbn_texture, vec2<i32>(gid.xy) % vec2<i32>(stbn_dims), stbn_layer, 0).r;
+    } else {
+        phase = hash_2d_to_01(gid.xy, 0x1000u + view.frame_count);
+    }
     for (var i = 0u; i < n; i += 1u) {
-        // Jittered + stratified: one sample per stratum, with *per-step* jitter.
-        // Per-step jitter reduces “streaky” structure compared to using a single phase shift
-        // across all steps in a texel.
-        var j: f32;
-        let stbn_dims = textureDimensions(stbn_texture);
-        if (all(stbn_dims > vec2(1u))) {
-            let stbn_layers = textureNumLayers(stbn_texture);
-            let stbn_layer = i32(view.frame_count % u32(stbn_layers));
-            let stbn_noise = textureLoad(stbn_texture, vec2<i32>(gid.xy) % vec2<i32>(stbn_dims), stbn_layer, 0);
-            // j = fract(stbn_noise.r + f32(i) * 0.618033988749895);
-            j = fract(0.0 + f32(i) * 0.618033988749895);
-        } else {
-            j = hash_2d_to_01(gid.xy, 0x1000u + i);
-        }
-        // ATM_DBG_SHADOW_JITTER: rotate the phases by a per-texel, per-frame offset (audit 1
-        // validation of the fixed quadrature).
-        @if(ATM_DBG_SHADOW_JITTER) { j = fract(j + hash_2d_to_01(gid.xy, 0x2000u + view.frame_count)); }
+        // One sample per stratum at a per-step phase: the strata's phases follow the
+        // golden-ratio (Kronecker) sequence fract(phase + i * phi), the 1D additive recurrence of
+        // lowest discrepancy (phi is the irrational worst approximated by rationals, Hurwitz
+        // 1891), so the steps' sub-positions neither line up ("streaky" structure of a single
+        // phase shared by all steps) nor cluster.
+        let j = fract(phase + f32(i) * GOLDEN_RATIO_FRAC);
         let t = t_start + (f32(i) + j) * dt;
         let p = ray_origin + trace_dir * t;
         let r = length(p);
