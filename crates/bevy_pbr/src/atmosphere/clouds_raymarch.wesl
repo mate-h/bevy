@@ -11,7 +11,6 @@
 //   0 when the ray sees no cloud. `render_sky` applies aerial perspective once at this distance.
 
 import bevy_render::maths::{PI, ray_sphere_intersect};
-import package::render::utils::interleaved_gradient_noise;
 import package::atmosphere::{
     bindings::{atmosphere, settings, view, lights, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map, medium_density_lut},
     bruneton_functions::{ray_intersects_ground, sample_transmittance_lut_segment, sample_transmittance_lut_segment_tau_red, distance_to_top_atmosphere_boundary},
@@ -1478,8 +1477,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         if (depth > 0.0) {
             t_scene = ndc_to_camera_dist(vec3(uv_to_ndc(uv), depth));
         }
-        // Slice-depth jitter: blue noise per pixel and frame (decorrelated from the ray start).
-        let j = fract(interleaved_gradient_noise(vec2<f32>(half_px), view.frame_count % 64u) + 0.5);
+        // Slice-depth jitter: blue noise per trace texel and frame, the third STBN channel so it
+        // is decorrelated from the cumulus ray start (r) and light taps (g). Indexed by the dense
+        // trace texel `id.xy` like the main ray: IGN at the strided half-res pixel `half_px`
+        // (a stride of 2 with a per-frame offset) aliased IGN's diagonal lattice into hatching
+        // (audit 4, the mechanism already fixed for the main jitter).
+        let j = stbn_vec3(id.xy, view.frame_count).b;
         for (var layer = 0u; layer < min(cloud_layer.thin_count, 4u); layer++) {
             result = composite_cirrus(layer, result, &weighted_depth, ray_origin, ray_dir, r, mu, t_scene, j);
         }
