@@ -4,3 +4,7 @@ The pisa_*.ktx2 files were generated from https://github.com/KhronosGroup/glTF-S
   - Specular: ./cli -inputPath pisa.hdr -outCubeMap pisa_specular.ktx2 -distribution GGX -cubeMapResolution 512
 - Converting to rgb9e5 format with zstd 'supercompression': https://github.com/DGriffin91/bevy_mod_environment_map_tools
   - cargo run --release -- --inputs pisa_diffuse.ktx2,pisa_specular.ktx2 --outputs pisa_diffuse_rgb9e5_zstd.ktx2,pisa_specular_rgb9e5_zstd.ktx2
+
+The chinese_garden_*.ktx2 files and cubes_reflection_probe_specular_rgb9e5_zstd.ktx2 were generated from https://polyhaven.com/a/chinese_garden (CC0, 2k EXR) with https://github.com/mate-h/blender-envmap:
+- Environment maps: blender-envmap chinese_garden_2k.exr --no-tonemap --no-skybox --name chinese_garden
+- Reflection probe, capturing models/cubes/Cubes.glb lit by the environment: blender-envmap chinese_garden_2k.exr --no-tonemap --no-skybox --scene Cubes.glb --name cubes_reflection_probe

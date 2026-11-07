@@ -635,6 +635,65 @@ fn specular_fix_remap(a: f32) -> f32 {
     return 1.0 - inv_a_sq * inv_a_sq;
 }
 
+/// The representative point of a distant disk light of angular radius `r`
+/// (`cos_r`, `sin_r`) centered on `L`: the direction in the disk closest to the
+/// reflection vector.
+///
+/// Returns that direction in the `xyz` components and the modified roughness in
+/// the `w` component, like [`compute_specular_layer_values_for_point_light`].
+fn compute_specular_layer_values_for_directional_light(
+    input: ptr<function, LightingInput>,
+    layer: u32,
+    L: vec3<f32>,
+    cos_r: f32,
+    sin_r: f32,
+) -> vec4<f32> {
+    // Unpack.
+    let R = (*input).layers[layer].R;
+    let a = (*input).layers[layer].roughness;
+
+    var L_spec = R;
+    let RdotL = dot(R, L);
+    if (RdotL < cos_r) {
+        // Rotate the center of the disk toward R by the angular radius.
+        let toward_R = R - RdotL * L;
+        let toward_R_length_squared = dot(toward_R, toward_R);
+        L_spec = select(
+            L,
+            cos_r * L + sin_r * toward_R * inverseSqrt(toward_R_length_squared),
+            toward_R_length_squared > 1e-12,
+        );
+    }
+
+    // Karis 2013, page 14, with a sphere at infinity: radius over distance is sin(r).
+    let a_prime = saturate(a + 0.5 * sin_r);
+    return vec4(L_spec, a_prime);
+}
+
+/// The N⋅L of a uniformly bright distant disk of angular radius `r` whose center
+/// is at `NdotL`: the irradiance from the part of the disk above the horizon,
+/// over that of the whole disk at normal incidence (Lagarde and de Rousiers
+/// 2014, "Moving Frostbite to Physically Based Rendering", section 4.7.2).
+fn directional_disk_NdotL(NdotL: f32, sin_r: f32) -> f32 {
+    let sin_r_squared = sin_r * sin_r;
+    if (NdotL * NdotL > sin_r_squared) {
+        return max(NdotL, 0.0);
+    }
+    let sin_theta = sqrt(max(1.0 - NdotL * NdotL, 1e-8));
+    let x = sqrt(1.0 / sin_r_squared - 1.0);
+    let y = -x * NdotL / sin_theta;
+    let sin_theta_sqrt_y = sin_theta * sqrt(max(1.0 - y * y, 0.0));
+    let irradiance = (NdotL * acos(clamp(y, -1.0, 1.0)) - x * sin_theta_sqrt_y) * sin_r_squared
+        + atan(sin_theta_sqrt_y / x);
+    return max(irradiance, 0.0) / (PI * sin_r_squared);
+}
+
+/// Solid-angle attenuation of the specular light from a distant disk near the
+/// horizon, as for sphere lights: radius over distance is sin(r).
+fn directional_disk_horizon_attenuation(NdotL: f32, sin_r: f32) -> f32 {
+    return saturate(NdotL / max(NdotL + sin_r * sin_r, 1e-4));
+}
+
 fn point_light(
     light_id: u32,
     input: ptr<function, LightingInput>,
@@ -854,7 +913,6 @@ fn directional_light(
     let NdotV = (*input).layers[LAYER_BASE].NdotV;
     let N = (*input).layers[LAYER_BASE].N;
     let V = (*input).V;
-    let roughness = (*input).layers[LAYER_BASE].roughness;
 
     let light = &view_bindings::lights.directional_lights[light_id];
 
@@ -866,10 +924,14 @@ fn directional_light(
         diffuse = diffuse_color * Fd_Burley(input, &derived_input);
     }
 
-@if(STANDARD_MATERIAL_ANISOTROPY)
-    let specular_light = specular_anisotropy(input, &derived_input, L, roughness, 1.0);
-@else   // STANDARD_MATERIAL_ANISOTROPY
-    let specular_light = specular(input, &derived_input, roughness, 1.0);
+    // A light with an angular size is a uniformly bright disk of that diameter.
+    let cos_r = (*light).cos_angular_radius;
+    let sin_r = (*light).sin_angular_radius;
+    var diffuse_NdotL = derived_input.NdotL;
+    if (sin_r > 0.0) {
+        diffuse_NdotL = directional_disk_NdotL(dot(N, L), sin_r);
+    }
+    let specular_light_times_NdotL = directional_light_specular(input, &derived_input, L, cos_r, sin_r);
 
     @if(STANDARD_MATERIAL_CLEARCOAT)
     let clearcoat_N = (*input).layers[LAYER_CLEARCOAT].N;
@@ -883,24 +945,56 @@ fn directional_light(
     // from the main layer normal.
     @if(STANDARD_MATERIAL_CLEARCOAT)
     var derived_clearcoat_input = derive_lighting_input(clearcoat_N, V, L);
+    @if(STANDARD_MATERIAL_CLEARCOAT)
+    var clearcoat_brdf_roughness = clearcoat_roughness;
+    @if(STANDARD_MATERIAL_CLEARCOAT)
+    var clearcoat_specular_intensity = 1.0;
+    @if(STANDARD_MATERIAL_CLEARCOAT)
+    if (sin_r > 0.0) {
+        let clearcoat_L_a_prime =
+            compute_specular_layer_values_for_directional_light(input, LAYER_CLEARCOAT, L, cos_r, sin_r);
+        derived_clearcoat_input = derive_lighting_input(clearcoat_N, V, clearcoat_L_a_prime.xyz);
+        let clearcoat_normalization_factor = clearcoat_roughness / clearcoat_L_a_prime.w;
+        clearcoat_specular_intensity = clearcoat_normalization_factor * clearcoat_normalization_factor;
+        clearcoat_brdf_roughness = mix(
+            clearcoat_roughness,
+            clearcoat_L_a_prime.w,
+            specular_fix_remap(clearcoat_roughness),
+        );
+    }
 
     @if(STANDARD_MATERIAL_CLEARCOAT)
-    let Fc_Frc =
-        specular_clearcoat(input, &derived_clearcoat_input, clearcoat_strength, clearcoat_roughness, 1.0);
+    let Fc_Frc = specular_clearcoat(
+        input,
+        &derived_clearcoat_input,
+        clearcoat_strength,
+        clearcoat_brdf_roughness,
+        clearcoat_specular_intensity,
+    );
     @if(STANDARD_MATERIAL_CLEARCOAT)
     let inv_Fc = 1.0 - Fc_Frc.r;
     @if(STANDARD_MATERIAL_CLEARCOAT)
-    let Frc = Fc_Frc.g;
+    var Frc_times_NdotL = Fc_Frc.g * derived_clearcoat_input.NdotL;
+    @if(STANDARD_MATERIAL_CLEARCOAT)
+    if (sin_r > 0.0) {
+        Frc_times_NdotL *= directional_disk_horizon_attenuation(derived_clearcoat_input.NdotL, sin_r);
+    }
+    // With the area light LUTs, integrate the disk instead.
+    @if(STANDARD_MATERIAL_CLEARCOAT && AREA_LIGHT_LUTS)
+    if (integrate_directional_disk(input, LAYER_CLEARCOAT, sin_r)) {
+        Frc_times_NdotL = clearcoat_strength
+            * directional_disk_specular(input, LAYER_CLEARCOAT, L, cos_r, sin_r).x;
+    }
 
     var color: vec3<f32>;
 @if(STANDARD_MATERIAL_CLEARCOAT)
     // Account for the Fresnel term from the clearcoat darkening the main layer.
     //
     // <https://google.github.io/filament/Filament.md.html#materialsystem/clearcoatmodel/integrationinthesurfaceresponse>
-    color = (diffuse + specular_light * inv_Fc) * inv_Fc * derived_input.NdotL +
-        Frc * derived_clearcoat_input.NdotL;
+    color = (diffuse * diffuse_NdotL + specular_light_times_NdotL * inv_Fc) * inv_Fc +
+        Frc_times_NdotL;
 @else   // STANDARD_MATERIAL_CLEARCOAT
-    color = (diffuse + specular_light) * derived_input.NdotL;
+    color = diffuse * diffuse_NdotL + specular_light_times_NdotL;
 
     var texture_sample = 1f;
 
@@ -949,6 +1043,385 @@ color *= (*light).color.rgb * texture_sample;
 }
 
     return color;
+}
+
+/// The base layer's specular light from a directional light, times N⋅L.
+///
+/// A light with an angular size is integrated over its disk with the area light
+/// LUTs if they are available, the material is isotropic and the lobe is wide
+/// enough. Otherwise it is shaded at the disk's representative point, like
+/// sphere point lights.
+fn directional_light_specular(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    L: vec3<f32>,
+    cos_r: f32,
+    sin_r: f32,
+) -> vec3<f32> {
+    @if(AREA_LIGHT_LUTS && !STANDARD_MATERIAL_ANISOTROPY)
+    if (integrate_directional_disk(input, LAYER_BASE, sin_r)) {
+        return directional_disk_specular(input, LAYER_BASE, L, cos_r, sin_r);
+    }
+
+    // Unpack.
+    let N = (*input).layers[LAYER_BASE].N;
+    let V = (*input).V;
+    let a = (*input).layers[LAYER_BASE].roughness;
+
+    var specular_derived_input = *derived_input;
+    var brdf_roughness = a;
+    var specular_intensity = 1.0;
+    if (sin_r > 0.0) {
+        let specular_L_a_prime =
+            compute_specular_layer_values_for_directional_light(input, LAYER_BASE, L, cos_r, sin_r);
+        let a_prime = specular_L_a_prime.w;
+        specular_derived_input = derive_lighting_input(N, V, specular_L_a_prime.xyz);
+        let normalization_factor = a / a_prime;
+        specular_intensity = normalization_factor * normalization_factor;
+        brdf_roughness = mix(a, a_prime, specular_fix_remap(a));
+    }
+
+@if(STANDARD_MATERIAL_ANISOTROPY)
+    var specular_light = specular_anisotropy(input, &specular_derived_input, L, brdf_roughness, specular_intensity);
+@else   // STANDARD_MATERIAL_ANISOTROPY
+    var specular_light = specular(input, &specular_derived_input, brdf_roughness, specular_intensity);
+
+    if (sin_r > 0.0) {
+        specular_light *= directional_disk_horizon_attenuation(specular_derived_input.NdotL, sin_r);
+    }
+    return specular_light * specular_derived_input.NdotL;
+}
+
+/// The specular light of one layer for the light direction in `derived_input`,
+/// times N⋅L, with the layer's own BRDF: `specular` or `specular_clearcoat`.
+fn layer_specular_times_NdotL(
+    input: ptr<function, LightingInput>,
+    layer: u32,
+    derived_input: ptr<function, DerivedLightingInput>,
+) -> vec3<f32> {
+    let roughness = (*input).layers[layer].roughness;
+    if (layer == LAYER_CLEARCOAT) {
+        return vec3(specular_clearcoat(input, derived_input, 1.0, roughness, 1.0).y * (*derived_input).NdotL);
+    }
+    return specular(input, derived_input, roughness, 1.0) * (*derived_input).NdotL;
+}
+
+// Disk lights are integrated over lobes wider than this many times sin(r).
+// Narrower lobes are shaded at the representative point, which is accurate for
+// them, while LTC loses precision and the quadrature aliases.
+const DISK_MIN_LOBE_WIDTH: f32 = 1.5;
+// Near the horizon of the LTC lobe, where the LTC integral and density both
+// vanish, disks are integrated with a quadrature of the exact BRDF instead:
+// where the cosine of the disk's center in LTC space is below this, blending to
+// LTC over the next `DISK_QUADRATURE_BLEND`.
+const DISK_QUADRATURE_MAX_LTC_COSINE: f32 = 0.2;
+const DISK_QUADRATURE_BLEND: f32 = 0.2;
+
+/// Whether a disk light of angular radius `r` is integrated over the lobe of a
+/// layer with [`directional_disk_specular`], rather than shaded at its
+/// representative point.
+fn integrate_directional_disk(input: ptr<function, LightingInput>, layer: u32, sin_r: f32) -> bool {
+    let lobe_width = (*input).layers[layer].roughness / max((*input).layers[layer].NdotV, 0.05);
+    return sin_r > 0.0 && lobe_width > DISK_MIN_LOBE_WIDTH * sin_r;
+}
+
+/// The specular light of one layer from a distant disk light of unit
+/// illuminance, centered on `L` with angular radius `r` (`cos_r`, `sin_r`),
+/// times N⋅L.
+@if(AREA_LIGHT_LUTS)
+fn directional_disk_specular(
+    input: ptr<function, LightingInput>,
+    layer: u32,
+    L: vec3<f32>,
+    cos_r: f32,
+    sin_r: f32,
+) -> vec3<f32> {
+    let Minv = ltc_world_inverse_matrix(input, layer);
+    let w = Minv * L;
+    let ltc_cosine = w.z * inverseSqrt(dot(w, w));
+    let ltc_weight = saturate((ltc_cosine - DISK_QUADRATURE_MAX_LTC_COSINE) / DISK_QUADRATURE_BLEND);
+
+    var specular = vec3(0.0);
+    if (ltc_weight < 1.0) {
+        specular += (1.0 - ltc_weight) * directional_disk_quadrature_specular(input, layer, L, cos_r, sin_r);
+    }
+    if (ltc_weight > 0.0) {
+        specular += ltc_weight * directional_disk_ltc_specular(input, layer, Minv, L, cos_r, sin_r);
+    }
+    return specular;
+}
+
+/// The inverse matrix of a layer's GGX LTC distribution, in world space.
+@if(AREA_LIGHT_LUTS)
+fn ltc_world_inverse_matrix(input: ptr<function, LightingInput>, layer: u32) -> mat3x3<f32> {
+    let N = (*input).layers[layer].N;
+    let V = (*input).V;
+    let NdotV = (*input).layers[layer].NdotV;
+    let perceptual_roughness = (*input).layers[layer].perceptual_roughness;
+
+    let LUT_SCALE = 63.0 / 64.0;
+    let LUT_BIAS = 0.5 / 64.0;
+    let uv = vec2<f32>(perceptual_roughness, sqrt(1.0 - NdotV)) * LUT_SCALE + LUT_BIAS;
+    let t1 = textureSampleLevel(view_bindings::area_light_luts, view_bindings::linear_sampler, uv, 0, 0.0);
+    let Minv = mat3x3<f32>(
+        vec3<f32>(t1.x, 0.0, t1.y),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(t1.z, 0.0, t1.w),
+    );
+
+    // `Minv` is in the frame of N and the projection of V on the surface.
+    var T1 = V - N * dot(V, N);
+    let T1_length_squared = dot(T1, T1);
+    T1 = select(orthonormalize(N)[0], T1 * inverseSqrt(T1_length_squared), T1_length_squared > 1e-8);
+    let T2 = -cross(N, T1);
+    return Minv * transpose(mat3x3<f32>(T1, T2, N));
+}
+
+/// [`directional_disk_specular`] by a 19-point equal-area quadrature of the
+/// exact BRDF over the disk, in rings of 1, 6 and 12 points.
+fn directional_disk_quadrature_specular(
+    input: ptr<function, LightingInput>,
+    layer: u32,
+    L: vec3<f32>,
+    cos_r: f32,
+    sin_r: f32,
+) -> vec3<f32> {
+    let N = (*input).layers[layer].N;
+    let V = (*input).V;
+    let basis = orthonormalize(L);
+
+    var sum = vec3(0.0);
+    var points_before = 0.0;
+    for (var ring = 0u; ring < 3u; ring++) {
+        let count = select(6u * ring, 1u, ring == 0u);
+        // Each point is at the middle of the area of its ring.
+        let area_fraction = select((points_before + 0.5 * f32(count)) / 19.0, 0.0, ring == 0u);
+        let cos_t = 1.0 - area_fraction * (1.0 - cos_r);
+        let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
+        for (var i = 0u; i < count; i++) {
+            let phi = 2.0 * PI * (f32(i) + 0.5 * f32(ring)) / f32(count);
+            let direction = (cos(phi) * basis[0] + sin(phi) * basis[1]) * sin_t + cos_t * L;
+            var derived_input = derive_lighting_input(N, V, direction);
+            if (derived_input.NdotL > 0.0) {
+                sum += layer_specular_times_NdotL(input, layer, &derived_input);
+            }
+        }
+        points_before += f32(count);
+    }
+
+    // The radiance of the disk is 1 / (π sin² r).
+    let solid_angle = 2.0 * PI * (1.0 - cos_r);
+    return sum / 19.0 * solid_angle / (PI * sin_r * sin_r);
+}
+
+/// [`directional_disk_specular`] with the LTC integral over a disk (Heitz and
+/// Hill 2017, "Real-Time Line- and Disk-Light Shading with Linearly Transformed
+/// Cosines").
+///
+/// The fitted LTC lobe's shape can be far from the actual BRDF, especially at
+/// grazing angles, so the LTC integral only gives the disk's coverage of the
+/// lobe. The result is the exact BRDF at the lobe-weighted average direction over
+/// the disk, times the ratio of the LTC integral to the LTC density there. For a
+/// small disk, that tends to a point light at its center.
+@if(AREA_LIGHT_LUTS)
+fn directional_disk_ltc_specular(
+    input: ptr<function, LightingInput>,
+    layer: u32,
+    Minv_world: mat3x3<f32>,
+    L: vec3<f32>,
+    cos_r: f32,
+    sin_r: f32,
+) -> vec3<f32> {
+    let N = (*input).layers[layer].N;
+    let V = (*input).V;
+
+    let disk = ltc_integrate_distant_disk(Minv_world, L, sin_r / cos_r);
+
+    // Keep the average direction on the disk. If it is below the horizon but
+    // part of the disk is not, use the disk's highest point instead.
+    var L_average = normalize(inverse_mat3(Minv_world) * disk.yzw);
+    let cos_average = dot(L_average, L);
+    if (cos_average < cos_r) {
+        let toward_average = L_average - cos_average * L;
+        let toward_average_length_squared = dot(toward_average, toward_average);
+        L_average = select(
+            L,
+            cos_r * L + sin_r * toward_average * inverseSqrt(toward_average_length_squared),
+            toward_average_length_squared > 1e-12,
+        );
+    }
+    if (dot(N, L_average) <= 0.0) {
+        let toward_N = N - dot(N, L) * L;
+        let toward_N_length_squared = dot(toward_N, toward_N);
+        if (toward_N_length_squared > 1e-12) {
+            L_average = cos_r * L + sin_r * toward_N * inverseSqrt(toward_N_length_squared);
+        }
+    }
+
+    var derived_input = derive_lighting_input(N, V, L_average);
+    // LTC clips the horizon in its own space, which can leak light from a disk
+    // entirely below the actual horizon, so that gets none.
+    if (derived_input.NdotL <= 0.0) {
+        return vec3(0.0);
+    }
+
+    // The integral over the density is the solid angle of the disk that the lobe
+    // sees, so at most that of the whole disk. It is capped there because the
+    // density goes to zero at the LTC horizon, unlike the BRDF.
+    let solid_angle = 2.0 * PI * (1.0 - cos_r);
+    let density = ltc_density(Minv_world, L_average);
+    let covered_solid_angle = min(disk.x, solid_angle * density) / max(density, 1e-6);
+
+    // The radiance of the disk is 1 / (π sin² r).
+    return layer_specular_times_NdotL(input, layer, &derived_input) * covered_solid_angle
+        / (PI * sin_r * sin_r);
+}
+
+/// The density of the LTC distribution with the inverse matrix `Minv` at the
+/// direction `L`: the clamped cosine at `Minv L / |Minv L|`, times the Jacobian
+/// `|det Minv| / |Minv L|³`.
+fn ltc_density(Minv: mat3x3<f32>, L: vec3<f32>) -> f32 {
+    let w = Minv * L;
+    let inverse_length = inverseSqrt(dot(w, w));
+    let cosine = max(w.z * inverse_length, 0.0);
+    return cosine / PI * abs(determinant(Minv)) * inverse_length * inverse_length * inverse_length;
+}
+
+/// The LTC integral, with the inverse matrix `Minv`, over a distant disk of
+/// angular radius `atan(tan_r)` centered on `L`, clipped by the horizon. Returns
+/// the integral in `x` and the lobe-weighted average direction over the disk, in
+/// LTC space, in `yzw`.
+///
+/// The disk at infinity is replaced by the disk at unit distance that subtends
+/// the same cone. Its transformed ellipse is integrated as the sphere with the
+/// same form factor, whose horizon-clipped integral is in the second LUT layer.
+@if(AREA_LIGHT_LUTS)
+fn ltc_integrate_distant_disk(Minv: mat3x3<f32>, L: vec3<f32>, tan_r: f32) -> vec4<f32> {
+    let disk_basis = orthonormalize(L);
+    let C = Minv * L;
+    var V1 = Minv * (disk_basis[0] * tan_r);
+    var V2 = Minv * (disk_basis[1] * tan_r);
+
+    // The principal axes of the transformed ellipse.
+    var a: f32;
+    var b: f32;
+    let d11 = dot(V1, V1);
+    let d22 = dot(V2, V2);
+    let d12 = dot(V1, V2);
+    if (abs(d12) * inverseSqrt(d11 * d22) > 0.0001) {
+        let tr = d11 + d22;
+        let det = sqrt(max(-d12 * d12 + d11 * d22, 0.0));
+        let u = 0.5 * sqrt(max(tr - 2.0 * det, 0.0));
+        let v = 0.5 * sqrt(tr + 2.0 * det);
+        let e_max = (u + v) * (u + v);
+        let e_min = (u - v) * (u - v);
+        var V1_: vec3<f32>;
+        var V2_: vec3<f32>;
+        if (d11 > d22) {
+            V1_ = d12 * V1 + (e_max - d11) * V2;
+            V2_ = d12 * V1 + (e_min - d11) * V2;
+        } else {
+            V1_ = d12 * V2 + (e_max - d22) * V1;
+            V2_ = d12 * V2 + (e_min - d22) * V1;
+        }
+        a = 1.0 / e_max;
+        b = 1.0 / e_min;
+        V1 = normalize(V1_);
+        V2 = normalize(V2_);
+    } else {
+        a = 1.0 / d11;
+        b = 1.0 / d22;
+        V1 *= sqrt(a);
+        V2 *= sqrt(b);
+    }
+
+    var V3 = cross(V1, V2);
+    if (dot(C, V3) < 0.0) {
+        V3 = -V3;
+    }
+
+    let distance = dot(V3, C);
+    let x0 = dot(V1, C) / distance;
+    let y0 = dot(V2, C) / distance;
+    a *= distance * distance;
+    b *= distance * distance;
+
+    let c0 = a * b;
+    let c1 = a * b * (1.0 + x0 * x0 + y0 * y0) - a - b;
+    let c2 = 1.0 - a * (1.0 + x0 * x0) - b * (1.0 + y0 * y0);
+    let roots = ltc_solve_cubic(vec4(c0, c1, c2, 1.0));
+    let e1 = roots.x;
+    let e2 = roots.y;
+    let e3 = roots.z;
+
+    var average_direction = vec3(a * x0 / (a - e2), b * y0 / (b - e2), 1.0);
+    average_direction = normalize(mat3x3<f32>(V1, V2, V3) * average_direction);
+
+    let L1 = sqrt(max(-e2 / e3, 0.0));
+    let L2 = sqrt(max(-e2 / e1, 0.0));
+    let form_factor = L1 * L2 * inverseSqrt((1.0 + L1 * L1) * (1.0 + L2 * L2));
+
+    let LUT_SCALE = 63.0 / 64.0;
+    let LUT_BIAS = 0.5 / 64.0;
+    let uv = vec2(average_direction.z * 0.5 + 0.5, form_factor) * LUT_SCALE + LUT_BIAS;
+    let horizon_scale = textureSampleLevel(
+        view_bindings::area_light_luts, view_bindings::linear_sampler, uv, 1, 0.0).w;
+    return vec4(form_factor * horizon_scale, average_direction);
+}
+
+/// The real roots of the cubic `c.x + c.y x + c.z x² + c.w x³`, with the middle
+/// root in `y` (Blinn 2007, as used by Heitz and Hill 2017).
+fn ltc_solve_cubic(coefficients: vec4<f32>) -> vec3<f32> {
+    var c = coefficients;
+    c = vec4(c.xyz / c.w, c.w);
+    c = vec4(c.x, c.yz / 3.0, c.w);
+    let A = c.w;
+    let B = c.z;
+    let C = c.y;
+    let D = c.x;
+
+    let delta = vec3(-c.z * c.z + c.y, -c.y * c.z + c.x, dot(vec2(c.z, -c.y), c.xy));
+    let discriminant = dot(vec2(4.0 * delta.x, -delta.y), delta.zy);
+    let sqrt_discriminant = sqrt(max(discriminant, 0.0));
+
+    // Algorithm A.
+    let C_a = delta.x;
+    let D_a = -2.0 * B * delta.x + delta.y;
+    let theta_a = atan2(sqrt_discriminant, -D_a) / 3.0;
+    let x_1a = 2.0 * sqrt(max(-C_a, 0.0)) * cos(theta_a);
+    let x_3a = 2.0 * sqrt(max(-C_a, 0.0)) * cos(theta_a + (2.0 / 3.0) * PI);
+    let xl = select(x_3a, x_1a, (x_1a + x_3a) > 2.0 * B);
+    let xlc = vec2(xl - B, A);
+
+    // Algorithm D.
+    let C_d = delta.z;
+    let D_d = -D * delta.y + 2.0 * C * delta.z;
+    let theta_d = atan2(D * sqrt_discriminant, -D_d) / 3.0;
+    let x_1d = 2.0 * sqrt(max(-C_d, 0.0)) * cos(theta_d);
+    let x_3d = 2.0 * sqrt(max(-C_d, 0.0)) * cos(theta_d + (2.0 / 3.0) * PI);
+    let xs = select(x_3d, x_1d, x_1d + x_3d < 2.0 * C);
+    let xsc = vec2(-D, xs + C);
+
+    let E = xlc.y * xsc.y;
+    let F = -xlc.x * xsc.y - xlc.y * xsc.x;
+    let G = xlc.x * xsc.x;
+    let xmc = vec2(C * F - B * G, -B * F + C * E);
+
+    var root = vec3(xsc.x / xsc.y, xmc.x / xmc.y, xlc.x / xlc.y);
+    if (root.x < root.y && root.x < root.z) {
+        root = root.yxz;
+    } else if (root.z < root.x && root.z < root.y) {
+        root = root.xzy;
+    }
+    return root;
+}
+
+/// The inverse of a 3×3 matrix, from its cofactors.
+fn inverse_mat3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let c0 = cross(m[1], m[2]);
+    let c1 = cross(m[2], m[0]);
+    let c2 = cross(m[0], m[1]);
+    return transpose(mat3x3<f32>(c0, c1, c2)) * (1.0 / dot(m[0], c0));
 }
 
 /// Linearly Transformed Cosines (LTC) area light evaluation.
