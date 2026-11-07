@@ -13,13 +13,13 @@
 import bevy_render::maths::{PI, ray_sphere_intersect};
 import package::render::utils::interleaved_gradient_noise;
 import package::atmosphere::{
-    bindings::{atmosphere, settings, view, lights, stbn_texture, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map, medium_density_lut},
+    bindings::{atmosphere, settings, view, lights, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map, medium_density_lut},
     bruneton_functions::{ray_intersects_ground, sample_transmittance_lut_segment, sample_transmittance_lut_segment_tau_red, distance_to_top_atmosphere_boundary},
     functions::{
         uv_to_ray_direction, uv_to_ndc, ndc_to_camera_dist, get_view_position,
         sample_transmittance_lut, sample_multiscattering_lut, sample_sky_view_lut, direction_world_to_atmosphere, sample_cloud_shadow_map, cloud_shadow_frame, cloud_shadow_ground_uv, cloud_shadow_optical_depth, cloud_far_transmittance,
         hg_phase, cloud_mie_phase, CLOUD_MIE_MEAN_COS, CLOUD_MIE_G_HG, CLOUD_MIE_G_D, CLOUD_MIE_ALPHA, CLOUD_MIE_W_D, sample_aerial_view_lut, raymarch_atmosphere, sample_density_lut, sample_scattering_lut,
-        ABSORPTION_DENSITY, SCATTERING_DENSITY,
+        ABSORPTION_DENSITY, SCATTERING_DENSITY, stbn_vec3, GOLDEN_RATIO_FRAC,
     },
     clouds::{
         cloud_layer_segment, get_cloud_medium_density_coarse, near_camera_reshape,
@@ -1015,20 +1015,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
     }
     @if(!CLOUD_REFERENCE) {
     if (seg.z > 0.5 && t_end > t_start && cloud_layer.cloud_density > 0.0) {
-        // Per-pixel jitter of the ray start (STBN when bound, IGN otherwise).
-        let stbn_dims = textureDimensions(stbn_texture);
-        var jitter: f32;
-        if (all(stbn_dims > vec2(1u))) {
-            let layer = i32(view.frame_count % u32(textureNumLayers(stbn_texture)));
-            // Indexed by the trace texel (dense), not the half-res pixel (both noises): the
-            // checkerboard's half_px samples at a stride of 2 with a per-frame offset, which
-            // loses the blue-noise spectrum (IGN: its diagonal structure aliases) and left
-            // diagonal hatching in near-camera fog when flying through clouds, which the
-            // reconstruction then took frames to average out.
-            jitter = textureLoad(stbn_texture, vec2<i32>(id.xy) % vec2<i32>(stbn_dims), layer, 0).r;
-        } else {
-            jitter = interleaved_gradient_noise(vec2<f32>(id.xy), view.frame_count % 64u);
-        }
+        // Per-pixel, per-frame blue noise (STBN when bound, IGN otherwise; `stbn_vec3`), one
+        // channel per quadrature of this ray so they stay decorrelated: r jitters the view
+        // march, g the light taps. Indexed by the trace texel (dense), not the half-res pixel
+        // (both noises): the checkerboard's half_px samples at a stride of 2 with a per-frame
+        // offset, which loses the blue-noise spectrum (IGN: its diagonal structure aliases) and
+        // left diagonal hatching in near-camera fog when flying through clouds, which the
+        // reconstruction then took frames to average out.
+        let noise = stbn_vec3(id.xy, view.frame_count);
+        let jitter = noise.r;
+        let tap_jitter = noise.g;
 
         let sigma_s_unit = get_cloud_scattering_coeff();
         let sigma_t_unit = sigma_s_unit + get_cloud_absorption_coeff();
@@ -1264,14 +1260,33 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                         tap_growth = 1.0;
                         tap_lod = 0.0;
                     }
+                    // Jittered taps: tap k covers [t_k, t_k + dt_k) and samples it at
+                    // t_k + xi_k dt_k with xi_k uniform in [0, 1), a one-sample Monte Carlo
+                    // estimate of the interval's optical depth: E[density(t_k + xi_k dt_k) dt_k]
+                    // is the interval's exact integral, the same expected value as the midpoint
+                    // rule (xi = 0.5) had, but the midpoint rule aliased every billow thinner than
+                    // dt_k (and every LOD step) into self-shadow contours fixed in space that
+                    // rotated with the sun, which the temporal reconstruction cannot average.
+                    // Precedent: HZD15 samples its 6 light taps in a cone "to smooth the banding
+                    // we would normally get with 6 samples"; FB16 §5.5.2 jitters its progressive
+                    // shadow samples per frame and relies on the temporal integration.
+                    // xi_k = fract(xi + k phi) (golden-ratio / Kronecker sequence, see
+                    // `GOLDEN_RATIO_FRAC`): the taps' phases are spread, not independent draws
+                    // that could all land at one end. xi is the ray's second STBN channel (g),
+                    // decorrelated from the view-step jitter (r), advanced by the lit-sample
+                    // index so the lit samples of one ray do not share phases either.
+                    let xi = fract(tap_jitter + f32(lit_i * (n_taps + 1u)) * GOLDEN_RATIO_FRAC);
                     for (var k = 0u; k < n_taps; k++) {
-                        let pk = p + l * (tap_t + 0.5 * tap_dt);
+                        let xi_k = fract(xi + f32(k) * GOLDEN_RATIO_FRAC);
+                        let pk = p + l * (tap_t + xi_k * tap_dt);
                         let dk = get_cloud_medium_density_lod(length(pk), pk, mip + tap_lod * f32(k));
                         light_od += dk * tap_dt;
                         tap_t += tap_dt;
                         tap_dt *= tap_growth;
                     }
-                    let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * 0.5);
+                    // The long tap is interval n_taps of the same sequence.
+                    let xi_far = fract(xi + f32(n_taps) * GOLDEN_RATIO_FRAC);
+                    let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * xi_far);
                     let d_far = get_cloud_medium_density_lod(length(p_far), p_far, mip + 3.0);
                     light_od += d_far * LIGHT_LONG_TAP_M;
                     let light_optical_depth = light_od * sigma_t_unit;

@@ -298,6 +298,40 @@ fn build_light_basis(light_dir: vec3<f32>) -> LightBasis {
     return LightBasis(x, y);
 }
 
+/// Fractional part of the golden ratio, (sqrt(5) - 1) / 2. fract(x + k * phi), k = 0, 1, ... is
+/// the Kronecker (additive-recurrence) sequence of lowest discrepancy: phi is the irrational
+/// worst approximated by rationals (Hurwitz 1891), so successive phases derived from one random
+/// start stay as spread as possible. Used wherever one blue-noise value seeds several quadratures.
+const GOLDEN_RATIO_FRAC: f32 = 0.618033988749895;
+
+/// Interleaved gradient noise stands in for the STBN channels when the texture is not bound
+/// (feature `bluenoise_texture` off: a 1x1 placeholder). IGN(p, f) is one pattern translated by
+/// 5.588238 px per frame over a 64-frame cycle (Jimenez 2014, see `interleaved_gradient_noise`),
+/// so channel c takes the frame index f + c * 64 / 3 (rounded): the three channels are the
+/// pattern at three phases a third of the cycle apart, never the same value at the same texel.
+const IGN_CHANNEL_FRAME_OFFSET: u32 = 21u;
+
+/// Three independent [0, 1) blue-noise values for `texel` (a dense texel lattice: the trace texel
+/// of the cloud pass, not the strided half-res pixel, which loses the blue spectrum) at `frame`.
+/// The STBN texture's channels are independent scalar masks (Wolfe et al. 2022; `ssr.wesl` reads
+/// xy as a 2D sample and z as a scalar), blue in space and, for a fixed texel, white over the
+/// layers, which `frame % layers` walks, so a temporal filter averages them without structure.
+/// A constant `frame` gives a frame-independent (static) value.
+@if(CLOUDS_ENABLED)
+fn stbn_vec3(texel: vec2<u32>, frame: u32) -> vec3<f32> {
+    let stbn_dims = textureDimensions(stbn_texture);
+    if (all(stbn_dims > vec2(1u))) {
+        let layer = i32(frame % u32(textureNumLayers(stbn_texture)));
+        return textureLoad(stbn_texture, vec2<i32>(texel) % vec2<i32>(stbn_dims), layer, 0).rgb;
+    }
+    let p = vec2<f32>(texel);
+    return vec3(
+        interleaved_gradient_noise(p, frame),
+        interleaved_gradient_noise(p, frame + IGN_CHANNEL_FRAME_OFFSET),
+        interleaved_gradient_noise(p, frame + 2u * IGN_CHANNEL_FRAME_OFFSET),
+    );
+}
+
 /// Helper for cloud shadow PCF: evaluates transmittance from shadow map data.
 @if(CLOUDS_ENABLED)
 fn cloud_shadow_transmittance(data: vec3<f32>, d_sample: f32) -> f32 {
