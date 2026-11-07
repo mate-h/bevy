@@ -1,5 +1,6 @@
 import bevy_render::maths::PI;
 import package::render::utils::sample_cube_dir;
+import package::light_probe::environment_sh::{EnvironmentMapSh, ENVIRONMENT_SH_MAX_EXCESS, sh9_basis};
 
 struct FilteringConstants {
     perceptual_roughness: f32,
@@ -22,6 +23,8 @@ const TAPS_PER_AXIS_DIV_4: u32 = 2u;
 @group(0) @binding(2) var output_texture: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(3) var<uniform> constants: FilteringConstants;
 @group(0) @binding(4) var<storage, read> filter_table: array<vec4f, 210>;
+// The probe's spherical harmonics, written by `project_irradiance_sh`.
+@group(0) @binding(7) var<storage, read_write> environment_sh_out: EnvironmentMapSh;
 
 /// Sample an environment map with a specific LOD
 fn sample_environment(dir: vec3f, level: f32) -> vec4f {
@@ -122,26 +125,12 @@ const IRRADIANCE_SOURCE_SIZE: u32 = 32u;
 // projection, and their excess is added back exactly as point lights.
 const IRRADIANCE_EXCESS_SCALE: f32 = 16.0;
 // At most this many texels are clamped; any beyond are projected in full.
-const IRRADIANCE_MAX_EXCESS: u32 = 64u;
+const IRRADIANCE_MAX_EXCESS: u32 = ENVIRONMENT_SH_MAX_EXCESS;
 
 var<workgroup> sh_partial_sums: array<vec3f, 64>;
 var<workgroup> excess_count: atomic<u32>;
 var<workgroup> excess_directions: array<vec3f, IRRADIANCE_MAX_EXCESS>;
 var<workgroup> excess_radiances: array<vec3f, IRRADIANCE_MAX_EXCESS>;
-
-fn sh9_basis(d: vec3f) -> array<f32, 9> {
-    return array<f32, 9>(
-        0.282095,
-        0.488603 * d.y,
-        0.488603 * d.z,
-        0.488603 * d.x,
-        1.092548 * d.x * d.y,
-        1.092548 * d.y * d.z,
-        0.315392 * (3.0 * d.z * d.z - 1.0),
-        1.092548 * d.x * d.z,
-        0.546274 * (d.x * d.x - d.y * d.y),
-    );
-}
 
 /// The solid angle of the part of a cube face between its center and the
 /// position `(x, y)` on it, in [-1, 1].
@@ -227,6 +216,27 @@ fn project_irradiance(local_index: u32) -> array<vec3f, 9> {
         coefficients[i] = workgroup_sum(local_index, partial_sums[i]) * band_scales[i];
     }
     return coefficients;
+}
+
+/// Projects the source onto spherical harmonics once, with a single workgroup,
+/// and writes them with the excess lights to the probe's `EnvironmentMapSh`
+/// buffer for `generate_irradiance_map` and other passes to read.
+@compute
+@workgroup_size(64, 1, 1)
+fn project_irradiance_sh(@builtin(local_invocation_index) local_index: u32) {
+    let coefficients = project_irradiance(local_index);
+    let excess_texel_count = min(atomicLoad(&excess_count), IRRADIANCE_MAX_EXCESS);
+
+    if (local_index < 9u) {
+        environment_sh_out.coefficients[local_index] = vec4f(coefficients[local_index], 0.0);
+    }
+    if (local_index == 0u) {
+        environment_sh_out.excess_count = excess_texel_count;
+    }
+    for (var i = local_index; i < excess_texel_count; i += 64u) {
+        environment_sh_out.excess_directions[i] = vec4f(excess_directions[i], 0.0);
+        environment_sh_out.excess_radiances[i] = vec4f(excess_radiances[i], 0.0);
+    }
 }
 
 /// Computes the diffuse map from a projection of the source onto spherical
