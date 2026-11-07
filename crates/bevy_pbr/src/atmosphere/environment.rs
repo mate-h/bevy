@@ -177,6 +177,9 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
                 // Weather window around the camera: art (36) and physical (37) channels (`weather_window.wesl`).
                 (36, texture_2d(TextureSampleType::Float { filterable: true })),
                 (37, texture_2d(TextureSampleType::Float { filterable: true })),
+                // Voxel cloud data and sampler (`VoxelCloud`).
+                (64, texture_3d(TextureSampleType::Float { filterable: true })),
+                (65, sampler(SamplerBindingType::Filtering)),
                 // output 2D array texture
                 (
                     13,
@@ -242,7 +245,7 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
         perlin_worley_noise_texture,
         detail_noise_texture,
         cloud_noise_sampler,
-        (bluenoise, render_images, fallback_image),
+        (bluenoise, render_images, fallback_image, extracted_voxel, voxel_sampler),
         gpu_media,
         views,
         pipeline_cache,
@@ -262,6 +265,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
             Res<crate::Bluenoise>,
             Res<RenderAssets<GpuImage>>,
             Res<FallbackImage>,
+            Res<super::voxel_cloud::ExtractedVoxelCloud>,
+            Res<crate::resources::VoxelCloudSampler>,
         ),
         Res<RenderAssets<GpuScatteringMedium>>,
         Query<&ExtractedAtmosphere, With<ExtractedAtmosphere>>,
@@ -277,6 +282,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
         })),
         None => std::borrow::Cow::Borrowed(&fallback_image.d2_array.texture_view),
     };
+    let voxel_view =
+        super::voxel_cloud::voxel_cloud_view(&extracted_voxel, &render_images, &fallback_image);
 
     for (entity, textures) in &probes {
         let Some(atmosphere) = probe_view(entity, views.contains(entity), &probe_source)
@@ -342,6 +349,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
                     (20, cloud_layer_binding.clone()),
                     (21, &fbm_noise_texture.texture.default_view),
                     (22, &**cloud_noise_sampler),
+                    (64, voxel_view),
+                    (65, &**voxel_sampler),
                     (23, &textures.cloud_shadow_map.default_view),
                     (24, &perlin_worley_noise_texture.texture.default_view),
                     (25, stbn_view.as_ref()),

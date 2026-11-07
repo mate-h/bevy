@@ -52,3 +52,6 @@ assets/textures/GroundSand005/**
 .clouds-handoff
 .clouds-screenshots
 
+
+# Voxel clouds converted with tools/nvdf_to_ktx2.py (large, not redistributable)
+assets/volumes/nubis/

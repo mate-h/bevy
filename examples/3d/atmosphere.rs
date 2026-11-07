@@ -10,6 +10,10 @@
 //!   `ATMOSPHERE_CLOUD_PROFILE=nubis|adiabatic|nubis_envelope`,
 //!   `ATMOSPHERE_CLOUD_LWC=<g/m3>`,
 //!   `ATMOSPHERE_CLOUD_DENSITY=<x>`,
+//!   `ATMOSPHERE_VOXEL_CLOUD=parkouring|stormbird|none` (a placed Nubis voxel cloud, default
+//!   parkouring; convert the pack with `tools/nvdf_to_ktx2.py` into `assets/volumes/nubis/`),
+//!   `ATMOSPHERE_VOXEL_ONLY=1` (no sky cumulus or cirrus: the voxel cloud alone),
+//!   `ATMOSPHERE_VOXEL_BOUNDS=0` (start with its box hidden, B toggles),
 //!   `ATMOSPHERE_LUT_MODE`.
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse),
@@ -52,7 +56,7 @@ use bevy::{
     pbr::{
         AtmosphereMode, AtmosphereSettings, AtmosphereWind, CloudTimeScale, CloudWeather,
         CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues, CloudLayerOf,
-        CloudProfiles, ThinCloudLayer, VolumetricCloudLayer,
+        CloudProfiles, ThinCloudLayer, VolumetricCloudLayer, VoxelCloud,
         AtmosphereDebugView, AtmosphereDebugViewPlugin,
         DefaultOpaqueRendererMethod,
         VolumetricCloudSettings,
@@ -156,6 +160,7 @@ fn main() {
                 setup_camera_fog,
                 setup_terrain_scene,
                 setup_settings_panel.after(setup_camera_fog),
+                spawn_voxel_cloud,
                 print_controls,
             ),
         )
@@ -174,6 +179,8 @@ fn main() {
                 cycle_cloud_profiles,
                 visibility_toggle.after(atmosphere_controls),
                 camera_pose_title,
+                draw_voxel_cloud_bounds,
+                report_voxel_cloud_data,
             ),
         );
 
@@ -370,6 +377,7 @@ fn print_controls() {
     println!("    - / =      - Decrease/Increase the wind speed (whole profile: drift and lean), 0x .. 2x");
     println!("    Tab        - Toggle the settings panel (wind, clouds, cirrus, scene, debug view)");
     println!("    [ / ]      - Debug view: move the slice of the 3D textures down/up");
+    println!("    B          - Show/hide the voxel cloud's bounding box");
 }
 
 /// The settings panel's pages, one per tab.
@@ -1165,11 +1173,17 @@ fn setup_camera_fog(
             lifetime: env_f32("ATMOSPHERE_CLOUD_LIFETIME").unwrap_or(1200.0),
             // `ATMOSPHERE_CLOUD_EVOLUTION=<s>` starts the cloud clock (life-cycle phase) there.
             evolution_time: env_f32("ATMOSPHERE_CLOUD_EVOLUTION").unwrap_or(0.0),
-            // `ATMOSPHERE_CLOUD_COVERAGE=<x>` sets the starting coverage scale (Left/Right change it).
-            coverage: std::env::var("ATMOSPHERE_CLOUD_COVERAGE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
+            // `ATMOSPHERE_CLOUD_COVERAGE=<x>` sets the starting coverage scale (Left/Right change it);
+            // `ATMOSPHERE_VOXEL_ONLY` clears the sky's cumulus (the layer stays: the voxel cloud
+            // takes its optical properties).
+            coverage: if voxel_only() {
+                0.0
+            } else {
+                std::env::var("ATMOSPHERE_CLOUD_COVERAGE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0)
+            },
             // `ATMOSPHERE_CLOUD_DETAIL=<x>` overrides the detail-erosion strength (validation).
             detail_strength: std::env::var("ATMOSPHERE_CLOUD_DETAIL")
                 .ok()
@@ -1193,7 +1207,7 @@ fn setup_camera_fog(
         CloudWeather::default(),
         // High-altitude cirrus (thin ice cloud at 9 km); `ATMOSPHERE_NO_CIRRUS` removes it.
         ThinCloudLayer {
-            optical_depth: if std::env::var("ATMOSPHERE_NO_CIRRUS").is_ok() { 0.0 } else { 0.3 },
+            optical_depth: if std::env::var("ATMOSPHERE_NO_CIRRUS").is_ok() || voxel_only() { 0.0 } else { 0.3 },
             ..ThinCloudLayer::cirrus()
         },
         // One wind profile for both layers (each takes its wind and shear at its altitude).
@@ -1210,7 +1224,7 @@ fn setup_camera_fog(
     // Further layers are entities related to the atmosphere (`CloudLayerOf`):
     // `ATMOSPHERE_SECOND_THIN=1` adds a cirrostratus veil at 11 km above the cirrus.
     .with_related_entities::<CloudLayerOf>(|layers| {
-        if std::env::var("ATMOSPHERE_SECOND_THIN").is_ok() {
+        if std::env::var("ATMOSPHERE_SECOND_THIN").is_ok() && !voxel_only() {
             layers.spawn(ThinCloudLayer {
                 top: 6_360_000.0 + 11_500.0,
                 ..ThinCloudLayer::cirrostratus()
@@ -1725,6 +1739,96 @@ fn sun_drag(
     let rotation = Quat::from_rotation_z(-motion.delta.x * 0.15f32.to_radians());
     for mut tf in &mut suns {
         tf.rotation = rotation * tf.rotation;
+    }
+}
+
+/// Places a Nubis voxel cloud (`ATMOSPHERE_VOXEL_CLOUD=parkouring|stormbird|none`) 6 km ahead of
+/// the default camera, its box from the cumulus layer's base (1.5 km) up 500 m. The textures are
+/// not in the repository: `tools/nvdf_to_ktx2.py` converts them from Guerrilla's Nubis Voxel Cloud
+/// Pack into `assets/volumes/nubis/`.
+fn spawn_voxel_cloud(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let name = match std::env::var("ATMOSPHERE_VOXEL_CLOUD").as_deref() {
+        Ok("none") => return,
+        Ok("stormbird") => "stormbird_cloud",
+        _ => "parkouring_cloud",
+    };
+    let path = format!("volumes/nubis/{name}.ktx2");
+    #[cfg(not(target_arch = "wasm32"))]
+    if !std::path::Path::new("assets").join(&path).exists() {
+        println!("No voxel cloud: assets/{path} is missing (see tools/nvdf_to_ktx2.py)");
+        return;
+    }
+    // The renderer draws voxel clouds within the cumulus layer's altitude range (with the
+    // physical profiles, the range of their air masses); the box is at most 500 m tall (the
+    // pack's domain), centred 1.75 km up.
+    let (bottom, top) = bevy::pbr::physical_profile_bounds();
+    println!("Voxel cloud centred at 1750 m; cumulus layer {bottom:.0}..{top:.0} m");
+    commands.spawn((
+        Name::new(name),
+        // Data, not color: load it linear (the image loader assumes sRGB).
+        VoxelCloud::nubis_pack(
+            asset_server
+                .load_builder()
+                .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| settings.is_srgb = false)
+                .load(path),
+        ),
+        Transform::from_xyz(6_000.0, 1_750.0, 0.0),
+    ));
+}
+
+/// `ATMOSPHERE_VOXEL_ONLY`: the voxel cloud alone (the cumulus layer at zero coverage, no cirrus).
+fn voxel_only() -> bool {
+    std::env::var("ATMOSPHERE_VOXEL_ONLY").is_ok()
+}
+
+/// Draws each voxel cloud's box (B toggles it).
+fn draw_voxel_cloud_bounds(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut shown: Local<Option<bool>>,
+    mut gizmos: Gizmos,
+    clouds: Query<(&GlobalTransform, &VoxelCloud)>,
+    images: Res<Assets<Image>>,
+) {
+    // `ATMOSPHERE_VOXEL_BOUNDS=0` starts with the box hidden (captures).
+    let shown = shown.get_or_insert_with(|| std::env::var("ATMOSPHERE_VOXEL_BOUNDS").as_deref() != Ok("0"));
+    if keyboard_input.just_pressed(KeyCode::KeyB) {
+        *shown = !*shown;
+    }
+    if !*shown {
+        return;
+    }
+    for (transform, cloud) in &clouds {
+        if let Some(data) = images.get(&cloud.data) {
+            gizmos.cube(cloud.bounds(transform, cloud.size(data)), Color::srgb(1.0, 0.6, 0.1));
+        }
+    }
+}
+
+/// Reports each voxel cloud's texture once it has loaded (size, mips, format).
+fn report_voxel_cloud_data(
+    clouds: Query<(&Name, &VoxelCloud)>,
+    images: Res<Assets<Image>>,
+    mut reported: Local<bevy::platform::collections::HashSet<AssetId<Image>>>,
+) {
+    for (name, cloud) in &clouds {
+        if let Some(image) = images.get(&cloud.data)
+            && reported.insert(cloud.data.id())
+        {
+            let d = image.texture_descriptor.size;
+            let size = cloud.size(image);
+            println!(
+                "Voxel cloud {name}: {}x{}x{} {:?} {:?}, {} mips, box {:.0} x {:.0} x {:.0} m",
+                d.width,
+                d.height,
+                d.depth_or_array_layers,
+                image.texture_descriptor.dimension,
+                image.texture_descriptor.format,
+                image.texture_descriptor.mip_level_count,
+                size.x,
+                size.y,
+                size.z
+            );
+        }
     }
 }
 

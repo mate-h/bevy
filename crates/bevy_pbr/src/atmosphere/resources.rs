@@ -118,7 +118,7 @@ fn render_sky_composite_cloud_entries() -> impl IntoIndexedBindGroupLayoutEntryB
 
 /// Placed at 20..=25, 33 so they don't collide with the shadow map entries (14..=17)
 /// or the clouds_reconstruct history/storage bindings (28..=32).
-fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<11> {
+fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<13> {
     (
         (20, uniform_buffer::<GpuCloudLayers>(true)), // cloud layer parameters
         // 2D noise texture for cloud coverage / weather
@@ -166,6 +166,12 @@ fn cloud_layout_entries() -> impl IntoIndexedBindGroupLayoutEntryBuilderArray<11
             37,
             texture_2d(TextureSampleType::Float { filterable: true }),
         ),
+        // Voxel cloud data (`VoxelCloud`) and its clamped trilinear sampler.
+        (
+            64,
+            texture_3d(TextureSampleType::Float { filterable: true }),
+        ),
+        (65, sampler(SamplerBindingType::Filtering)),
     )
 }
 
@@ -427,6 +433,12 @@ impl AtmosphereBindGroupLayouts {
                         37,
                         texture_2d(TextureSampleType::Float { filterable: true }),
                     ),
+                    // Voxel cloud data and sampler (`VoxelCloud`).
+                    (
+                        64,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (65, sampler(SamplerBindingType::Filtering)),
                     // Cloud SDF seeds (`cloud_field.wesl` init entry point).
                     (
                         40,
@@ -1128,6 +1140,26 @@ impl FromWorld for CloudNoiseSampler {
         });
 
         Self(sampler)
+    }
+}
+
+/// Sampler of the voxel cloud's data (`VoxelCloud`): clamped to the box, trilinear across mips.
+#[derive(Resource, Deref)]
+pub struct VoxelCloudSampler(Sampler);
+
+impl FromWorld for VoxelCloudSampler {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+        Self(render_device.create_sampler(&SamplerDescriptor {
+            label: Some("voxel_cloud_sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
+            ..Default::default()
+        }))
     }
 }
 
@@ -2591,15 +2623,17 @@ pub(super) fn prepare_atmosphere_bind_groups(
     render_device: Res<RenderDevice>,
     layouts: Res<AtmosphereBindGroupLayouts>,
     render_sky_layouts: Res<RenderSkyBindGroupLayouts>,
-    (atmosphere_sampler, cloud_noise_sampler, shadow_samplers): (
+    (atmosphere_sampler, cloud_noise_sampler, shadow_samplers, voxel_sampler): (
         Res<LinearSampler>,
         Res<CloudNoiseSampler>,
         Res<ShadowSamplers>,
+        Res<VoxelCloudSampler>,
     ),
-    (bluenoise, render_images, fallback_image): (
+    (bluenoise, render_images, fallback_image, extracted_voxel): (
         Res<Bluenoise>,
         Res<RenderAssets<GpuImage>>,
         Res<FallbackImage>,
+        Res<super::voxel_cloud::ExtractedVoxelCloud>,
     ),
     view_uniforms: Res<ViewUniforms>,
     lights_uniforms: Res<LightMeta>,
@@ -2656,6 +2690,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
         })),
         None => std::borrow::Cow::Borrowed(&fallback_image.d2_array.texture_view),
     };
+    let voxel_view =
+        super::voxel_cloud::voxel_cloud_view(&extracted_voxel, &render_images, &fallback_image);
 
     for (
         entity,
@@ -2823,6 +2859,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     (20, cloud_layer_binding.clone()),
                     (21, &fbm_noise_texture.texture.default_view),
                     (22, &**cloud_noise_sampler),
+                    (64, voxel_view),
+                    (65, &**voxel_sampler),
                     (24, &perlin_worley_noise_texture.texture.default_view),
                     (25, stbn_view.as_ref()),
                     (33, &detail_noise_texture.texture.default_view),
@@ -2967,6 +3005,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                             (20, cloud_layer_binding.clone()),
                             (21, &fbm_noise_texture.texture.default_view),
                             (22, &**cloud_noise_sampler),
+                            (64, voxel_view),
+                            (65, &**voxel_sampler),
                             (23, &textures.cloud_shadow_map.default_view),
                             (24, &perlin_worley_noise_texture.texture.default_view),
                             (25, stbn_view.as_ref()),
@@ -2995,6 +3035,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (20, cloud_layer_binding.clone()),
                         (21, &fbm_noise_texture.texture.default_view),
                         (22, &**cloud_noise_sampler),
+                        (64, voxel_view),
+                        (65, &**voxel_sampler),
                         (23, &textures.cloud_shadow_map.default_view),
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
@@ -3040,7 +3082,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                     } else {
                         &layouts.clouds_raymarch_msaa
                     }),
-                    &BindGroupEntries::with_indices((
+                    // More entries than one `with_indices` tuple takes (32).
+                    &DynamicBindGroupEntries::new_with_indices((
                         (0, atmosphere_binding.clone()),
                         (1, settings_binding.clone()),
                         (2, transforms_binding.clone()),
@@ -3058,6 +3101,10 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (20, cloud_layer_binding.clone()),
                         (21, &fbm_noise_texture.texture.default_view),
                         (22, &**cloud_noise_sampler),
+                    ))
+                    .extend_with_indices((
+                        (64, voxel_view),
+                        (65, &**voxel_sampler),
                         (23, &textures.cloud_shadow_map.default_view),
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
@@ -3190,6 +3237,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (20, cloud_layer_binding.clone()),
                         (21, &fbm_noise_texture.texture.default_view),
                         (22, &**cloud_noise_sampler),
+                        (64, voxel_view),
+                        (65, &**voxel_sampler),
                         (23, &textures.cloud_shadow_map.default_view),
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),
@@ -3225,6 +3274,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (20, cloud_layer_binding.clone()),
                         (21, &fbm_noise_texture.texture.default_view),
                         (22, &**cloud_noise_sampler),
+                        (64, voxel_view),
+                        (65, &**voxel_sampler),
                         (23, &textures.cloud_shadow_map.default_view),
                         (24, &perlin_worley_noise_texture.texture.default_view),
                         (25, stbn_view.as_ref()),

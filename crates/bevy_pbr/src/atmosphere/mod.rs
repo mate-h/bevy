@@ -50,6 +50,7 @@ pub mod perlin_worley_noise;
 pub mod detail_noise;
 pub mod resources;
 pub mod weather;
+mod voxel_cloud;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::{embedded_asset, AssetId, Handle};
@@ -101,6 +102,7 @@ pub use cloud_profile::{
     CLOUD_PROFILE_TYPE_RES,
 };
 pub use weather::{CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues};
+pub use voxel_cloud::VoxelCloud;
 pub use debug_view::{
     AtmosphereDebugPanel, AtmosphereDebugSource, AtmosphereDebugView, AtmosphereDebugViewPlugin,
     DebugChannels, DebugDecode, DebugMapping,
@@ -222,6 +224,8 @@ impl Plugin for AtmospherePlugin {
             .insert_resource(AtmosphereBindGroupLayouts::new())
             .init_resource::<RenderSkyBindGroupLayouts>()
             .init_resource::<CloudNoiseSampler>()
+            .init_resource::<resources::VoxelCloudSampler>()
+            .init_resource::<voxel_cloud::ExtractedVoxelCloud>()
             .init_resource::<environment::AtmosphereProbeSource>()
             .init_resource::<fbm_noise::CloudNoiseFormats>()
             .init_resource::<AtmosphereLutPipelines>()
@@ -347,8 +351,24 @@ pub fn extract_atmosphere(
     cameras: Extract<
         Query<(RenderEntity, Option<&AtmosphereSettings>, &GlobalTransform), With<Camera3d>>,
     >,
+    voxel_clouds: Extract<Query<(&VoxelCloud, &GlobalTransform)>>,
+    images: Extract<Res<bevy_asset::Assets<Image>>>,
+    mut extracted_voxel_cloud: ResMut<voxel_cloud::ExtractedVoxelCloud>,
 ) {
     let candidates: Vec<_> = atmosphere_entities.iter().collect();
+    // One voxel cloud is rendered (the first); its texture is bound to every cloud pass.
+    if voxel_clouds.iter().len() > 1 {
+        bevy_log::warn_once!("several VoxelClouds exist; only the first is rendered");
+    }
+    // Its box needs the texture's size: rendered once the texture has loaded.
+    let voxel = voxel_clouds
+        .iter()
+        .next()
+        .and_then(|(cloud, transform)| Some((cloud, transform, cloud.size(images.get(&cloud.data)?))));
+    let voxel_image = voxel.map(|(cloud, ..)| cloud.data.id());
+    if extracted_voxel_cloud.image != voxel_image {
+        extracted_voxel_cloud.image = voxel_image;
+    }
     // Shadow-map anchors of cameras that no longer exist.
     shadow_anchors.retain(|entity, _| cameras.iter().any(|(e, ..)| e == *entity));
 
@@ -425,6 +445,13 @@ pub fn extract_atmosphere(
                 extracted_world_to_atmosphere.transform_point3(cam_world),
                 &layers,
             );
+            // The voxel cloud is part of the cumulus layer (its optical properties and altitude
+            // range): without one it is not rendered.
+            if let (Some((cloud, transform, size)), Some(_)) = (voxel, cloud_layer) {
+                layers.voxel_uvw_from_atmosphere =
+                    voxel_cloud::uvw_from_atmosphere(cloud, transform, size, atmosphere_to_world);
+                layers.voxel_enabled = 1;
+            }
             gpu_settings.cloud_shadow_anchor_max_radius = layers.cloud_layer_end;
             // The thin layers' shadow (the map's alpha) applies below the lowest mid level.
             gpu_settings.cloud_thin_shadow_max_radius =
@@ -1431,6 +1458,11 @@ pub struct GpuCloudLayers {
     pub thin_count: u32,
     /// Thin layers, lowest mid level first.
     pub thin: [GpuThinCloudLayer; MAX_THIN_CLOUD_LAYERS],
+    /// Atmosphere space to the voxel cloud's texture coordinates (the box is [0, 1]^3), see
+    /// [`VoxelCloud`].
+    pub voxel_uvw_from_atmosphere: Mat4,
+    /// 1 when a [`VoxelCloud`] is rendered.
+    pub voxel_enabled: u32,
 }
 
 impl GpuCloudLayers {
@@ -1515,6 +1547,8 @@ impl GpuCloudLayers {
             droplet_number: 299.0,
             thin_count: thin_count as u32,
             thin: thin_array,
+            voxel_uvw_from_atmosphere: Mat4::IDENTITY,
+            voxel_enabled: 0,
         }
     }
 }

@@ -37,6 +37,10 @@ struct GpuCloudLayers {
     // Thin layers (ThinCloudLayer, mod.rs GpuCloudLayers), lowest mid level first.
     thin_count: u32,
     thin: array<GpuThinCloudLayer, 4>,
+    // Voxel cloud (mod.rs VoxelCloud): atmosphere space to its texture coordinates, and 1 when
+    // one is rendered.
+    voxel_uvw_from_atmosphere: mat4x4<f32>,
+    voxel_enabled: u32,
 }
 
 /// One thin (ice) layer (mod.rs GpuThinCloudLayer).
@@ -63,6 +67,10 @@ struct GpuThinCloudLayer {
 // Vertical profile lookups (`cloud_profile.rs`): R presence bottom, G presence top, B in-cloud
 // liquid water; x = height in the column (texel i at i / 63), y = cloud type (texel j at j / 31).
 @group(0) @binding(34) var cloud_profile_lut: texture_2d<f32>;
+// Voxel cloud data (`VoxelCloud`, `tools/nvdf_to_ktx2.py`): R dimensional profile, G detail type,
+// B density scale, A signed distance; Y up. Clamped trilinear sampler.
+@group(0) @binding(64) var voxel_cloud_data: texture_3d<f32>;
+@group(0) @binding(65) var voxel_cloud_sampler: sampler;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let l2 = dot(v, v);
@@ -228,12 +236,17 @@ fn sample_shape_noise(world_pos: vec3<f32>, h: f32, mip: f32) -> vec4<f32> {
 }
 
 fn sample_detail_noise(world_pos: vec3<f32>, h: f32, mip: f32) -> vec4<f32> {
+    return sample_detail_noise_tile(world_pos, h, cloud_layer.detail_noise_scale, mip);
+}
+
+/// The detail noise tiled every `tile` metres.
+fn sample_detail_noise_tile(world_pos: vec3<f32>, h: f32, tile: f32, mip: f32) -> vec4<f32> {
     let rot = mat2x2<f32>(
         0.8660254, -0.5,
         0.5, 0.8660254
     );
     let xz = rot * world_pos.xz;
-    let period = max(1.0, cloud_layer.detail_noise_scale);
+    let period = max(1.0, tile);
     let uv = xz / period;
     let w = (h * cloud_layer_thickness_m() - cloud_layer.noise_offset.y) / period;
     return textureSampleLevel(detail_worley_noise_3d, noise_sampler_3d, vec3(uv, w), mip);
@@ -599,6 +612,9 @@ fn cloud_possible_footprint(r: f32, world_pos: vec3<f32>, footprint: f32) -> boo
     if (r < cloud_layer.cloud_layer_start || r > cloud_layer.cloud_layer_end) {
         return false;
     }
+    if (voxel_cloud_near(world_pos, footprint)) {
+        return true;
+    }
     let h = clamp((r - cloud_layer.cloud_layer_start) / max(1.0, cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start), 0.0, 1.0);
     let sample_pos = cloud_sample_pos(world_pos, r);
     let column = cloud_column_weather(sample_pos);
@@ -628,6 +644,43 @@ struct CloudColumn {
     weather: vec4<f32>,
     /// (dimensional profile, liquid water / the layer's).
     vertical: vec2<f32>,
+    /// The point is in the voxel cloud (`voxel_cloud_at`): weather and profile come from its data.
+    voxel: bool,
+}
+
+/// Tile of the detail noise inside the voxel cloud: Nubis Cubed's voxel sampler reads the noise
+/// at position * 0.01 (Guerrilla's VoxelCloudSampler), a 100 m tile for clouds of ~8 m voxels.
+const VOXEL_DETAIL_TILE_M: f32 = 100.0;
+
+/// The voxel cloud's data at an atmosphere-space point: (dimensional profile, detail type, density
+/// scale, signed distance), all 0 outside its box or without a voxel cloud. The box is fixed in the
+/// world (the wind moves only its detail noise). Sampled at the top level: the data is ~8 m voxels.
+fn voxel_cloud_at(world_pos: vec3<f32>) -> vec4<f32> {
+    if (cloud_layer.voxel_enabled == 0u) {
+        return vec4(0.0);
+    }
+    let uvw = (cloud_layer.voxel_uvw_from_atmosphere * vec4(world_pos, 1.0)).xyz;
+    if (any(uvw < vec3(0.0)) || any(uvw > vec3(1.0))) {
+        return vec4(0.0);
+    }
+    return textureSampleLevel(voxel_cloud_data, voxel_cloud_sampler, uvw, 0.0);
+}
+
+/// Whether a box of `footprint` m around an atmosphere-space point can overlap the voxel cloud's
+/// box (empty-space tests).
+fn voxel_cloud_near(world_pos: vec3<f32>, footprint: f32) -> bool {
+    if (cloud_layer.voxel_enabled == 0u) {
+        return false;
+    }
+    let m = cloud_layer.voxel_uvw_from_atmosphere;
+    let uvw = (m * vec4(world_pos, 1.0)).xyz;
+    // How far each texture coordinate moves within +-footprint along each atmosphere axis.
+    let pad = footprint * vec3(
+        abs(m[0].x) + abs(m[1].x) + abs(m[2].x),
+        abs(m[0].y) + abs(m[1].y) + abs(m[2].y),
+        abs(m[0].z) + abs(m[1].z) + abs(m[2].z),
+    );
+    return all(uvw > -pad) && all(uvw < vec3(1.0) + pad);
 }
 
 fn cloud_column_at(r: f32, world_pos: vec3<f32>) -> CloudColumn {
@@ -635,19 +688,27 @@ fn cloud_column_at(r: f32, world_pos: vec3<f32>) -> CloudColumn {
     let height_in_layer = r - cloud_layer.cloud_layer_start;
     let h = clamp(height_in_layer / max(1.0, layer_thickness), 0.0, 1.0);
     let sample_pos = cloud_sample_pos(world_pos, r);
+    // Inside the voxel cloud its data replaces the sky's weather and profile (Nubis Cubed: the
+    // modeling data gives the dimensional profile directly; liquid water and droplets at the
+    // layer's reference).
+    let voxel = voxel_cloud_at(world_pos);
+    if (voxel.x > 0.0) {
+        return CloudColumn(sample_pos, h, vec4(1.0, voxel.y, voxel.z, 1.0), vec2(voxel.x, 1.0), true);
+    }
     // Nubis detail type (0 wispy, 1 billowy) and density scale: authored weather fields; with
     // the physical profiles the air mass and droplet number of the physical channels.
     let weather = cloud_column_weather(sample_pos);
     // Nubis Evolved (2022) sky model: dimensional_profile = vertical_profile * coverage.
     let vertical = cloud_vertical_profile(h, weather.x, weather.y);
-    return CloudColumn(sample_pos, h, weather, vertical);
+    return CloudColumn(sample_pos, h, weather, vertical, false);
 }
 
 /// `sample_cumulus_shape_coarse` from a column (`cloud_column_at`).
 fn cloud_coarse_from_column(c: CloudColumn) -> f32 {
     let density_scale = pow(c.weather.z, 4.0);
     // Lookups: cloud is possible wherever the cloud fraction is positive (`cloud_density_context`).
-    let bound = select(0.0, select(c.vertical.x, 1.0, cloud_layer.profile_mode == 0u), c.vertical.x > 0.0);
+    let lookups = cloud_layer.profile_mode == 0u && !c.voxel;
+    let bound = select(0.0, select(c.vertical.x, 1.0, lookups), c.vertical.x > 0.0);
     let x = saturate(bound * density_scale);
     return select(0.0, pow(x, mix(0.3, 0.6, max(1e-4, density_scale))), x > 0.0) * c.vertical.y;
 }
@@ -667,24 +728,35 @@ fn cloud_shape_from_column(c: CloudColumn, mip: f32) -> f32 {
     // Physical lookups: the statistical cloud scheme at the sample's footprint, its detail the
     // scheme's own thermal bubbles (`cloud_scheme_density`); liquid water from the lookups, the
     // weather's density scale as for the coarse bound, the droplets' extinction per liquid water.
-    if (cloud_layer.profile_mode == 0u) {
+    if (cloud_layer.profile_mode == 0u && !c.voxel) {
         return cloud_scheme_density(sample_pos, h, base_profile, mip) * pow(density_scale, 4.0)
             * vertical.y * droplets;
     }
 
-    // Large-scale shape from the 2022 noise (low-frequency Perlin-Worley eroded by Worley fBm,
-    // HZD15: fbm = 0.625 lo + 0.25 med + 0.125 hi, remap(pw, fbm - 1, 1, 0, 1)), applied as the
-    // 2022 sky density: saturate(noise - threshold), threshold = 1 - dimensional_profile.
-    let shape_mip = cloud_shape_mip(mip);
-    let pw = sample_shape_noise(sample_pos, h, shape_mip);
-    let wfbm = pw.y * 0.625 + pw.z * 0.25 + pw.w * 0.125;
-    let shape_noise = saturate(remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0));
-    // Detail noise. Detail LOD from the sample
-    // footprint (anti-aliasing and cache): `mip` is log2(1 + d / 4 km) (shape noise); a half-res
-    // pixel spans ~2.2 mrad, and a detail texel is detail_noise_scale / 128, so the footprint LOD
-    // is mip + log2(4000 m * 2.2e-3 / texel).
-    let n = sample_detail_noise(sample_pos, h, mip + cloud_detail_mip_offset());
-    let profile = saturate(shape_noise - (1.0 - base_profile));
+    var profile: f32;
+    var n: vec4<f32>;
+    if (c.voxel) {
+        // Voxel cloud: the modeled dimensional profile as is, detail noise at Nubis's voxel tile
+        // (footprint LOD as below, for a VOXEL_DETAIL_TILE_M / 128 texel).
+        profile = base_profile;
+        let voxel_mip_offset = max(log2(4000.0 * 2.2e-3 * 128.0 / VOXEL_DETAIL_TILE_M), 0.0);
+        n = sample_detail_noise_tile(sample_pos, h, VOXEL_DETAIL_TILE_M, mip + voxel_mip_offset);
+    } else {
+        // Large-scale shape from the 2022 noise (low-frequency Perlin-Worley eroded by Worley
+        // fBm, HZD15: fbm = 0.625 lo + 0.25 med + 0.125 hi, remap(pw, fbm - 1, 1, 0, 1)),
+        // applied as the 2022 sky density: saturate(noise - threshold), threshold = 1 -
+        // dimensional_profile.
+        let shape_mip = cloud_shape_mip(mip);
+        let pw = sample_shape_noise(sample_pos, h, shape_mip);
+        let wfbm = pw.y * 0.625 + pw.z * 0.25 + pw.w * 0.125;
+        let shape_noise = saturate(remap(pw.x, wfbm - 1.0, 1.0, 0.0, 1.0));
+        // Detail noise. Detail LOD from the sample footprint (anti-aliasing and cache): `mip` is
+        // log2(1 + d / 4 km) (shape noise); a half-res pixel spans ~2.2 mrad, and a detail texel
+        // is detail_noise_scale / 128, so the footprint LOD is mip + log2(4000 m * 2.2e-3 /
+        // texel).
+        n = sample_detail_noise(sample_pos, h, mip + cloud_detail_mip_offset());
+        profile = saturate(shape_noise - (1.0 - base_profile));
+    }
 
     // Nubis Cubed (2023) up-res of that profile (Guerrilla's VoxelCloudSampler,
     // GetUprezzedVoxelCloudDensity): wispy = lerp(R, G, profile), billowy = lerp(B, A,
