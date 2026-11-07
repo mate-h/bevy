@@ -36,6 +36,7 @@ pub fn atmosphere_luts(
         &ExtractedView,
         Option<&GpuCloudLayers>,
         Option<&super::resources::CloudLightTurn>,
+        Option<&super::volumetrics::VolumetricsUniform>,
     )>,
     pipelines: Res<AtmosphereLutPipelines>,
     layouts: Res<super::resources::AtmosphereBindGroupLayouts>,
@@ -60,6 +61,7 @@ pub fn atmosphere_luts(
         extracted_view,
         gpu_cloud_layers,
         light_turn,
+        volumetrics_uniform,
     ) = view.into_inner();
     // This system runs once per view: amortised state (the LUT cache, the cloud-field rebuild
     // stage) is per view, or two views would split one counter between them (audit 9).
@@ -318,7 +320,9 @@ pub fn atmosphere_luts(
         // The aerial-perspective LUT is only read by render_sky's lookup-texture path; in
         // raymarched mode every pixel's haze is marched (render_sky / its haze prepass, and the
         // cloud pass in front of clouds), so building the 32^3 cloud-shadowed LUT was wasted.
+        // With the froxel grid it is the far field of opaque pixels (AP(t) - AP(d_max)).
         let need_ap_lut = settings.rendering_method != 1
+            || volumetrics_uniform.is_some()
             || std::env::var_os("ATMOSPHERE_DBG")
                 .is_some_and(|v| v.to_string_lossy().contains("ATM_DBG_HAZE_AP_LUT"));
         if need_ap_lut {
@@ -713,6 +717,55 @@ pub fn atmosphere_luts(
             pass.set_bind_group(0, &bind_group, &[]);
             let n = (texture.width() >> mip).max(1).div_ceil(8);
             pass.dispatch_workgroups(n, ((texture.height() >> mip).max(1)).div_ceil(8), 1);
+        }
+    }
+
+    // Near-field froxel volumetrics (`volumetrics.wesl`): after the shadow map and its mips (the
+    // scattering pass reads this frame's map) and before render_sky, which applies the integrated
+    // volume. Material -> scattering -> integrate, one compute pass each (timed separately).
+    if let (Some(volumetrics_uniform), Some(bind_groups), Some(cloud_offset)) = (
+        volumetrics_uniform,
+        bind_groups.volumetrics.as_ref(),
+        cloud_layer_uniforms_offset.as_ref(),
+    ) {
+        let resolved: Option<Vec<_>> = pipelines
+            .volumetrics
+            .iter()
+            .map(|id| pipeline_cache.get_compute_pipeline(*id))
+            .collect();
+        if let Some(resolved) = resolved {
+            let grid = volumetrics_uniform.grid;
+            let offsets = [
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_offset.index(),
+            ];
+            let tiles = UVec3::new(grid.x.div_ceil(8), grid.y.div_ceil(8), 1);
+            for (k, label) in [
+                "volumetrics_material",
+                "volumetrics_scattering",
+                "volumetrics_integrate",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut pass = labelled_compute_pass!(label);
+                let pass_span = diagnostics.pass_span(&mut pass, label);
+                pass.set_pipeline(resolved[k]);
+                pass.set_bind_group(0, &bind_groups[k], &offsets);
+                // The material and scattering passes cover every froxel; the slice scan is one
+                // thread per tile marching the slices.
+                let groups = if k < 2 {
+                    tiles.with_z(grid.z)
+                } else {
+                    tiles
+                };
+                pass.dispatch_workgroups(groups.x, groups.y, groups.z);
+                pass_span.end(&mut pass);
+            }
         }
     }
 }
