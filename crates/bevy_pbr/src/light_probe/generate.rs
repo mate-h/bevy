@@ -12,7 +12,9 @@
 //! For prefiltered environment maps, see [`bevy_light::EnvironmentMapLight`].
 //! These components are intended to be added to a camera.
 use bevy_app::{App, Plugin, Update};
-use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Assets, RenderAssetUsages};
+use bevy_asset::{
+    embedded_asset, load_embedded_asset, AssetId, AssetServer, Assets, RenderAssetUsages,
+};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
@@ -22,13 +24,14 @@ use bevy_ecs::{
     system::{Commands, Query, Res, ResMut},
 };
 use bevy_image::Image;
-use bevy_math::Quat;
+use bevy_math::{Quat, Vec4};
+use bevy_platform::collections::HashMap;
 use bevy_render::{
     diagnostic::RecordDiagnostics,
     render_asset::RenderAssets,
     render_resource::{
         binding_types::*, AddressMode, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
-        BindGroupLayoutEntries, Buffer, BufferInitDescriptor, BufferUsages,
+        BindGroupLayoutEntries, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, DownlevelFlags,
         Extent3d, FilterMode, MipmapFilterMode, PipelineCache, Sampler, SamplerBindingType,
         SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureAspect,
@@ -49,8 +52,9 @@ use bevy_render::{
 //    storage texture.
 // 2. Generating mipmaps with a quadratic B-spline filter.
 // 3. Convolving the mip chain twice:
-//    * a [Lambertian convolution] for the 32 × 32 diffuse cubemap, with a
-//      projection onto [spherical harmonics]
+//    * a [Lambertian convolution] for the 32 × 32 diffuse cubemap: a projection
+//      onto [spherical harmonics], once per probe into an [`EnvironmentMapShBuffer`]
+//      that other passes can read, then evaluated into the cube's texels
 //    * a [GGX convolution] for each mip of the specular cubemap, with the fitted
 //      filters of [Manson and Sloan].
 //
@@ -84,6 +88,7 @@ const FILTER_TABLE_LEVELS: u32 = 7;
 pub struct GeneratorBindGroupLayouts {
     pub downsample: BindGroupLayoutDescriptor,
     pub radiance: BindGroupLayoutDescriptor,
+    pub sh_projection: BindGroupLayoutDescriptor,
     pub irradiance: BindGroupLayoutDescriptor,
     pub copy: BindGroupLayoutDescriptor,
 }
@@ -100,6 +105,7 @@ pub struct GeneratorPipelines {
     pub downsample: CachedComputePipelineId,
     pub copy: CachedComputePipelineId,
     pub radiance: CachedComputePipelineId,
+    pub sh_projection: CachedComputePipelineId,
     pub irradiance: CachedComputePipelineId,
 }
 
@@ -147,6 +153,7 @@ impl Plugin for EnvironmentMapGenerationPlugin {
         };
 
         render_app
+            .init_resource::<EnvironmentMapShBuffers>()
             .add_systems(
                 ExtractSchedule,
                 extract_generated_environment_map_entities.after(generate_environment_map_light),
@@ -234,6 +241,22 @@ pub fn initialize_generated_environment_map_resources(
         ),
     );
 
+    let sh_projection = BindGroupLayoutDescriptor::new(
+        "sh_projection_bind_group_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                // Source environment cubemap
+                (
+                    0,
+                    texture_2d_array(TextureSampleType::Float { filterable: true }),
+                ),
+                // Output spherical harmonics
+                (7, storage_buffer::<EnvironmentMapSh>(false)),
+            ),
+        ),
+    );
+
     let irradiance = BindGroupLayoutDescriptor::new(
         "irradiance_bind_group_layout",
         &BindGroupLayoutEntries::with_indices(
@@ -253,6 +276,8 @@ pub fn initialize_generated_environment_map_resources(
                     ),
                 ),
                 (3, uniform_buffer::<FilteringConstants>(false)), // Uniforms (face offset)
+                // The probe's spherical harmonics
+                (6, storage_buffer_read_only::<EnvironmentMapSh>(false)),
             ),
         ),
     );
@@ -276,6 +301,7 @@ pub fn initialize_generated_environment_map_resources(
     let layouts = GeneratorBindGroupLayouts {
         downsample,
         radiance,
+        sh_projection,
         irradiance,
         copy,
     };
@@ -323,6 +349,18 @@ pub fn initialize_generated_environment_map_resources(
         constants: vec![],
     });
 
+    // Spherical harmonic projection of the diffuse lighting, once per probe
+    let sh_projection = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("sh_projection_pipeline".into()),
+        layout: vec![layouts.sh_projection.clone()],
+        immediate_size: 0,
+        shader: env_filter_shader.clone(),
+        shader_defs: vec![],
+        entry_point: Some("project_irradiance_sh".into()),
+        zero_initialize_workgroup_memory: false,
+        constants: vec![],
+    });
+
     // Irradiance map for diffuse environment maps
     let irradiance = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("irradiance_pipeline".into()),
@@ -350,6 +388,7 @@ pub fn initialize_generated_environment_map_resources(
     let pipelines = GeneratorPipelines {
         downsample,
         radiance,
+        sh_projection,
         irradiance,
         copy: copy_pipeline,
     };
@@ -397,6 +436,9 @@ pub fn extract_generated_environment_map_entities(
             environment_map: env_map.clone(),
             diffuse_map: diffuse_map.clone(),
             specular_map: specular_map.clone(),
+            environment_map_id: filtered_env_map.environment_map.id(),
+            diffuse_map_id: env_map_light.diffuse_map.id(),
+            specular_map_id: env_map_light.specular_map.id(),
             intensity: filtered_env_map.intensity,
             rotation: filtered_env_map.rotation,
             affects_lightmapped_mesh_diffuse: filtered_env_map.affects_lightmapped_mesh_diffuse,
@@ -414,6 +456,12 @@ pub struct RenderEnvironmentMap {
     pub environment_map: GpuImage,
     pub diffuse_map: GpuImage,
     pub specular_map: GpuImage,
+    /// The image id of the source cubemap ([`GeneratedEnvironmentMapLight::environment_map`]).
+    pub environment_map_id: AssetId<Image>,
+    /// The image id of the generated diffuse map ([`EnvironmentMapLight::diffuse_map`]).
+    pub diffuse_map_id: AssetId<Image>,
+    /// The image id of the generated specular map ([`EnvironmentMapLight::specular_map`]).
+    pub specular_map_id: AssetId<Image>,
     pub intensity: f32,
     pub rotation: Quat,
     pub affects_lightmapped_mesh_diffuse: bool,
@@ -422,6 +470,76 @@ pub struct RenderEnvironmentMap {
 #[derive(Component)]
 pub struct IntermediateTextures {
     pub environment_map: CachedTexture,
+}
+
+/// The number of excess lights an [`EnvironmentMapSh`] can hold
+/// (`ENVIRONMENT_SH_MAX_EXCESS` in `environment_sh.wesl`).
+pub const ENVIRONMENT_SH_MAX_EXCESS: usize = 64;
+
+/// The contents of an [`EnvironmentMapShBuffer`]: the diffuse lighting of a
+/// generated environment map as 9 RGB spherical harmonic coefficients (L2) plus
+/// up to [`ENVIRONMENT_SH_MAX_EXCESS`] point lights for the excess of texels too
+/// bright to project without ringing, such as the sun.
+///
+/// Mirrors `EnvironmentMapSh` in `environment_sh.wesl`, which documents the
+/// layout (2208 bytes; std430 and std140 agree, so it binds as a storage or a
+/// uniform buffer). It is only ever written by the GPU; this type sizes the
+/// buffer and the bind group layout entry.
+#[derive(Clone, Copy, ShaderType)]
+pub struct EnvironmentMapSh {
+    /// 9 × (R, G, B, 0), convolved with the clamped cosine and divided by π.
+    pub coefficients: [Vec4; 9],
+    /// The number of excess lights in use.
+    pub excess_count: u32,
+    /// 64 × (x, y, z, 0), unit directions toward each excess light.
+    pub excess_directions: [Vec4; ENVIRONMENT_SH_MAX_EXCESS],
+    /// 64 × (R, G, B, 0), radiance × solid angle of each excess light.
+    pub excess_radiances: [Vec4; ENVIRONMENT_SH_MAX_EXCESS],
+}
+
+/// The GPU buffer holding a probe's [`EnvironmentMapSh`], on the render entity of
+/// each [`GeneratedEnvironmentMapLight`]. Written once per frame by the
+/// `project_irradiance_sh` pass before the irradiance pass reads it.
+#[derive(Component, Clone)]
+pub struct EnvironmentMapShBuffer {
+    pub buffer: Buffer,
+}
+
+/// The [`EnvironmentMapShBuffer`] of every [`GeneratedEnvironmentMapLight`], keyed by the
+/// image ids of its source cubemap and of its generated diffuse and specular maps (the
+/// latter is how [`EnvironmentMapExposures`] and `EnvironmentMapIds` key probes), so a pass
+/// can find a probe's harmonics from any image it holds. For instance, the atmosphere's sky
+/// harmonics are the entry for `AtmosphereEnvironmentMap::environment_map`.
+///
+/// Rebuilt every frame in [`RenderSystems::PrepareResources`]; look it up in
+/// [`RenderSystems::PrepareBindGroups`] or later. The buffer is written in the same frame,
+/// ahead of the render graph, so a graph node reads this frame's harmonics.
+///
+/// # Binding the buffer in another pass
+///
+/// Layout entry, matching `var<storage, read> sky_sh: EnvironmentMapSh` in WGSL (the
+/// struct and its evaluators are imported from `package::light_probe::environment_sh`):
+///
+/// ```ignore
+/// // In the bind group layout
+/// (B, storage_buffer_read_only::<EnvironmentMapSh>(false)),
+/// // In the bind group, after `sh_buffers.get(image_id)`
+/// (B, buffer.as_entire_binding()),
+/// ```
+///
+/// The buffer also has [`BufferUsages::UNIFORM`], so `uniform_buffer::<EnvironmentMapSh>`
+/// with `var<uniform>` works where storage buffers are unavailable in the fragment stage.
+///
+/// [`RenderSystems::PrepareResources`]: bevy_render::RenderSystems::PrepareResources
+/// [`RenderSystems::PrepareBindGroups`]: bevy_render::RenderSystems::PrepareBindGroups
+#[derive(Resource, Default)]
+pub struct EnvironmentMapShBuffers(HashMap<AssetId<Image>, Buffer>);
+
+impl EnvironmentMapShBuffers {
+    /// Returns the harmonics buffer of the probe that `image` belongs to, if it is generated.
+    pub fn get(&self, image: AssetId<Image>) -> Option<&Buffer> {
+        self.0.get(&image)
+    }
 }
 
 /// Returns the total number of mip levels for the provided square texture size.
@@ -442,12 +560,42 @@ fn compute_specular_mip_count(size: u32) -> u32 {
 
 /// Prepares textures needed for downsampling
 pub fn prepare_generated_environment_map_intermediate_textures(
-    light_probes: Query<(Entity, &RenderEnvironmentMap)>,
+    light_probes: Query<(
+        Entity,
+        &RenderEnvironmentMap,
+        Option<&EnvironmentMapShBuffer>,
+    )>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
+    mut sh_buffers: ResMut<EnvironmentMapShBuffers>,
     mut commands: Commands,
 ) {
-    for (entity, env_map_light) in &light_probes {
+    sh_buffers.0.clear();
+    for (entity, env_map_light, sh_buffer) in &light_probes {
+        // The spherical harmonics buffer persists across frames
+        let sh_buffer = match sh_buffer {
+            Some(sh_buffer) => sh_buffer.buffer.clone(),
+            None => {
+                let buffer = render_device.create_buffer(&BufferDescriptor {
+                    label: Some("environment_map_sh"),
+                    size: EnvironmentMapSh::min_size().get(),
+                    usage: BufferUsages::STORAGE | BufferUsages::UNIFORM | BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                commands.entity(entity).insert(EnvironmentMapShBuffer {
+                    buffer: buffer.clone(),
+                });
+                buffer
+            }
+        };
+        for image in [
+            env_map_light.environment_map_id,
+            env_map_light.diffuse_map_id,
+            env_map_light.specular_map_id,
+        ] {
+            sh_buffers.0.insert(image, sh_buffer.clone());
+        }
+
         let base_size = env_map_light.environment_map.texture_descriptor.size.width;
         let mip_level_count = compute_mip_count(base_size);
 
@@ -509,6 +657,7 @@ impl EnvironmentMapFilterSlicing {
 pub struct GeneratorBindGroups {
     pub downsample: Vec<BindGroup>, // One per mip level after the first
     pub radiance: Vec<BindGroup>,   // One per mip level
+    pub sh_projection: BindGroup,
     pub irradiance: BindGroup,
     pub copy: BindGroup,
 }
@@ -519,6 +668,7 @@ pub fn prepare_generated_environment_map_bind_groups(
         Entity,
         &IntermediateTextures,
         &RenderEnvironmentMap,
+        &EnvironmentMapShBuffer,
         Option<&EnvironmentMapFilterSlicing>,
     )>,
     frame_count: Res<FrameCount>,
@@ -530,7 +680,7 @@ pub fn prepare_generated_environment_map_bind_groups(
     filter_tables: Res<GeneratorFilterTables>,
     mut commands: Commands,
 ) {
-    for (entity, textures, env_map_light, slicing) in &light_probes {
+    for (entity, textures, env_map_light, sh_buffer, slicing) in &light_probes {
         let face_offset = (frame_count.0 * EnvironmentMapFilterSlicing::faces(slicing)) % 6;
 
         // Determine mip chain based on input size
@@ -609,6 +759,16 @@ pub fn prepare_generated_environment_map_bind_groups(
             radiance_bind_groups.push(bind_group);
         }
 
+        // Create the spherical harmonic projection bind group
+        let sh_projection_bind_group = render_device.create_bind_group(
+            "sh_projection_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.sh_projection),
+            &BindGroupEntries::with_indices((
+                (0, &textures.environment_map.default_view),
+                (7, sh_buffer.buffer.as_entire_binding()),
+            )),
+        );
+
         // Create irradiance bind group; only `face_offset` is read there
         let irradiance_constants = FilteringConstants {
             perceptual_roughness: 1.0,
@@ -636,6 +796,7 @@ pub fn prepare_generated_environment_map_bind_groups(
                 (0, &textures.environment_map.default_view),
                 (2, &irradiance_map),
                 (3, &irradiance_constants_buffer),
+                (6, sh_buffer.buffer.as_entire_binding()),
             )),
         );
 
@@ -659,6 +820,7 @@ pub fn prepare_generated_environment_map_bind_groups(
         commands.entity(entity).insert(GeneratorBindGroups {
             downsample: downsample_bind_groups,
             radiance: radiance_bind_groups,
+            sh_projection: sh_projection_bind_group,
             irradiance: irradiance_bind_group,
             copy: copy_bind_group,
         });
@@ -767,6 +929,10 @@ pub fn filtering_system(
     let Some(radiance_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.radiance) else {
         return;
     };
+    let Some(sh_projection_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.sh_projection)
+    else {
+        return;
+    };
     let Some(irradiance_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.irradiance)
     else {
         return;
@@ -805,6 +971,25 @@ pub fn filtering_system(
             }
 
             pass_span.end(&mut compute_pass);
+        }
+
+        // Spherical harmonic projection pass: one workgroup per probe, every
+        // frame the irradiance pass runs
+        {
+            let mut compute_pass =
+                ctx.command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("lightprobe_sh_projection"),
+                        timestamp_writes: None,
+                    });
+
+            let sh_span = diagnostics.pass_span(&mut compute_pass, "lightprobe_sh_projection");
+
+            compute_pass.set_pipeline(sh_projection_pipeline);
+            compute_pass.set_bind_group(0, &bind_groups.sh_projection, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
+
+            sh_span.end(&mut compute_pass);
         }
 
         // Irradiance convolution pass
