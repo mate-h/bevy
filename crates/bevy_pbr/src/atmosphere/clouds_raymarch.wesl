@@ -1223,23 +1223,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                         skip = max(dist_step,
                             d_sdf - CLOUD_SDF_SKIP_MARGIN_VOXELS * cloud_field_voxel_m());
                     }
-                    // Inside the voxel cloud's box the coarse field marks every cell occupied
-                    // (`cloud_possible_footprint`), so its SDF makes no leap there: the NVDF's own
-                    // signed distance does (Nubis Cubed voxel ray-marcher, Advances 2023 slides
-                    // l.832-858: `step_size = max(sdf_cloud_distance, adaptive_step_size) +
-                    // jitter_offset`, with the density sampled only where `sdf_cloud_distance <
-                    // 0`). The leap is the larger of the two fields' (both bound the distance to
-                    // a cloud: the coarse one to any cloud, the NVDF's to this one inside its
-                    // box, capped by the box's side). Surface band: the NVDF stores the distance
-                    // in steps of NVDF_SDF_QUANTUM_M (17.07 m, 8-bit codes rounded to the step),
-                    // so the cloud (profile > 0) extends up to one step past the decoded 0 (the
-                    // pack's parkouring cloud: every occupied voxel has a code <= 16, i.e. a
-                    // distance <= one step); the leap stops one step short of the surface and the
-                    // band [0, one step) is marched at the fine spacing, so the coarse predicate
-                    // meets the first occupied voxel as without the leap.
-                    let d_nvdf = voxel_cloud_sdf(p);
-                    if (d_nvdf < VOXEL_SDF_UNKNOWN) {
-                        skip = max(skip, max(dist_step, d_nvdf - NVDF_SDF_QUANTUM_M));
+                    // Inside the voxel cloud's box its NVDF's own signed distance leaps too
+                    // (Nubis Cubed voxel ray-marcher, Advances 2023 slides l.832-858:
+                    // `step_size = max(sdf_cloud_distance, adaptive_step_size) + jitter_offset`,
+                    // with the density sampled only where `sdf_cloud_distance < 0`). The leap is
+                    // the larger of the two fields': both bound the distance to any cloud, the
+                    // coarse one (187 m voxels, 2.5 voxels of margin) to every cloud, the NVDF's
+                    // to the voxel cloud, the only cloud in its box (`cloud_column_at`), capped by
+                    // the box's side. Surface band: the NVDF stores the distance in steps of
+                    // NVDF_SDF_QUANTUM_M (17.07 m, 8-bit codes rounded to the step), so the cloud
+                    // (profile > 0) extends up to one step past the decoded 0 (the pack's
+                    // parkouring cloud: every occupied voxel has a code <= 16, i.e. a distance
+                    // <= one step); the leap stops one step short of the surface and the band
+                    // [0, one step) is marched at the fine spacing, so the coarse predicate meets
+                    // the first occupied voxel as without the leap.
+                    @if(!ATM_DBG_NO_NVDF_SKIP) {
+                        let d_nvdf = voxel_cloud_sdf(p);
+                        if (d_nvdf < VOXEL_SDF_UNKNOWN) {
+                            skip = max(skip, max(dist_step, d_nvdf - NVDF_SDF_QUANTUM_M));
+                        }
                     }
                 }
                 t += skip;
