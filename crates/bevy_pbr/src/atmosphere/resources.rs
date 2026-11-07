@@ -669,6 +669,7 @@ impl AtmosphereBindGroupLayouts {
             texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly)
         };
         let volume_in = || texture_3d(TextureSampleType::Float { filterable: true });
+        let cluster_storage = BufferBindingType::Storage { read_only: true };
         let volumetrics_material = BindGroupLayoutDescriptor::new(
             "volumetrics_material_bind_group_layout",
             &volumetrics_entries().extend_with_indices((
@@ -689,6 +690,35 @@ impl AtmosphereBindGroupLayouts {
                 (73, volume_out()),
                 (79, volume_in()),
                 (83, volume_in()),
+                // The view's clustered lights (`cluster/mod.rs`; the mesh view's bindings 5-7)
+                // as storage buffers: the froxel passes are compute, which the uniform (WebGL2)
+                // fallback never has.
+                (
+                    84,
+                    storage_buffer_read_only_sized(
+                        false,
+                        Some(crate::GpuClusteredLights::min_size(cluster_storage)),
+                    ),
+                ),
+                (
+                    85,
+                    storage_buffer_read_only_sized(
+                        false,
+                        Some(crate::ViewClusterBindings::min_size_clusterable_object_index_lists(
+                            cluster_storage,
+                        )),
+                    ),
+                ),
+                (
+                    86,
+                    storage_buffer_read_only_sized(
+                        false,
+                        Some(crate::ViewClusterBindings::min_size_cluster_offsets_and_counts(
+                            cluster_storage,
+                        )),
+                    ),
+                ),
+                (87, texture_cube_array(TextureSampleType::Depth)),
             )),
         );
         let volumetrics_integrate = BindGroupLayoutDescriptor::new(
@@ -1564,6 +1594,8 @@ impl FromWorld for AtmosphereLutPipelines {
                         vec![
                             "CLOUDS_ENABLED".into(),
                             "CLOUD_SHADOW_SIMPLE_SAMPLING".into(),
+                            // The cluster lists are bound as storage buffers (see the layout).
+                            "AVAILABLE_STORAGE_BUFFER_BINDINGS__GE_3".into(),
                             def.into(),
                         ],
                     ]
@@ -2894,6 +2926,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             Option<&CloudShadowTemporalParamsUniform>,
             Option<&CloudReferenceAccumulator>,
             Option<&super::volumetrics::VolumetricsUniform>,
+            Option<&crate::ViewClusterBindings>,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
@@ -2906,12 +2939,13 @@ pub(super) fn prepare_atmosphere_bind_groups(
         Res<ShadowSamplers>,
         Res<VoxelCloudSampler>,
     ),
-    (bluenoise, render_images, fallback_image, extracted_voxel, fog_volumes_uniform): (
+    (bluenoise, render_images, fallback_image, extracted_voxel, fog_volumes_uniform, clusters): (
         Res<Bluenoise>,
         Res<RenderAssets<GpuImage>>,
         Res<FallbackImage>,
         Res<super::voxel_cloud::ExtractedVoxelCloud>,
         Res<super::volumetrics::FogVolumesUniform>,
+        Res<crate::GlobalClusterableObjectMeta>,
     ),
     view_uniforms: Res<ViewUniforms>,
     lights_uniforms: Res<LightMeta>,
@@ -2984,6 +3018,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         shadow_temporal_uniform,
         reference_accumulator,
         volumetrics_uniform,
+        cluster_bindings,
     ) in &views
     {
         let Some(depth_view) = view_depth_texture
@@ -3365,11 +3400,29 @@ pub(super) fn prepare_atmosphere_bind_groups(
 
         // Near-field froxel passes: the aerial LUT's inputs, the cloud inputs, the params and
         // each pass's volumes (`volumetrics.wesl`).
+        // The scattering pass loops the view's clustered lights: their buffers must be storage
+        // buffers (the layout's type), which every compute-capable device has.
+        let cluster_buffers = cluster_bindings
+            .filter(|_| clusters.gpu_clustered_lights.is_storage_buffer())
+            .and_then(|b| {
+                Some((
+                    clusters.gpu_clustered_lights.binding()?,
+                    b.clusterable_object_index_lists_binding()?,
+                    b.offsets_and_counts_binding()?,
+                ))
+            });
+        if froxel_params.is_some() && cluster_buffers.is_none() {
+            bevy_log::warn_once!(
+                "froxel volumetrics: the view's clustered light buffers are not bindable as storage buffers; the froxel passes are skipped"
+            );
+        }
         let volumetrics = froxel_params
             .clone()
             .zip(cloud_layer_binding.as_ref())
             .zip(fog_volumes_uniform.0.binding())
-            .map(|((params, cloud_layer_binding), fog_volumes_binding)| {
+            .zip(cluster_buffers)
+            .map(|(((params, cloud_layer_binding), fog_volumes_binding), cluster_buffers)| {
+                let (clustered_lights, index_lists, offsets_and_counts) = cluster_buffers;
                 let common = || {
                     DynamicBindGroupEntries::new_with_indices((
                             (0, atmosphere_binding.clone()),
@@ -3430,6 +3483,10 @@ pub(super) fn prepare_atmosphere_bind_groups(
                             (73, scattering),
                             (79, shadow),
                             (83, material_b),
+                            (84, clustered_lights),
+                            (85, index_lists),
+                            (86, offsets_and_counts),
+                            (87, &shadow_bindings.point_light_depth_texture_view),
                         )),
                     ),
                     render_device.create_bind_group(

@@ -8,8 +8,9 @@
 //!   shadow volume is "temporally filtered to resolve undersampling on high frequency shadow
 //!   detail").
 //! - `scattering`: per froxel, at the same point, the sun-lit single scattering (the shadow volume
-//!   supplies the visibility) plus the air's multiple-scattering term, into the Scattering volume
-//!   (L.rgb pre-exposed, sigma_t). No temporal blending (RDR2 slide 48).
+//!   supplies the visibility) plus the air's multiple-scattering term and the clustered point and
+//!   spot lights with `VolumetricLight`, into the Scattering volume (L.rgb pre-exposed, sigma_t).
+//!   No temporal blending (RDR2 slide 48).
 //! - `integrate`: per tile, front to back over the slices with the energy-conserving slab
 //!   integral (FB15 slide 29, FB16 Eq.17 / Listing 2), into the Integrated volume (in-scatter to
 //!   the camera, transmittance).
@@ -18,12 +19,17 @@
 //! wavelength-independent transmittance): the mean of the air's RGB extinction plus the fog's.
 //! Over 128 m of sea-level air the Rayleigh optical depth is ~7e-4, so its colour is below f16.
 //!
-//! Phase 2 hooks (not implemented): local lights.
+//! Later phases: SH ambient and the transparent-mesh binding (Phase 3), clouds in the grid
+//! (Phase 4), Z-binned fog volumes and a Hi-Z early-out (Phase 5).
 
+import bevy_render::maths::orthonormalize;
 import package::atmosphere::{
     bindings::{atmosphere, settings, view, lights, atmosphere_lut_sampler},
     bruneton_functions::ray_intersects_ground,
-    shadows::{fetch_directional_shadow, directional_shadow_ray_t_max, atmosphere_to_world_position},
+    shadows::{
+        fetch_directional_shadow, directional_shadow_ray_t_max, atmosphere_to_world_position,
+        sample_shadow_map_hardware, directional_shadow_textures_comparison_sampler,
+    },
     functions::{
         sample_density_lut, sample_scattering_lut, sample_transmittance_lut,
         sample_multiscattering_lut, hg_phase, uv_to_ray_direction, get_view_position,
@@ -33,6 +39,11 @@ import package::atmosphere::{
         volumetrics, froxel_tile_uv, froxel_noise, froxel_sample_t, froxel_slice_bounds,
         froxel_fog_extinction, froxel_t_to_u, one_minus_exp_over_x, MAX_FOG_VOLUMES,
     },
+};
+import package::render::mesh_view_types::{
+    ClusteredLights, ClusterableObjectIndexLists, ClusterOffsetsAndCounts,
+    POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT, POINT_LIGHT_FLAGS_VOLUMETRIC_BIT,
+    POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
 };
 
 @if(CLOUDS_ENABLED)
@@ -77,6 +88,16 @@ struct FogVolumes {
 @group(0) @binding(79) var shadow_volume: texture_3d<f32>;
 @if(VOLUMETRICS_SCATTERING)
 @group(0) @binding(83) var material_b: texture_3d<f32>;
+// The view's clustered lights (the mesh pipeline's group-0 bindings 5-7, `cluster/mod.rs`) and
+// the point-light shadow cubemaps; spot shadow maps live in the directional array (binding 16).
+@if(VOLUMETRICS_SCATTERING)
+@group(0) @binding(84) var<storage> clustered_lights: ClusteredLights;
+@if(VOLUMETRICS_SCATTERING)
+@group(0) @binding(85) var<storage> clusterable_object_index_lists: ClusterableObjectIndexLists;
+@if(VOLUMETRICS_SCATTERING)
+@group(0) @binding(86) var<storage> cluster_offsets_and_counts: ClusterOffsetsAndCounts;
+@if(VOLUMETRICS_SCATTERING)
+@group(0) @binding(87) var point_shadow_textures: texture_depth_cube_array;
 
 @if(VOLUMETRICS_INTEGRATE)
 @group(0) @binding(74) var scattering_in: texture_3d<f32>;
@@ -221,6 +242,10 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
 /// nearby occluder of the sun does not remove); the volume holds the product, so the cascades
 /// now darken it too, which over-darkens the MS term next to large occluders (inference; the
 /// two factors are separable only by storing them in two channels).
+/// Per clustered point / spot light with `VolumetricLight` (`POINT_LIGHT_FLAGS_VOLUMETRIC_BIT`):
+///   L += color x falloff(d) x cone x shadow_map x (sum_i sigma_s_i p_i(theta) + sigma_s_fog p_HG(theta, g))
+/// (plan: "local lights from the clustered light lists with their shadow maps"; RDR2 slide 38: a
+/// single HG lobe). The light loop is skipped where sigma_s is zero (FB15 slide 20).
 /// The air's Rayleigh / Mie split per phase function comes from the medium LUT (a summed sigma_s
 /// cannot give it); the fog's sigma_s is Material A's minus the air's and its g is Material B's,
 /// so the volumes agree with what was voxelized.
@@ -263,8 +288,135 @@ fn scattering(@builtin(global_invocation_id) id: vec3<u32>) {
         let multi = sample_multiscattering_lut(r, mu_light) * air_scattering * visibility;
         l += (*light).color.rgb * (single + multi);
     }
+
+    if (any(material.rgb > vec3(0.0))) {
+        l += local_lights_scattering(s, froxel_tile_uv(id.xy), r, fog_scattering, g);
+    }
     // Pre-exposed like the sky-view and aerial LUTs (f16 at twilight).
     textureStore(scattering_out, id, vec4(l * view.exposure, sigma_t));
+}
+
+/// The scattering from the point and spot lights of the froxel's cluster (the mesh pipeline's
+/// cluster lists, `clustered_forward.wesl`): sum over lights with `VolumetricLight` of
+/// color x falloff x cone x shadow x phase-weighted sigma_s. Light positions are world space.
+@if(VOLUMETRICS_SCATTERING)
+fn local_lights_scattering(s: FroxelSample, uv: vec2<f32>, r: f32, fog_scattering: vec3<f32>, g: f32) -> vec3<f32> {
+    let world = atmosphere_to_world_position(s.pos);
+    let view_z = (view.view_from_world * vec4(world, 1.0)).z;
+    let ranges = cluster_offsets_and_counts.data[froxel_cluster_index(uv, view_z)][0];
+    let point_offset = ranges.x;
+    let spot_offset = point_offset + ranges.y;
+    let rect_offset = spot_offset + ranges.z;
+
+    var l = vec3(0.0);
+    for (var i = point_offset; i < rect_offset; i++) {
+        let light_id = clusterable_object_index_lists.data[i];
+        let light = &clustered_lights.data[light_id];
+        if (((*light).flags & POINT_LIGHT_FLAGS_VOLUMETRIC_BIT) == 0u) {
+            continue;
+        }
+        let to_light = (*light).position_radius.xyz - world;
+        let distance_square = dot(to_light, to_light);
+        // Filament's smooth range falloff (`getDistanceAttenuation`, pbr_lighting.wesl).
+        let factor = distance_square * (*light).color_inverse_square_range.w;
+        let smooth_factor = saturate(1.0 - factor * factor);
+        var attenuation = smooth_factor * smooth_factor / max(distance_square, 0.0001);
+        if (attenuation <= 0.0) {
+            continue;
+        }
+        if (i < spot_offset) {
+            if (((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                attenuation *= fetch_point_shadow_hardware(light_id, world);
+            }
+        } else {
+            let spot_dir = spot_light_direction(light_id);
+            // Filament's cone (`spot_scale` / `spot_offset` precomputed in `light_custom_data.zw`).
+            let cd = dot(-spot_dir, normalize(to_light));
+            let cone = saturate(cd * (*light).light_custom_data.z + (*light).light_custom_data.w);
+            attenuation *= cone * cone;
+            if (((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                attenuation *= fetch_spot_shadow_hardware(light_id, world, spot_dir);
+            }
+        }
+        let cos_theta = dot(normalize(to_light), s.dir);
+        let phase_scattering = sample_scattering_lut(r, cos_theta) + fog_scattering * hg_phase(cos_theta, g);
+        l += (*light).color_inverse_square_range.rgb * attenuation * phase_scattering;
+    }
+    return l;
+}
+
+/// The cluster of a froxel sample (`clustered_forward.wesl` `view_fragment_cluster_index` /
+/// `view_z_to_z_slice`, with the tile's view uv in place of the fragment's viewport position).
+@if(VOLUMETRICS_SCATTERING)
+fn froxel_cluster_index(uv: vec2<f32>, view_z: f32) -> u32 {
+    let dims = lights.cluster_dimensions;
+    let xy = min(vec2<u32>(floor(uv * vec2<f32>(dims.xy))), dims.xy - 1u);
+    let is_orthographic = view.clip_from_view[3].w == 1.0;
+    var z_slice = 0u;
+    if (is_orthographic) {
+        z_slice = u32(floor((view_z - lights.cluster_factors.z) * lights.cluster_factors.w));
+    } else {
+        z_slice = u32(log(-view_z) * lights.cluster_factors.z - lights.cluster_factors.w + 1.0);
+    }
+    z_slice = min(z_slice, dims.z - 1u);
+    return min((xy.y * dims.x + xy.x) * dims.z + z_slice, dims.w - 1u);
+}
+
+/// Hardware 2x2 comparison tap of a point light's shadow cubemap at a world position
+/// (`render/shadows.wesl` `fetch_point_shadow` without the surface normal: the medium has none).
+@if(VOLUMETRICS_SCATTERING)
+fn fetch_point_shadow_hardware(light_id: u32, world: vec3<f32>) -> f32 {
+    let light = &clustered_lights.data[light_id];
+    let surface_to_light = (*light).position_radius.xyz - world;
+    let depth_offset = (*light).shadow_depth_bias * normalize(surface_to_light);
+    // The shadow maps align with the axes and the frustum planes are at 45 degrees, so the
+    // light-space depth is the largest absolute axis.
+    let frag_ls = (world + depth_offset) - (*light).position_radius.xyz;
+    let abs_position_ls = abs(frag_ls);
+    let major_axis_magnitude = max(abs_position_ls.x, max(abs_position_ls.y, abs_position_ls.z));
+    // projection * vec4(0, 0, -major_axis_magnitude, 1), depth terms only.
+    let zw = -major_axis_magnitude * (*light).light_custom_data.xy + (*light).light_custom_data.zw;
+    let depth = zw.x / zw.y;
+    // Cubemaps assume a left-handed coordinate space: flip z.
+    return textureSampleCompareLevel(
+        point_shadow_textures,
+        directional_shadow_textures_comparison_sampler,
+        frag_ls * vec3(1.0, 1.0, -1.0),
+        i32(light_id),
+        depth,
+    );
+}
+
+/// A spot light's direction from its packed (x, z) and the y-sign flag.
+@if(VOLUMETRICS_SCATTERING)
+fn spot_light_direction(light_id: u32) -> vec3<f32> {
+    let light = &clustered_lights.data[light_id];
+    var spot_dir = vec3((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
+    spot_dir.y = sqrt(max(0.0, 1.0 - spot_dir.x * spot_dir.x - spot_dir.z * spot_dir.z));
+    if (((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE) != 0u) {
+        spot_dir.y = -spot_dir.y;
+    }
+    return spot_dir;
+}
+
+/// Hardware 2x2 comparison tap of a spot light's shadow map (in the directional array at
+/// `spot_light_shadowmap_offset + light_id`) at a world position (`render/shadows.wesl`
+/// `fetch_spot_shadow` without the surface normal).
+@if(VOLUMETRICS_SCATTERING)
+fn fetch_spot_shadow_hardware(light_id: u32, world: vec3<f32>, spot_dir: vec3<f32>) -> f32 {
+    let light = &clustered_lights.data[light_id];
+    let surface_to_light = (*light).position_radius.xyz - world;
+    // The light's view matrix: z is the reverse of its forward (-spot_dir).
+    let fwd = -spot_dir;
+    let offset_position = -surface_to_light + (*light).shadow_depth_bias * normalize(surface_to_light);
+    let light_inv_rot = orthonormalize(fwd);
+    // A pure rotation: its inverse is the transpose, applied by post-multiplying.
+    let projected_position = offset_position * light_inv_rot;
+    let f_div_minus_z = 1.0 / ((*light).spot_light_tan_angle * -projected_position.z);
+    let shadow_xy_ndc = projected_position.xy * f_div_minus_z;
+    let shadow_uv = shadow_xy_ndc * vec2(0.5, -0.5) + vec2(0.5, 0.5);
+    let depth = (*light).shadow_map_near_z / -projected_position.z;
+    return sample_shadow_map_hardware(shadow_uv, depth, i32(light_id) + lights.spot_light_shadowmap_offset);
 }
 
 /// Pass 4: slice scan, one thread per tile, front to back. Per slice of length ds with light L
