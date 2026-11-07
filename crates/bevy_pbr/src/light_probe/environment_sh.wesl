@@ -2,12 +2,27 @@
 // `project_irradiance_sh` pass of `environment_filter.wesl` writes it, once per
 // probe per frame, into the probe's `EnvironmentMapShBuffer`.
 //
-// Import this module to read that buffer from another pass:
+// Import this module to read that buffer from another pass (the Rust side binds
+// the `Buffer` of `EnvironmentMapShBuffer`, or the one `EnvironmentMapShBuffers`
+// maps the probe's image id to, with `storage_buffer_read_only::<EnvironmentMapSh>`):
 //
-//     import package::light_probe::environment_sh::{EnvironmentMapSh, sh9_irradiance};
+//     import package::light_probe::environment_sh::{
+//         EnvironmentMapSh, excess_light_irradiance, sh9_irradiance,
+//     };
 //     @group(G) @binding(B) var<storage, read> sky_sh: EnvironmentMapSh;
 //
+//     // Irradiance over π at the normal `n`: the harmonics, then the excess lights
+//     // (the loop is the caller's, so it can be skipped where the sun is handled
+//     // separately, or convolved with a phase function instead of the cosine).
+//     var diffuse = sh9_irradiance(sky_sh.coefficients, n);
+//     for (var i = 0u; i < sky_sh.excess_count; i++) {
+//         diffuse += excess_light_irradiance(
+//             sky_sh.excess_directions[i].xyz, sky_sh.excess_radiances[i].rgb, n);
+//     }
+//
 // The buffer may be bound as `var<uniform>` as well: every field is 16-byte aligned.
+// For an isotropic medium, `coefficients[0].rgb * 0.282095` is the mean radiance
+// over the sphere (the L0 term), and each excess light adds `radiance / (4π)`.
 
 import bevy_render::maths::PI;
 
@@ -54,4 +69,23 @@ fn sh9_basis(d: vec3f) -> array<f32, 9> {
         1.092548 * d.x * d.z,
         0.546274 * (d.x * d.x - d.y * d.y),
     );
+}
+
+/// The irradiance over π at the unit normal `normal` from the harmonics
+/// `coefficients` of an `EnvironmentMapSh`, clamped at zero since two bands can
+/// ring below it. Excess lights are not included: see `excess_light_irradiance`.
+fn sh9_irradiance(coefficients: array<vec4f, 9>, normal: vec3f) -> vec3f {
+    let basis = sh9_basis(normal);
+    var irradiance = vec3f(0.0);
+    for (var i = 0u; i < 9u; i++) {
+        irradiance += coefficients[i].rgb * basis[i];
+    }
+    return max(irradiance, vec3f(0.0));
+}
+
+/// The irradiance over π at the unit normal `normal` from one excess light of an
+/// `EnvironmentMapSh`: `radiance` (times solid angle) arriving from the unit
+/// `direction`, as a clamped-cosine point light.
+fn excess_light_irradiance(direction: vec3f, radiance: vec3f, normal: vec3f) -> vec3f {
+    return radiance * max(dot(normal, direction), 0.0) / PI;
 }
