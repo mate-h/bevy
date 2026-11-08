@@ -19,12 +19,16 @@
 //!   enables the grid (8 px tiles x 64 slices to 128 m; the haze march then covers only the far
 //!   field, and the camera's `VolumetricFog` per-pixel pass is skipped: the grid consumes the
 //!   `FogVolume`s), `ATMOSPHERE_FROXEL_DISTANCE=<m>` its range, `ATMOSPHERE_FROXEL_FOG=<1/m>` a
-//!   height fog extinction at the ground (`ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`, default 0.01).
+//!   height fog extinction at the ground (`ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`, default 0.01),
+//!   `ATMOSPHERE_FROXEL_AMBIENT=<scale>` the sky ambient's scale (default 1; the grid turns on the
+//!   camera's atmosphere probe, whose harmonics are the ambient).
 //!   `ATMOSPHERE_FROXEL_TEST_LIGHT=1|<lm>` spawns a shadow-casting `VolumetricLight` point light
 //!   (1e9 lm, or the given flux), a `FogVolume` box (sigma_t 0.02/m, a ~200 m visibility fog;
 //!   `ATMOSPHERE_FROXEL_TEST_FOG=<1/m>`) and occluders in front of the hero camera so local-light
 //!   shafts and shadowed fog are visible (works without the grid too, via the per-pixel
-//!   `VolumetricFog` pass).
+//!   `VolumetricFog` pass); with the grid it also spawns two alpha-blended panes at 30 and 100 m
+//!   (red, blue) that take the froxel aerial perspective in the transparent pass
+//!   (`ATMOSPHERE_FROXEL_TRANSPARENT=0` turns that apply off).
 //! - Time: `ATMOSPHERE_CAM_STEP`, `ATMOSPHERE_FREEZE`, `ATMOSPHERE_FIXED_DT`,
 //!   `ATMOSPHERE_CLOUD_TIMESCALE=<x>` (cloud clock multiplier; `T` toggles a 60x time-lapse),
 //!   `ATMOSPHERE_SUN_SWEEP=<deg/frame>,<first>,<last>` (turns the sun by a fixed angle per frame),
@@ -1446,7 +1450,10 @@ fn setup_camera_fog(
     ));
     // `ATMOSPHERE_FROXELS=1`: the near-field froxel grid (`VolumetricsSettings`), with an
     // optional height fog (`ATMOSPHERE_FROXEL_FOG=<1/m>` extinction at the ground,
-    // `ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`) and range (`ATMOSPHERE_FROXEL_DISTANCE=<m>`).
+    // `ATMOSPHERE_FROXEL_FOG_FALLOFF=<1/m>`), range (`ATMOSPHERE_FROXEL_DISTANCE=<m>`), sky
+    // ambient scale (`ATMOSPHERE_FROXEL_AMBIENT=<scale>`, 0 = none; the ambient needs the
+    // camera's atmosphere probe, turned on below) and the transparent-mesh apply
+    // (`ATMOSPHERE_FROXEL_TRANSPARENT=0` turns it off).
     if std::env::var("ATMOSPHERE_FROXELS").is_ok() {
         let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok());
         let defaults = VolumetricsSettings::default();
@@ -1455,6 +1462,8 @@ fn setup_camera_fog(
             max_distance: env("ATMOSPHERE_FROXEL_DISTANCE").unwrap_or(defaults.max_distance),
             fog_density: env("ATMOSPHERE_FROXEL_FOG").unwrap_or(0.0),
             fog_height_falloff: env("ATMOSPHERE_FROXEL_FOG_FALLOFF").unwrap_or(0.01),
+            ambient_scale: env("ATMOSPHERE_FROXEL_AMBIENT").unwrap_or(defaults.ambient_scale),
+            apply_to_transparents: env("ATMOSPHERE_FROXEL_TRANSPARENT").is_none_or(|v| v != 0.0),
             ..defaults
         });
     }
@@ -1480,8 +1489,11 @@ fn setup_camera_fog(
         camera.insert(TemporalAntiAliasing::default());
     }
     // `ATMOSPHERE_IBL=1`: the atmosphere drives reflections and ambient lighting (IBL) for this
-    // view (off by default while debugging the clouds; on with `ATMOSPHERE_OBJECTS`).
-    let ibl = std::env::var("ATMOSPHERE_IBL").is_ok() || std::env::var("ATMOSPHERE_OBJECTS").is_ok();
+    // view (off by default while debugging the clouds; on with `ATMOSPHERE_OBJECTS`, and with
+    // `ATMOSPHERE_FROXELS`, whose sky ambient is the probe's harmonics).
+    let ibl = std::env::var("ATMOSPHERE_IBL").is_ok()
+        || std::env::var("ATMOSPHERE_OBJECTS").is_ok()
+        || std::env::var("ATMOSPHERE_FROXELS").is_ok();
     if ibl {
         camera.insert(AtmosphereEnvironmentMapLight::default());
     }
@@ -1642,6 +1654,27 @@ fn setup_terrain_scene(
                 Transform::from_translation(position)
                     .with_rotation(Quat::from_rotation_y(0.4 * i as f32)),
             ));
+        }
+        // With `ATMOSPHERE_FROXELS`, two alpha-blended panes facing the hero camera at 30 and
+        // 100 m, inside the grid: the froxel aerial perspective of transparent meshes
+        // (`VOLUMETRICS_APPLY_MESH`; opaque meshes get theirs from `render_sky`'s composite).
+        // Both subtend ~6 degrees; the far one is offset sideways so the near one does not cover it.
+        if std::env::var("ATMOSPHERE_FROXELS").is_ok() {
+            for (distance, half_size, z, color) in [
+                (30.0, 1.5, 0.0, Color::srgba(0.9, 0.2, 0.15, 0.6)),
+                (100.0, 5.0, 14.0, Color::srgba(0.15, 0.3, 0.9, 0.6)),
+            ] {
+                commands.spawn((
+                    Mesh3d(meshes.add(Plane3d::new(-Vec3::X, Vec2::splat(half_size)))),
+                    MeshMaterial3d(std_materials.add(StandardMaterial {
+                        base_color: color,
+                        alpha_mode: AlphaMode::Blend,
+                        perceptual_roughness: 0.6,
+                        ..default()
+                    })),
+                    Transform::from_xyz(-2.8 + distance, 1.8 + half_size, z),
+                ));
+            }
         }
     }
 
