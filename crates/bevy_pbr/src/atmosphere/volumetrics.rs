@@ -14,14 +14,15 @@ use bevy_color::ColorToComponents as _;
 use bevy_ecs::{
     component::Component,
     resource::Resource,
-    system::{Query, ResMut},
+    system::{Commands, Query, Res, ResMut},
 };
 use bevy_light::FogVolume;
 use bevy_math::{Mat4, UVec2, UVec3, Vec3, Vec4};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     extract_component::ExtractComponent,
-    render_resource::{ShaderType, UniformBuffer},
+    render_resource::{Buffer, BufferDescriptor, BufferUsages, ShaderType, UniformBuffer},
+    renderer::RenderDevice,
     Extract, RenderApp,
 };
 use bevy_transform::components::GlobalTransform;
@@ -84,6 +85,17 @@ pub struct VolumetricsSettings {
     /// undersampling on high frequency shadow detail"). Default 0.05: FB15 slide 23 blends the
     /// current frame into the previous at 5%. 1 disables the filter.
     pub shadow_temporal_alpha: f32,
+    /// Scale of the sky ambient in-scatter (the view's sky `EnvironmentMapSh`, convolved with
+    /// each medium's phase function in the scattering pass). 1 is the physical value; RDR2
+    /// slide 44 exposes an "ambient" intensity per fog volume so interiors are not lit by the
+    /// sky through their walls. This is the view-wide scale; a per-`FogVolume` scale (RDR2's) is
+    /// a follow-up (it needs a field on `bevy_light::FogVolume`). 0 disables the ambient.
+    pub ambient_scale: f32,
+    /// Whether alpha-blended meshes take the grid's aerial perspective in the transparent pass
+    /// (`VOLUMETRICS_APPLY_MESH`: colour x T + L from the integrated volume, W14 p.44). Opaque
+    /// meshes always get it from `render_sky`'s composite. Default true; off, transparents are
+    /// unfogged, as before the grid.
+    pub apply_to_transparents: bool,
 }
 
 impl Default for VolumetricsSettings {
@@ -100,11 +112,26 @@ impl Default for VolumetricsSettings {
             fog_albedo: Vec3::ONE,
             fog_anisotropy: 0.5,
             shadow_temporal_alpha: 0.05,
+            ambient_scale: 1.0,
+            apply_to_transparents: true,
         }
     }
 }
 
 impl VolumetricsSettings {
+    /// Whether the froxel passes run for a view with these settings: enabled, the view renders a
+    /// cloud layer and is not multisampled (the half-res haze prepass path). The one condition
+    /// shared by the grid's textures, the render-sky pipelines and the mesh view bind group.
+    pub fn runs(&self, has_clouds: bool, msaa_samples: u32) -> bool {
+        self.enabled && has_clouds && msaa_samples == 1
+    }
+
+    /// Whether the view's transparent meshes take the grid's aerial perspective
+    /// (`VOLUMETRICS_APPLY_MESH`): [`Self::runs`] and [`Self::apply_to_transparents`].
+    pub fn applies_to_transparents(&self, has_clouds: bool, msaa_samples: u32) -> bool {
+        self.runs(has_clouds, msaa_samples) && self.apply_to_transparents
+    }
+
     /// Froxel grid size for a view: `ceil(fit / tile_px)` per axis, where `fit` is the render
     /// size scaled down (same aspect) to fit within `cap` (the cloud/haze render-size cap), times
     /// `slices`. 120x68x64 at a 960x540 cap, 160x90x64 at 1280x720.
@@ -136,12 +163,13 @@ impl VolumetricsSettings {
             fog_height: self.fog_height,
             fog_anisotropy: self.fog_anisotropy.clamp(-0.99, 0.99),
             enabled: self.enabled as u32,
-            _pad: 0,
+            ambient_scale: self.ambient_scale.max(0.0),
             prev_clip_from_world: Mat4::IDENTITY,
             prev_world_position: Vec3::ZERO,
             history_valid: 0,
             shadow_temporal_alpha: self.shadow_temporal_alpha.clamp(0.0, 1.0),
-            _pad2: UVec3::ZERO,
+            sky_sh_exposure: 0.0,
+            _pad2: UVec2::ZERO,
         }
     }
 }
@@ -172,7 +200,8 @@ pub struct GpuVolumetricsParams {
     pub fog_height: f32,
     pub fog_anisotropy: f32,
     pub enabled: u32,
-    pub _pad: u32,
+    /// [`VolumetricsSettings::ambient_scale`].
+    pub ambient_scale: f32,
     /// The previous frame's view-projection and camera position: the shadow volume's history is
     /// reprojected through them (world position -> previous clip -> previous grid uv, distance
     /// to the previous camera -> previous slice).
@@ -182,7 +211,12 @@ pub struct GpuVolumetricsParams {
     /// frame, after a resize, or when the passes did not run last frame).
     pub history_valid: u32,
     pub shadow_temporal_alpha: f32,
-    pub _pad2: UVec3,
+    /// The exposure the sky harmonics bound at binding 88 are stored with
+    /// (`EnvironmentMapExposures`: the atmosphere probe's cubemap is pre-exposed by the view that
+    /// renders it), 0 when the view has no sky probe (the zero-filled [`SkyShFallbackBuffer`] is
+    /// bound and the ambient term is skipped).
+    pub sky_sh_exposure: f32,
+    pub _pad2: UVec2,
 }
 
 /// Per-view uniform of [`GpuVolumetricsParams`] and the grid it was built for; present on views
@@ -191,6 +225,46 @@ pub struct GpuVolumetricsParams {
 pub struct VolumetricsUniform {
     pub buffer: UniformBuffer<GpuVolumetricsParams>,
     pub grid: UVec3,
+    /// The image whose `EnvironmentMapSh` (`EnvironmentMapShBuffers`) is the view's sky ambient:
+    /// the view's own atmosphere probe, else a standalone probe this view renders; `None` binds
+    /// the [`SkyShFallbackBuffer`].
+    pub sky_sh: Option<bevy_asset::AssetId<bevy_image::Image>>,
+}
+
+/// A zero-filled `EnvironmentMapSh` (`light_probe/generate.rs`), bound as the sky harmonics of
+/// froxel views without an atmosphere probe (no `AtmosphereEnvironmentMapLight`, or one with
+/// `filtered: false`, which projects no harmonics): no sky ambient.
+#[derive(Resource)]
+pub struct SkyShFallbackBuffer(pub Buffer);
+
+/// A [`GpuVolumetricsParams`] with `enabled = 0` and an empty grid, bound to the mesh view bind
+/// group (`VOLUMETRICS_APPLY_MESH`, `mesh_view_bindings.rs` binding 34) of a froxel view whose
+/// [`VolumetricsUniform`] is missing this frame: the transparent-mesh apply then does nothing.
+#[derive(Resource)]
+pub struct VolumetricsFallbackUniform(pub UniformBuffer<GpuVolumetricsParams>);
+
+/// Creates the [`SkyShFallbackBuffer`] and the [`VolumetricsFallbackUniform`] (`RenderStartup`).
+pub fn init_volumetrics_fallbacks(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    queue: Res<bevy_render::renderer::RenderQueue>,
+) {
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("volumetrics_sky_sh_fallback"),
+        size: crate::generate::EnvironmentMapSh::min_size().get(),
+        usage: BufferUsages::STORAGE | BufferUsages::UNIFORM,
+        // wgpu zero-initialises new buffers, and nothing writes this one.
+        mapped_at_creation: false,
+    });
+    commands.insert_resource(SkyShFallbackBuffer(buffer));
+    let off = VolumetricsSettings {
+        enabled: false,
+        ..Default::default()
+    };
+    let mut params = UniformBuffer::from(off.gpu_params(UVec3::ZERO));
+    params.set_label(Some("volumetrics_params_fallback"));
+    params.write_buffer(&device, &queue);
+    commands.insert_resource(VolumetricsFallbackUniform(params));
 }
 
 /// Most [`FogVolume`]s injected into the grid per frame (RDR2 slide 45: up to 32 fog volumes,

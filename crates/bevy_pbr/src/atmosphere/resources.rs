@@ -719,6 +719,15 @@ impl AtmosphereBindGroupLayouts {
                     ),
                 ),
                 (87, texture_cube_array(TextureSampleType::Depth)),
+                // The ground-skylight column map (`cloud_ground_sky`, the haze's binding 63): the
+                // local cloud occlusion of the sky ambient.
+                (63, texture_2d(TextureSampleType::Float { filterable: true })),
+                // The view's sky harmonics (`EnvironmentMapSh`, `light_probe/generate.rs`; the
+                // zero-filled `SkyShFallbackBuffer` without a probe): the sky ambient.
+                (
+                    88,
+                    storage_buffer_read_only::<crate::generate::EnvironmentMapSh>(false),
+                ),
             )),
         );
         let volumetrics_integrate = BindGroupLayoutDescriptor::new(
@@ -1598,6 +1607,12 @@ impl FromWorld for AtmosphereLutPipelines {
                             "AVAILABLE_STORAGE_BUFFER_BINDINGS__GE_3".into(),
                             def.into(),
                         ],
+                        // The scattering pass binds the ground-skylight column map (63).
+                        if entry == "scattering" {
+                            vec!["CLOUD_COLUMN_MAP".into()]
+                        } else {
+                            vec![]
+                        },
                     ]
                     .concat(),
                     entry_point: Some(entry.into()),
@@ -1763,9 +1778,7 @@ pub(super) fn queue_render_sky_pipelines(
 ) {
     for (entity, msaa, cloud_layer, volumetrics) in &views {
         // The froxel grid runs on the half-res haze path of views with clouds (`volumetrics.rs`).
-        let froxels = volumetrics.is_some_and(|v| v.enabled)
-            && cloud_layer.is_some()
-            && msaa.samples() == 1;
+        let froxels = volumetrics.is_some_and(|v| v.runs(cloud_layer.is_some(), msaa.samples()));
         let id = specializer.specialize(
             &pipeline_cache,
             &layouts,
@@ -2311,7 +2324,7 @@ pub(super) fn prepare_atmosphere_textures(
         // Near-field froxel volumes, sized from the render size and the cloud render-size cap
         // (`VolumetricsSettings::grid_size`); RGBA16F each (FB15 slide 12: ~7 MB at 160x90x64).
         let volumetrics_grid = volumetrics
-            .filter(|v| v.enabled && has_clouds && *msaa == Msaa::Off)
+            .filter(|v| v.runs(has_clouds, msaa.samples()))
             .map(|v| v.grid_size(render_size, lut_settings.cloud_max_render_size))
             .unwrap_or(bevy_math::UVec3::ZERO);
         let mut volume = |label: &'static str, usage: TextureUsages| {
@@ -2622,6 +2635,11 @@ pub(super) fn prepare_volumetrics_uniforms(
     mut per_view: ResMut<super::node::PerViewLutState>,
     fog_volumes: Res<super::volumetrics::ExtractedFogVolumes>,
     mut fog_volumes_uniform: ResMut<super::volumetrics::FogVolumesUniform>,
+    (probes, probe_source, exposures): (
+        Query<(Entity, &super::environment::AtmosphereEnvironmentMap)>,
+        Res<super::environment::AtmosphereProbeSource>,
+        Res<crate::environment_map::EnvironmentMapExposures>,
+    ),
     mut commands: Commands,
 ) {
     // The frame's fog volumes, shared by every view's material pass.
@@ -2640,6 +2658,21 @@ pub(super) fn prepare_volumetrics_uniforms(
             continue;
         };
         let mut params = settings.gpu_params(grid);
+        // The sky ambient's harmonics: the view's own atmosphere probe (an
+        // `AtmosphereEnvironmentMapLight` on the camera), else a standalone probe rendered by
+        // this view (`probe_view`), both the sky this view sees. The harmonics are projected from
+        // the probe's cubemap, which is pre-exposed by the view that renders it.
+        let sky_sh = probes
+            .get(entity)
+            .ok()
+            .or_else(|| {
+                probes.iter().find(|(probe, _)| {
+                    super::environment::probe_view(*probe, views.contains(*probe), &probe_source)
+                        == Some(entity)
+                })
+            })
+            .map(|(_, probe)| probe.environment_map.id());
+        params.sky_sh_exposure = sky_sh.map_or(0.0, |id| exposures.get(id));
         // The shadow volume's history is last frame's volume when the passes wrote it into the
         // texture bound as history this frame (a resize is a new texture) and the previous view
         // is known; its reprojection goes through last frame's view-projection.
@@ -2662,7 +2695,11 @@ pub(super) fn prepare_volumetrics_uniforms(
         buffer.write_buffer(&render_device, &render_queue);
         commands
             .entity(entity)
-            .insert(super::volumetrics::VolumetricsUniform { buffer, grid });
+            .insert(super::volumetrics::VolumetricsUniform {
+                buffer,
+                grid,
+                sky_sh,
+            });
     }
 }
 
@@ -2933,11 +2970,20 @@ pub(super) fn prepare_atmosphere_bind_groups(
     render_device: Res<RenderDevice>,
     layouts: Res<AtmosphereBindGroupLayouts>,
     render_sky_layouts: Res<RenderSkyBindGroupLayouts>,
-    (atmosphere_sampler, cloud_noise_sampler, shadow_samplers, voxel_sampler): (
+    (
+        atmosphere_sampler,
+        cloud_noise_sampler,
+        shadow_samplers,
+        voxel_sampler,
+        sh_buffers,
+        sky_sh_fallback,
+    ): (
         Res<LinearSampler>,
         Res<CloudNoiseSampler>,
         Res<ShadowSamplers>,
         Res<VoxelCloudSampler>,
+        Res<crate::generate::EnvironmentMapShBuffers>,
+        Res<super::volumetrics::SkyShFallbackBuffer>,
     ),
     (bluenoise, render_images, fallback_image, extracted_voxel, fog_volumes_uniform, clusters): (
         Res<Bluenoise>,
@@ -3423,6 +3469,12 @@ pub(super) fn prepare_atmosphere_bind_groups(
             .zip(cluster_buffers)
             .map(|(((params, cloud_layer_binding), fog_volumes_binding), cluster_buffers)| {
                 let (clustered_lights, index_lists, offsets_and_counts) = cluster_buffers;
+                // The sky harmonics of the view's probe (`VolumetricsUniform::sky_sh`); the
+                // zero-filled fallback when there is none or its buffer is not built yet.
+                let sky_sh = volumetrics_uniform
+                    .and_then(|u| u.sky_sh)
+                    .and_then(|id| sh_buffers.get(id))
+                    .unwrap_or(&sky_sh_fallback.0);
                 let common = || {
                     DynamicBindGroupEntries::new_with_indices((
                             (0, atmosphere_binding.clone()),
@@ -3487,6 +3539,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                             (85, index_lists),
                             (86, offsets_and_counts),
                             (87, &shadow_bindings.point_light_depth_texture_view),
+                            (63, &textures.cloud_ground_sky.default_view),
+                            (88, sky_sh.as_entire_binding()),
                         )),
                     ),
                     render_device.create_bind_group(

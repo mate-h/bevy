@@ -1,5 +1,6 @@
 import package::render::mesh_view_types as types;
 import package::atmosphere::types as atmosphere_types;
+@if(VOLUMETRICS_APPLY_MESH) import package::atmosphere::froxel_lookup;
 import bevy_render::{
     view::View,
     globals::Globals,
@@ -94,6 +95,14 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @group(0) @binding(29) var<storage> atmosphere_data: atmosphere_types::AtmosphereData;
 // Cloud shadow map of the atmosphere's `VolumetricCloudLayer` (front depth km, mean extinction, max OD).
 @group(0) @binding(33) var atmosphere_cloud_shadow_map: texture_2d<f32>;
+}
+
+// Near-field froxel volumetrics (`atmosphere/volumetrics.rs`): the grid's params and its
+// integrated volume (in-scatter to the camera, pre-exposed; transmittance), applied to
+// alpha-blended meshes (`pbr_functions.wesl` `apply_froxel_volumetrics`).
+@if(VOLUMETRICS_APPLY_MESH) {
+@group(0) @binding(34) var<uniform> volumetrics_params: froxel_lookup::VolumetricsParams;
+@group(0) @binding(35) var volumetrics_integrated: texture_3d<f32>;
 }
 
 @if(BLUE_NOISE_TEXTURE)

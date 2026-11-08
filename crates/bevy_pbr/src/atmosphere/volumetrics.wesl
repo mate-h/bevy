@@ -51,6 +51,15 @@ import package::atmosphere::{
     functions::sample_cloud_shadow_map,
     clouds::cloud_layer,
 };
+@if(VOLUMETRICS_SCATTERING)
+import bevy_render::maths::PI;
+@if(VOLUMETRICS_SCATTERING)
+import package::light_probe::environment_sh::{EnvironmentMapSh, sh9_basis, ENVIRONMENT_SH_MAX_EXCESS};
+@if(VOLUMETRICS_SCATTERING)
+import package::atmosphere::{
+    functions::{cloud_column_map, sample_density_lut_mie_g_sigma},
+    clouds::{cloud_column_map_origin, CLOUD_COLUMN_MAP_EXTENT_M},
+};
 
 /// A `FogVolume` (bevy_light) for the grid (`volumetrics.rs` `GpuFogVolume`): the unit cube
 /// [-0.5, 0.5]^3 in its local space, with its medium already multiplied out.
@@ -98,6 +107,11 @@ struct FogVolumes {
 @group(0) @binding(86) var<storage> cluster_offsets_and_counts: ClusterOffsetsAndCounts;
 @if(VOLUMETRICS_SCATTERING)
 @group(0) @binding(87) var point_shadow_textures: texture_depth_cube_array;
+// The view's sky harmonics (`light_probe/generate.rs` `EnvironmentMapShBuffers`: the atmosphere
+// probe's cubemap projected onto L2 SH plus the over-bright texels as excess lights), or the
+// zero-filled `SkyShFallbackBuffer` (`volumetrics.sky_sh_exposure` is then 0).
+@if(VOLUMETRICS_SCATTERING)
+@group(0) @binding(88) var<storage, read> sky_sh: EnvironmentMapSh;
 
 @if(VOLUMETRICS_INTEGRATE)
 @group(0) @binding(74) var scattering_in: texture_3d<f32>;
@@ -291,9 +305,100 @@ fn scattering(@builtin(global_invocation_id) id: vec3<u32>) {
 
     if (any(material.rgb > vec3(0.0))) {
         l += local_lights_scattering(s, froxel_tile_uv(id.xy), r, fog_scattering, g);
+        l += sky_ambient_scattering(s, r, up, air_scattering, fog_scattering, g);
     }
     // Pre-exposed like the sky-view and aerial LUTs (f16 at twilight).
     textureStore(scattering_out, id, vec4(l * view.exposure, sigma_t));
+}
+
+/// Sky ambient in-scatter toward the camera at a froxel: sigma_s x ∫ L_sky(ω) p(ω·d) dω over the
+/// sphere, with L_sky the view's sky probe in spherical harmonics and d the ray direction (from
+/// the camera through the froxel; light arriving from ω scatters toward the camera through the
+/// angle cos θ = ω·d, the convention of the sun term). The integral is a Funk-Hecke convolution
+/// (W14 p.52-55 rotate the zonal phase to the view vector and take the SH product; FB15 slide 19
+/// uses the Lambert lobe in its place; arXiv 2405.09447 for the HG moments):
+///
+///   ∫ L(ω) p(ω·d) dω = Σ_l λ_l Σ_m L_lm Y_lm(d),   λ_l = 2π ∫_{-1}^{1} p(t) P_l(t) dt.
+///
+/// The buffer stores c_lm = (A_l / π) L_lm, the irradiance over π (`environment_sh.wesl`), with
+/// the clamped-cosine moments A_l = (π, 2π/3, π/4), so the radiance harmonics are L_lm = c_lm x
+/// (1, 3/2, 4). For Henyey-Greenstein, p(t) = (1 / 4π) Σ_l (2l + 1) g^l P_l(t) and
+/// ∫ P_l P_l dt = 2 / (2l + 1), so λ_l = g^l: for g = 0 the result is L_00 Y_00 = L_00 x 0.282095,
+/// the mean radiance over the sphere, and as g -> 1 (a delta toward d) it is L(d), the sky
+/// radiance from ahead on the ray, which is what forward scattering sends to the camera.
+///
+/// Air: λ_0 = σ_s (every phase function integrates to 1); λ_1 = Σ g σ_s,Mie (the medium LUT's
+/// stored first moment; Rayleigh's is 0); band 2 (0.1 σ_s,Rayleigh + Σ g² σ_s,Mie: Rayleigh's
+/// second moment is 2π ∫ 3/(16π) (1 + t²) P_2 dt = 1/10) needs the Rayleigh/Mie split of σ_s
+/// the LUT does not hold and is dropped (L1 for the air, Lumen's choice for fog; gap). Fog: HG
+/// with Material B's g, all three bands. Each reconstruction is clamped at zero (L2 rings).
+/// Excess lights (the sun's over-bright texels, radiance x solid angle) are directional lights
+/// through the actual phase functions, as the sun term. The result is scaled by the probe's
+/// exposure, `ambient_scale`, and the local cloud occlusion of the sky
+/// (`sky_ambient_cloud_occlusion`).
+@if(VOLUMETRICS_SCATTERING)
+fn sky_ambient_scattering(s: FroxelSample, r: f32, up: vec3<f32>, air_scattering: vec3<f32>, fog_scattering: vec3<f32>, g: f32) -> vec3<f32> {
+    if (volumetrics.sky_sh_exposure <= 0.0 || volumetrics.ambient_scale <= 0.0) {
+        return vec3(0.0);
+    }
+    let inv_exposure = 1.0 / volumetrics.sky_sh_exposure;
+    let y = sh9_basis(s.dir);
+    let b0 = sky_sh.coefficients[0].rgb * y[0];
+    var b1 = vec3(0.0);
+    for (var i = 1u; i < 4u; i++) {
+        b1 += sky_sh.coefficients[i].rgb * y[i];
+    }
+    b1 *= 1.5;
+    var b2 = vec3(0.0);
+    for (var i = 4u; i < 9u; i++) {
+        b2 += sky_sh.coefficients[i].rgb * y[i];
+    }
+    b2 *= 4.0;
+    let g_sigma_mie = sample_density_lut_mie_g_sigma(r);
+    var l = max(air_scattering * b0 + g_sigma_mie * b1, vec3(0.0));
+    l += fog_scattering * max(b0 + g * (b1 + g * b2), vec3(0.0));
+    for (var i = 0u; i < min(sky_sh.excess_count, ENVIRONMENT_SH_MAX_EXCESS); i++) {
+        let cos_theta = dot(sky_sh.excess_directions[i].xyz, s.dir);
+        l += sky_sh.excess_radiances[i].rgb
+            * (sample_scattering_lut(r, cos_theta) + fog_scattering * hg_phase(cos_theta, g));
+    }
+    l *= inv_exposure * volumetrics.ambient_scale;
+    @if(CLOUD_COLUMN_MAP) {
+        l *= sky_ambient_cloud_occlusion(s.pos, up, inv_exposure);
+    }
+    return l;
+}
+
+/// The local cloud occlusion of the sky ambient at a froxel: the ground-skylight column map's
+/// cloud-occluded sky irradiance at the froxel's ground column (`cloud_shadow_map.wesl`
+/// ground_sky, 64 cosine-weighted directions through the cloud field, pre-exposed) over the
+/// probe's sky irradiance at the up normal (π x the harmonics' irradiance / π at `up`, plus the
+/// excess lights), both for the upward-facing ground. The probe already sees the clouds from the
+/// camera, so this is the ratio of the column's skylight to the camera's (RDR2 slide 36: the
+/// froxels sample a 32x32 map of sky probes rather than one), 1 where the ratio is undefined
+/// (no skylight, or outside the column map). One scalar (the RGB mean), as the shadow volume is.
+@if(VOLUMETRICS_SCATTERING && CLOUD_COLUMN_MAP)
+fn sky_ambient_cloud_occlusion(pos: vec3<f32>, up: vec3<f32>, inv_exposure: f32) -> f32 {
+    let camera_xz = get_view_position().xz;
+    let uv = (pos.xz - cloud_column_map_origin(camera_xz)) / (2.0 * CLOUD_COLUMN_MAP_EXTENT_M);
+    if (any(uv < vec2(0.0)) || any(uv > vec2(1.0))) {
+        return 1.0;
+    }
+    let e_column = textureSampleLevel(cloud_column_map, atmosphere_lut_sampler, uv, 0.0).gba / view.exposure;
+    let y = sh9_basis(up);
+    var e_probe = vec3(0.0);
+    for (var i = 0u; i < 9u; i++) {
+        e_probe += sky_sh.coefficients[i].rgb * y[i];
+    }
+    e_probe = max(e_probe, vec3(0.0));
+    for (var i = 0u; i < min(sky_sh.excess_count, ENVIRONMENT_SH_MAX_EXCESS); i++) {
+        e_probe += sky_sh.excess_radiances[i].rgb * max(dot(up, sky_sh.excess_directions[i].xyz), 0.0) / PI;
+    }
+    let e_probe_mean = mean3(e_probe) * PI * inv_exposure;
+    if (e_probe_mean <= 0.0) {
+        return 1.0;
+    }
+    return mean3(e_column) / e_probe_mean;
 }
 
 /// The scattering from the point and spot lights of the froxel's cluster (the mesh pipeline's
