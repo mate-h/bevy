@@ -903,9 +903,24 @@ pub fn render_sky(
             ("field_ext", &textures.cloud_field_ext.texture, 8, "rgba16f"),
             ("field_esc", &textures.cloud_field_esc.texture, 8, "rgba16f"),
             ("field_diff", &textures.cloud_field_diff.texture, 8, "rgba16f"),
-            ("field_diff_u", &textures.cloud_field_diff_u.texture, 4, "r32f"),
-            ("field_diff_src", &textures.cloud_field_diff_src.texture, 4, "r32f"),
+            ("field_diff_u", &textures.cloud_field_diff_u.texture, 0, "f32"),
+            ("field_diff_src", &textures.cloud_field_diff_src.texture, 0, "f32"),
         ] {
+            // The diffusion volumes' format changed once already (R32Float -> Rgba32Float with
+            // the sky-SH boundary); take the row size from the texture so the dump cannot
+            // under-count it again (a wrong `bytes_per_row` is a validation error that quits
+            // the app on the dump frame).
+            let (bpt, ext) = match bpt {
+                0 => (
+                    t.format().block_copy_size(None).unwrap_or(4),
+                    match t.format().block_copy_size(None) {
+                        Some(16) => "rgba32f",
+                        Some(8) => "rgba16f",
+                        _ => ext,
+                    },
+                ),
+                n => (n, ext),
+            };
             d(command_encoder, name, t, 0, s3(t), bpt, ext);
         }
         let (pw, det, wx) = &noise_dump;
