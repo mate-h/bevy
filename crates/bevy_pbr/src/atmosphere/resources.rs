@@ -722,6 +722,10 @@ impl AtmosphereBindGroupLayouts {
                             8,
                             texture_2d(TextureSampleType::Float { filterable: true }),
                         ),
+                        (
+                            10,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
                         (12, sampler(SamplerBindingType::Filtering)),
                         (20, uniform_buffer::<GpuCloudLayers>(true)),
                         (
@@ -3272,6 +3276,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (3, view_binding.clone()),
                         (4, lights_binding.clone()),
                         (8, &textures.transmittance_lut.default_view),
+                        (10, &textures.sky_view_lut.default_view),
                         (12, &atmosphere_sampler.0),
                         (20, cloud_layer_binding),
                         (23, &textures.cloud_shadow_map.default_view),
@@ -3537,7 +3542,9 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   scatter (the clouds' own sunlight, all orders; no sky, ground or haze light).
 /// - `ATM_DBG_NO_COARSE`: fine samples everywhere from the ray start, no step budget (with `ATM_DBG_NO_SDF_SKIP`:
 ///   the ground-truth march for validating empty-space skipping).
-/// See also `CLOUD_TERMS=s1|sun|amb`, `CLOUD_REFERENCE=1` and `CLOUD_SKY_SH_BOUNDARY=0`
+/// - `ATM_DBG_SKY_SH_LUT_TOP`: with `CLOUD_SKY_SH_BOUNDARY=1`, the diffusion solve's sky
+///   boundary from the clear sky-view LUT at the cell's radius instead of the probe's harmonics.
+/// See also `CLOUD_TERMS=s1|sun|amb`, `CLOUD_REFERENCE=1` and `CLOUD_SKY_SH_BOUNDARY=1`
 /// ([`cloud_sky_sh_defs`]).
 /// Texels of the ground irradiance LUT (`GROUND_IRRADIANCE_LUT_SIZE` in `functions.wesl`).
 pub(crate) const GROUND_IRRADIANCE_LUT_SIZE: u32 = 128;
@@ -3570,16 +3577,28 @@ fn cloud_term_defs() -> Vec<bevy_shader::ShaderDefVal> {
     defs
 }
 
-/// `CLOUD_SKY_SH_BOUNDARY` (default on; `CLOUD_SKY_SH_BOUNDARY=0` turns it off): the cloud
-/// field's diffusion solve takes the sky's and the ground's diffuse light in through its Marshak
-/// boundary (the sky from the atmosphere probe's spherical harmonics, the ground from the shadow
-/// and column maps), and the cloud pass reads that solution as its ambient where the solve has
-/// one (`cloud_field.wesl` diffusion_source_cell, `clouds_raymarch.wesl`). Off: the two-stream
-/// slab ambient of the clear-sky LUT everywhere. Set for the diffusion and cloud pipelines alike.
+/// `CLOUD_SKY_SH_BOUNDARY=1` (default off): the cloud field's diffusion solve takes the sky's
+/// and the ground's diffuse light in through its Marshak boundary (the sky from the atmosphere
+/// probe's spherical harmonics, the ground from the shadow and column maps), and the cloud pass
+/// reads that solution as its ambient where the solve has one (`cloud_field.wesl`
+/// diffusion_source_cell, `clouds_raymarch.wesl`). Off: the two-stream slab ambient of the
+/// clear-sky LUT everywhere. Set for the diffusion and cloud pipelines alike.
+///
+/// Off by default from the hero:35 measurement (Nov 7, M1 Pro, cloud buffer, cloudy pixels,
+/// haze removed; `.clouds-handoff` split tooling): the ambient term falls to 0.68x the slab
+/// term, uniformly over shaded / middle / lit (0.675 / 0.680 / 0.681), the cloud total to 0.87x,
+/// the sun terms unchanged (1.00), distant clouds beyond the field unchanged; the realtime
+/// ambient was already 0.62x the path-traced reference, so this widens the deficit. The
+/// probe is one cubemap at the camera: on the ground under the layer it sees the cloud bases
+/// (themselves ambient-lit at 0.62x) in place of the sky the cloud tops see, so the top
+/// boundary is cloud-shadowed where it should be the clear sky above the layer.
+/// `ATM_DBG_SKY_SH_LUT_TOP` replaces the probe by the clear sky-view LUT at the cell's radius
+/// (cosine quadrature, as the slab term's `sample_sky_irradiance`) to separate the boundary
+/// formulation from the probe's position.
 pub(crate) fn cloud_sky_sh_defs() -> Vec<bevy_shader::ShaderDefVal> {
     match std::env::var("CLOUD_SKY_SH_BOUNDARY").as_deref() {
-        Ok("0") | Ok("off") | Ok("false") => Vec::new(),
-        _ => vec!["CLOUD_SKY_SH_BOUNDARY".into()],
+        Ok("1") | Ok("on") | Ok("true") => vec!["CLOUD_SKY_SH_BOUNDARY".into()],
+        _ => Vec::new(),
     }
 }
 

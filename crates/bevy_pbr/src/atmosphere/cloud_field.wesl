@@ -21,7 +21,7 @@ import package::atmosphere::functions::{cloud_shadow_frame, cloud_shadow_transmi
 @if(CLOUD_SKY_SH_BOUNDARY)
 import package::atmosphere::bindings::sky_sh;
 @if(CLOUD_SKY_SH_BOUNDARY)
-import package::atmosphere::functions::{sample_transmittance_lut, cloud_column_map};
+import package::atmosphere::functions::{sample_transmittance_lut, cloud_column_map, sample_sky_view_lut};
 @if(CLOUD_SKY_SH_BOUNDARY)
 import package::atmosphere::clouds::{cloud_column_map_origin, CLOUD_COLUMN_MAP_EXTENT_M};
 @if(CLOUD_SKY_SH_BOUNDARY)
@@ -380,8 +380,26 @@ fn diffusion_source_cell(id: vec3<u32>) {
 
 /// E / pi of the sky's harmonics (and excess lights) at the atmosphere-space normal `n`, in
 /// absolute units (the probe is pre-exposed by the view that renders it, taken as this view).
+/// `ATM_DBG_SKY_SH_LUT_TOP`: the clear sky-view LUT at radius `r` instead (the slab term's
+/// source), cosine-weighted quadrature of the hemisphere around `n` (mu = sqrt(1 - u) for
+/// stratified u, golden-angle azimuths: the plain mean of the samples is E / pi, as
+/// `sample_sky_irradiance` in clouds_raymarch.wesl), so that the boundary formulation can be
+/// measured apart from the probe's position at the camera.
 @if(CLOUD_SKY_SH_BOUNDARY)
-fn sky_sh_irradiance_over_pi(n: vec3<f32>) -> vec3<f32> {
+fn sky_sh_irradiance_over_pi(n: vec3<f32>, r: f32) -> vec3<f32> {
+    @if(ATM_DBG_SKY_SH_LUT_TOP) {
+        let t = normalize(cross(n, select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(n.x) > 0.9)));
+        let b = cross(n, t);
+        var sum = vec3(0.0);
+        for (var i = 0u; i < 16u; i++) {
+            let u = (f32(i) + 0.5) / 16.0;
+            let mu = sqrt(1.0 - u);
+            let s = sqrt(u);
+            let a = f32(i) * 2.399963;
+            sum += sample_sky_view_lut(r, n * mu + (t * cos(a) + b * sin(a)) * s);
+        }
+        return sum / 16.0;
+    }
     // Environment maps are oriented in world space.
     let n_world = normalize((atmosphere.atmosphere_to_world * vec4(n, 0.0)).xyz);
     var e = sh9_irradiance(sky_sh.coefficients, n_world);
@@ -409,7 +427,7 @@ fn diffusion_ground_exitance(xz: vec2<f32>) -> vec3<f32> {
         let vis = exp(-diffusion_sun_tau_beyond(p_g, l));
         e_sun = lights.directional_lights[0].color.rgb * sample_transmittance_lut(r_g, mu_g) * max(mu_g, 0.0) * vis;
     }
-    var e_sky = PI * sky_sh_irradiance_over_pi(up_g);
+    var e_sky = PI * sky_sh_irradiance_over_pi(up_g, r_g);
     let camera_xz = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xz;
     let uv = (xz - cloud_column_map_origin(camera_xz)) / (2.0 * CLOUD_COLUMN_MAP_EXTENT_M);
     if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
@@ -429,16 +447,16 @@ fn diffusion_ground_exitance(xz: vec2<f32>) -> vec3<f32> {
 ///   ground: a uniform lower hemisphere of radiance L contributes pi L / 2 to a vertical face
 ///   and pi L = E_SH(-up) to the nadir normal, so E(n) = E_SH(n) + (pi L_g - E_SH(-up)) / 2.
 @if(CLOUD_SKY_SH_BOUNDARY)
-fn diffusion_face_irradiance(n: vec3<f32>, up: vec3<f32>, m_g: vec3<f32>) -> vec3<f32> {
+fn diffusion_face_irradiance(n: vec3<f32>, up: vec3<f32>, r: f32, m_g: vec3<f32>) -> vec3<f32> {
     let vertical = dot(n, up);
     if (vertical > 0.5) {
-        return PI * sky_sh_irradiance_over_pi(up);
+        return PI * sky_sh_irradiance_over_pi(up, r);
     }
     if (vertical < -0.5) {
         return m_g;
     }
-    let e_side = PI * sky_sh_irradiance_over_pi(n);
-    let e_nadir = PI * sky_sh_irradiance_over_pi(-up);
+    let e_side = PI * sky_sh_irradiance_over_pi(n, r);
+    let e_nadir = PI * sky_sh_irradiance_over_pi(-up, r);
     return max(e_side + 0.5 * (m_g - e_nadir), vec3(0.0));
 }
 
@@ -475,7 +493,7 @@ fn diffusion_boundary_source(id: vec3<u32>, e: vec4<f32>) -> vec3<f32> {
             have_ground = true;
         }
         let h = select(vox, hz, axis == 2);
-        src += 8.0 * d * diffusion_face_irradiance(n, up, m_g) / (h * (h + 4.0 * d));
+        src += 8.0 * d * diffusion_face_irradiance(n, up, r, m_g) / (h * (h + 4.0 * d));
     }
     return src;
 }

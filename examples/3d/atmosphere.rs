@@ -28,8 +28,8 @@
 //!   `ATMOSPHERE_SCREENSHOT_FRAMES`, `ATMOSPHERE_SCREENSHOT_FROM`, `ATMOSPHERE_EXIT_SECS`, `ATMOSPHERE_EXIT_FRAME`,
 //!   `ATMOSPHERE_DIAGNOSTICS`, `ATMOSPHERE_CLEAR`.
 //! - Read by `bevy_pbr`: `ATMOSPHERE_DBG` (comma-separated `ATM_DBG_*` shader defs, see
-//!   `atmosphere/resources.rs`), `ATMOSPHERE_GPU_TIMING` (per-pass CSV), `CLOUD_SKY_SH_BOUNDARY=0`
-//!   (the cloud field's diffusion solve without the sky and ground light at its boundary).
+//!   `atmosphere/resources.rs`), `ATMOSPHERE_GPU_TIMING` (per-pass CSV), `CLOUD_SKY_SH_BOUNDARY=1`
+//!   (the cloud field's diffusion solve with the sky and ground light at its boundary, off by default).
 #[cfg(feature = "free_camera")]
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
 use std::f32::consts::PI;
