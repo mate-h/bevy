@@ -1236,11 +1236,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     // parkouring cloud: every occupied voxel has a code <= 16, i.e. a distance
                     // <= one step); the leap stops one step short of the surface and the band
                     // [0, one step) is marched at the fine spacing, so the coarse predicate meets
-                    // the first occupied voxel as without the leap.
+                    // the first occupied voxel as without the leap. Like the far grid's, the leap
+                    // is certified clear, so it is a re-entry: the hit after it does not step
+                    // back over it (stepping back re-marched the whole leap at the fine spacing
+                    // and cost more than the leap saved), only over the jittered fraction of a
+                    // step past it, with the re-entry's own phase.
                     @if(!ATM_DBG_NO_NVDF_SKIP) {
                         let d_nvdf = voxel_cloud_sdf(p);
                         if (d_nvdf < VOXEL_SDF_UNKNOWN) {
-                            skip = max(skip, max(dist_step, d_nvdf - NVDF_SDF_QUANTUM_M));
+                            let leap = d_nvdf - NVDF_SDF_QUANTUM_M;
+                            if (leap > skip) {
+                                reentry_i += 1u;
+                                let phase = fract(cloud_march_jitter(t, jitter, jitter_static) + f32(reentry_i) * GOLDEN_RATIO_FRAC);
+                                let past = phase * dist_step;
+                                t += leap + past;
+                                last_leap = past;
+                                continue;
+                            }
                         }
                     }
                 }
