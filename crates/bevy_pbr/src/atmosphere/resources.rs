@@ -4059,7 +4059,7 @@ fn atm_dbg_defs() -> Vec<bevy_shader::ShaderDefVal> {
 /// Debug: lighting-term isolation for validation (realtime and reference alike).
 /// `CLOUD_TERMS=s1` sun single scatter only, `sun` sun incl. multiple scattering, `amb` sky+ground
 /// only; `CLOUD_NO_HAZE=1` skips the aerial perspective in front of the clouds.
-fn cloud_term_defs() -> Vec<bevy_shader::ShaderDefVal> {
+pub(crate) fn cloud_term_defs() -> Vec<bevy_shader::ShaderDefVal> {
     let mut defs: Vec<bevy_shader::ShaderDefVal> = Vec::new();
     match std::env::var("CLOUD_TERMS").as_deref() {
         Ok("s1") => defs.extend(["CLOUD_TERM_S1".into(), "CLOUD_TERM_NO_AMB".into()]),
