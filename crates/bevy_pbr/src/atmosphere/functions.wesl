@@ -34,6 +34,9 @@ import package::atmosphere::{
     shadows::{fetch_directional_shadow, directional_shadow_ray_t_max},
 };
 
+// The cloud pass's per-sample cloud lighting, for the environment probe's clouds.
+@if(CLOUDS_ENABLED && ATMOSPHERE_ENV_PROBE)
+import package::atmosphere::cloud_lighting::{cloud_sample_lighting, sample_sky_irradiance, CLOUD_LIGHT_SHADOW_MAP};
 @if(CLOUDS_ENABLED)
 import package::atmosphere::{
     bindings::stbn_texture,
@@ -699,31 +702,10 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
         }
         }
 
-        // With CLOUD_PASS (render_sky), clouds are integrated by the dedicated low-res
-        // `clouds_raymarch` pass and composited afterwards (the sky-view/aerial LUTs and the cloud
-        // pass must not add them again); only the env probe still
-        // integrates cloud media here.
-        @if(CLOUDS_ENABLED && ATMOSPHERE_ENV_PROBE) {
-        // Sample cloud *medium density* at this point (includes `cloud_layer.cloud_density`)
-        // so clouds respond consistently across scattering vs shadowing.
-        let cloud_density = get_cloud_medium_density(local_r, world_pos);
-        // NUBIS: Add volumetric cloud scattering with proper physical integration
-        // Clouds contribute to inscattering via Henyey-Greenstein phase function
-
-        // Cloud scattering coefficient: σ_s_cloud = density * scattering_coeff
-        // Using physically correct coefficients (units: m^-1 per unit density)
-        // Density is normalized [0, 1], coefficients represent actual physical values
-        // Water droplet clouds have scattering ~0.0008-0.001 m^-1 per unit density
-        let cloud_scattering_coeff = cloud_density * get_cloud_scattering_coeff();
-        
-        // Droplet Mie phase (same as the cloud pass). `neg_LdotV` here is dot(L, ray_dir); see
-        // sign convention note above.
-        let cos_theta = clamp(neg_LdotV, -1.0, 1.0);
-        let cloud_phase = cloud_mie_phase(cos_theta);
-        
-        // Add cloud scattering contribution: σ_s_cloud * p(θ)
-        scattering_coeff += cloud_scattering_coeff * cloud_phase;
-        }
+        // The air only: clouds are integrated by the dedicated low-res `clouds_raymarch` pass
+        // (the sky-view/aerial LUTs must not add them again); the environment probe lights its
+        // cloud samples with the cloud pass's `cloud_sample_lighting` in
+        // `raymarch_atmosphere_jittered`.
 
         // Sample directional light shadow map for volumetric shadow shafts.
         // Use zero normal bias: unlike mesh shading there is no surface normal, and using
@@ -1085,6 +1067,19 @@ fn raymarch_atmosphere_jittered(
     let stbn_layer = select(0, i32(view.frame_count % u32(textureNumLayers(stbn_texture))), stbn_use);
     let stbn_px = vec2<i32>(floor(pixel_coords)) % vec2<i32>(stbn_dims);
 
+    // The cloud medium's coefficients per unit density, and the sky irradiance at the camera
+    // once per ray (16 sky-view LUT taps; the cloud pass does the same at its camera radius,
+    // which is this probe's position), the sky side of the clouds' ambient two-stream.
+    let sigma_s_unit = get_cloud_scattering_coeff();
+    let sigma_t_unit = sigma_s_unit + get_cloud_absorption_coeff();
+    var sky_irr = vec3(0.0);
+    if (has_cloud_layer) {
+        sky_irr = sample_sky_irradiance(r);
+    }
+    // Optical depth along the view ray since it entered the current cloud (reset on empty
+    // samples): the view-side half of the cloud lighting's local escape estimate.
+    var view_od_in_cloud = 0.0;
+
     var stop: bool = false;
     for (var s: u32 = 0u; s < sample_budget; s += 1u) {
         if (stop) { break; }
@@ -1139,16 +1134,31 @@ fn raymarch_atmosphere_jittered(
 
             // Cloud extinction on the view ray.
             let cloud_density = get_cloud_medium_density(r_p, p);
+            let cloud_sigma_t = cloud_density * sigma_t_unit;
             if (cloud_density > 0.0) {
-                let cloud_extinction = cloud_density * (get_cloud_scattering_coeff() + get_cloud_absorption_coeff());
-                extinction += vec3(cloud_extinction);
+                extinction += vec3(cloud_sigma_t);
             }
 
             let sample_optical_depth = extinction * sub_dt;
             optical_depth += sample_optical_depth;
             let sample_transmittance = exp(-sample_optical_depth);
 
-            let inscattering = sample_local_inscattering(scattering, ray_dir, p, pixel_coords, true);
+            // The air (sun through the cloud shadow map, air multiple scattering) ...
+            var inscattering = sample_local_inscattering(scattering, ray_dir, p, pixel_coords, true);
+            // ... and the cloud medium, lit as in the cloud pass (sun: the cloud shadow map at
+            // the sample, CLOUD_LIGHT_SHADOW_MAP, in place of the local light march; multiple
+            // scattering from the field's diffusion solve and the escape series; sky and ground
+            // ambient), so the probe's clouds match the visible ones (RDR2 slide 70). Per unit
+            // length: sigma_s times the radiance per unit sigma_s; the cloud pass integrates the
+            // same product over its segments.
+            if (cloud_density > 0.0) {
+                let lighting = cloud_sample_lighting(p, ray_dir, view_od_in_cloud + 0.5 * cloud_sigma_t * sub_dt,
+                    0.0, sigma_s_unit, sigma_t_unit, sky_irr, 0.0, 0u, CLOUD_LIGHT_SHADOW_MAP, cloud_density);
+                inscattering += cloud_density * sigma_s_unit * lighting.radiance;
+                view_od_in_cloud += cloud_sigma_t * sub_dt;
+            } else {
+                view_od_in_cloud = 0.0;
+            }
             let s_int = (inscattering - inscattering * sample_transmittance) / max(extinction, MIN_EXTINCTION);
             result.inscattering += result.transmittance * s_int;
             result.transmittance *= sample_transmittance;
