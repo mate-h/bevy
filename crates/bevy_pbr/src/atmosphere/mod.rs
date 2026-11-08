@@ -148,6 +148,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "bindings.wesl");
         load_shader_library!(app, "shadows.wesl");
         load_shader_library!(app, "clouds.wesl");
+        load_shader_library!(app, "froxel_lookup.wesl");
         load_shader_library!(app, "froxels.wesl");
 
         embedded_asset!(app, "transmittance_lut.wesl");
@@ -270,6 +271,7 @@ impl Plugin for AtmospherePlugin {
             .add_systems(
                 RenderStartup,
                 (
+                    volumetrics::init_volumetrics_fallbacks,
                     init_atmosphere_probe_layout,
                     init_atmosphere_probe_pipeline,
                     init_fbm_noise_texture,

@@ -5,6 +5,9 @@
 import bevy_render::maths::PI;
 import package::atmosphere::bindings::{view, atmosphere, lights, atmosphere_lut_sampler};
 import package::atmosphere::functions::sample_transmittance_lut;
+import package::atmosphere::froxel_lookup::{
+    VolumetricsParams, froxel_params_t_to_u, froxel_integrated_coord, froxel_integrated_fade,
+};
 import package::render::utils::interleaved_gradient_noise;
 
 @if(CLOUDS_ENABLED)
@@ -13,32 +16,8 @@ import package::atmosphere::{
     functions::{sample_cloud_shadow_ground, ground_sky_irradiance_clouds},
 };
 
-/// `GpuVolumetricsParams` (`volumetrics.rs`).
-struct VolumetricsParams {
-    grid_size: vec3<u32>,
-    tile_px: u32,
-    fog_albedo: vec3<f32>,
-    /// Fog extinction at `fog_height` (1/m).
-    fog_density: f32,
-    /// Far end of the grid (m).
-    max_distance: f32,
-    /// HDRP logarithmic depth encoding: c = 2 - 2 uniformity (1/m), k = log2(c d_max + 1).
-    depth_c: f32,
-    depth_k: f32,
-    fog_height_falloff: f32,
-    fog_height: f32,
-    fog_anisotropy: f32,
-    enabled: u32,
-    _pad: u32,
-    /// Last frame's view-projection and camera position (the shadow volume's reprojection).
-    prev_clip_from_world: mat4x4<f32>,
-    prev_world_position: vec3<f32>,
-    /// Whether the shadow history holds last frame's volume for this grid.
-    history_valid: u32,
-    /// Weight of the current frame in the shadow volume's EMA (FB15 slide 23: 5%).
-    shadow_temporal_alpha: f32,
-    _pad2: vec3<u32>,
-}
+/// `GpuVolumetricsParams` (`volumetrics.rs`; the struct and the volume lookup's arithmetic live
+/// in `froxel_lookup.wesl`, which the mesh pipeline shares without these bindings).
 @group(0) @binding(70) var<uniform> volumetrics: VolumetricsParams;
 
 /// Most `FogVolume`s injected per frame (`volumetrics.rs` `MAX_FOG_VOLUMES`; RDR2 slide 45).
@@ -56,7 +35,7 @@ fn froxel_boundary_t(u: f32) -> f32 {
 
 /// Normalised depth of distance `t` (the inverse of `froxel_boundary_t`).
 fn froxel_t_to_u(t: f32) -> f32 {
-    return log2(volumetrics.depth_c * max(t, 0.0) + 1.0) / volumetrics.depth_k;
+    return froxel_params_t_to_u(volumetrics, t);
 }
 
 /// Near and far distance of slice `z`.
@@ -107,19 +86,14 @@ fn one_minus_exp_over_x(x: f32) -> f32 {
 }
 
 /// Integrated in-scatter (rgb, pre-exposed) and transmittance (a) from the camera to distance
-/// `t` along the ray through `uv`, trilinear in the volume with a `dither` of +-0.5 slice (RDR2
-/// slide 56: the dithered-lookup principle applied to the accumulation volume). Texel `z` holds
-/// the integral to the far boundary of slice `z`, so slice coordinate `s` reads texel centre
-/// `s - 0.5`; inside the first slice the integral is ramped linearly from zero, as the aerial
-/// perspective LUT's lookup does.
+/// `t` along the ray through `uv`, trilinear in the volume with a `dither` of +-0.5 slice
+/// (`froxel_lookup.wesl` `froxel_integrated_coord`). The mesh pipeline's
+/// `apply_froxel_volumetrics` (`pbr_functions.wesl`) is the same lookup through its own bindings.
 @if(VOLUMETRICS_APPLY)
 fn sample_froxel_integrated(uv: vec2<f32>, t: f32, dither: f32) -> vec4<f32> {
-    let n = f32(volumetrics.grid_size.z);
-    let s = max(froxel_t_to_u(min(t, volumetrics.max_distance)) * n + dither, 0.0);
-    let fade = saturate(s);
-    let w = (max(s, 1.0) - 0.5) / n;
-    let v = textureSampleLevel(volumetrics_integrated, atmosphere_lut_sampler, vec3(uv, w), 0.0);
-    return vec4(v.rgb * fade, mix(1.0, v.a, fade));
+    let c = froxel_integrated_coord(volumetrics, t, dither);
+    let v = textureSampleLevel(volumetrics_integrated, atmosphere_lut_sampler, vec3(uv, c.x), 0.0);
+    return froxel_integrated_fade(v, c.y);
 }
 
 /// Radiance of the planet's surface at `p` (no mesh there): the sun through the transmittance

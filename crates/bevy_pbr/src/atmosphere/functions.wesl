@@ -259,6 +259,16 @@ fn sample_density_lut(r: f32, component: f32) -> vec3<f32> {
 }
 
 
+/// The air's first Legendre moment of scattering at radius `r`: Σ g ⟨σ_s⟩ over the medium's Mie
+/// terms (1/m, the RGB mean; `medium.rs` packs it in the scattering row's alpha, Rayleigh's
+/// first moment is 0). It is 2π ∫ Σ_i σ_s,i p_i(t) P_1(t) dt, the band-1 Funk-Hecke factor of
+/// the air's phase functions (`volumetrics.wesl` sky ambient).
+fn sample_density_lut_mie_g_sigma(r: f32) -> f32 {
+    let normalized_altitude = (r - atmosphere.inner_radius) / (atmosphere.outer_radius - atmosphere.inner_radius);
+    let uv = vec2(1.0 - normalized_altitude, SCATTERING_DENSITY);
+    return textureSampleLevel(medium_density_lut, medium_sampler, uv, 0.0).w;
+}
+
 const PHASE_MAPPING_N: f32 = 0.5;
 
 /// samples from the atmosphere scattering LUT. `neg_LdotV` is the dot product
