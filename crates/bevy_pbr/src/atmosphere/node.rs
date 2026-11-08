@@ -45,6 +45,7 @@ pub fn atmosphere_luts(
     gpu_media: Res<bevy_render::render_asset::RenderAssets<crate::GpuScatteringMedium>>,
     mut per_view: bevy_ecs::system::ResMut<PerViewLutState>,
     pipeline_cache: Res<PipelineCache>,
+    frame_count: Res<bevy_diagnostic::FrameCount>,
     mut ctx: RenderContext,
 ) {
     let (
@@ -572,6 +573,63 @@ pub fn atmosphere_luts(
                         pass.pop_debug_group();
                     }
                 }
+            }
+        }
+    }
+
+    // Sun optical-depth grid (`cloud_field.wesl` sun_od; Nubis Cubed 2:09:52, amortised over 8
+    // frames): the cloud pass's light march beyond its two local taps. Double-buffered: the back
+    // buffer takes 1/8 of the slices per frame (stage = frame % 8, the shader's slice choice) and
+    // is published, by swapping the buffers the bind groups bind, once stages 0-7 have all been
+    // written in one run (a cycle's cell is fixed at its stage 0, so a run broken by a reset
+    // starts over). A view's first build writes the *front* buffer in full in this frame (the
+    // bind group with the front buffer in the storage slot), so the cloud pass never reads an
+    // unbuilt grid. While the light turns faster than a cycle follows (`CloudLightTurn`,
+    // `sun_od_tolerance`: one grid voxel over 16 frames) the whole back buffer is rebuilt and
+    // published every frame, as the diffusion solve refreshes its whole source then.
+    if super::resources::cloud_sun_od_enabled() {
+        if let (Some(cloud_layer_uniforms_offset), Some([back_bg, front_bg]), Some(pipeline)) = (
+            cloud_layer_uniforms_offset.as_ref(),
+            bind_groups.cloud_sun_od.as_ref(),
+            pipeline_cache.get_compute_pipeline(pipelines.cloud_sun_od),
+        ) {
+            use super::resources::{CLOUD_SUN_OD_CYCLE, CLOUD_SUN_OD_RES_XY, CLOUD_SUN_OD_RES_Z};
+            let grid_id = textures.cloud_sun_od_a.texture.id();
+            let full_build = state.sun_od_texture != Some(grid_id);
+            let turning =
+                !full_build && light_turn.is_some_and(|t| t.recent > t.sun_od_tolerance);
+            let stage = frame_count.0 % CLOUD_SUN_OD_CYCLE;
+            let n = CLOUD_SUN_OD_RES_XY.div_ceil(8);
+            let offsets = [
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+                cloud_layer_uniforms_offset.index(),
+            ];
+            let mut pass = labelled_compute_pass!("cloud_sun_od");
+            pass.set_pipeline(pipeline);
+            if full_build {
+                state.sun_od_texture = Some(grid_id);
+                state.sun_od_mask = 0;
+                pass.set_bind_group(0, front_bg, &offsets);
+                pass.dispatch_workgroups(n, n, CLOUD_SUN_OD_RES_Z);
+            } else if turning {
+                state.sun_od_mask = 0;
+                state.sun_od_front_b = !state.sun_od_front_b;
+                pass.set_bind_group(0, back_bg, &offsets);
+                pass.dispatch_workgroups(n, n, CLOUD_SUN_OD_RES_Z);
+            } else {
+                if stage == 0 {
+                    state.sun_od_mask = 0;
+                }
+                state.sun_od_mask |= 1 << stage;
+                if state.sun_od_mask == (1u32 << CLOUD_SUN_OD_CYCLE) - 1 {
+                    state.sun_od_mask = 0;
+                    state.sun_od_front_b = !state.sun_od_front_b;
+                }
+                pass.set_bind_group(0, back_bg, &offsets);
+                pass.dispatch_workgroups(n, n, CLOUD_SUN_OD_RES_Z / CLOUD_SUN_OD_CYCLE);
             }
         }
     }
@@ -1218,6 +1276,12 @@ pub struct ViewLutState {
     field_texture: Option<bevy_render::render_resource::TextureId>,
     /// The far empty-space grid texture whose every slab has been built.
     far_grid_texture: Option<bevy_render::render_resource::TextureId>,
+    /// Sun optical-depth grid (`cloud_field.wesl` sun_od): the texture set it was built into,
+    /// which buffer the cloud pass reads (b, else a), and the stages of the back buffer's
+    /// current rebuild cycle written so far (bit per stage).
+    sun_od_texture: Option<bevy_render::render_resource::TextureId>,
+    sun_od_front_b: bool,
+    sun_od_mask: u32,
     /// The froxel grid's temporal state (`volumetrics.rs`).
     volumetrics: super::volumetrics::VolumetricsViewState,
 }
@@ -1230,6 +1294,15 @@ impl PerViewLutState {
         view: RetainedViewEntity,
     ) -> &mut super::volumetrics::VolumetricsViewState {
         &mut self.views.entry(view).or_default().1.volumetrics
+    }
+
+    /// Which sun optical-depth grid buffer the cloud pass of `view` reads this frame: b when
+    /// true, else a (`prepare_atmosphere_bind_groups`; the node swaps it when a rebuild
+    /// cycle completes).
+    pub fn sun_od_front_b(&self, view: RetainedViewEntity) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|(_, state)| state.sun_od_front_b)
     }
 
     /// Whether `view` has completed a full build of the cloud field into `field`. A field that

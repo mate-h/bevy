@@ -44,6 +44,12 @@ pub(crate) const CLOUD_FIELD_RES_XY: u32 = 128;
 /// Edge of the weather window around the camera, in weather-map texels (`weather_window.wesl`).
 pub const WEATHER_WINDOW_SIZE: u32 = 1024;
 pub(crate) const CLOUD_FIELD_RES_Z: u32 = 32;
+/// Sun optical-depth grid (`cloud_field.wesl` sun_od): Nubis Cubed's 256 x 256 x 32 pre-summed
+/// light-march volume over the field's extent (must match `clouds.wesl` CLOUD_SUN_OD_RES_*).
+pub(crate) const CLOUD_SUN_OD_RES_XY: u32 = 256;
+pub(crate) const CLOUD_SUN_OD_RES_Z: u32 = CLOUD_FIELD_RES_Z;
+/// Frames the grid's rebuild is spread over (Nubis Cubed: 8).
+pub(crate) const CLOUD_SUN_OD_CYCLE: u32 = 8;
 /// Horizontal extent of the cloud field grid (m; `clouds.wesl` CLOUD_FIELD_EXTENT_M).
 pub(crate) const CLOUD_FIELD_EXTENT_M: f32 = 24_000.0;
 /// Far empty-space grid (must match `clouds.wesl` CLOUD_FAR_GRID_*): horizontal cells, vertical
@@ -201,6 +207,9 @@ pub(crate) struct AtmosphereBindGroupLayouts {
     pub cloud_shadow_mips: BindGroupLayoutDescriptor,
     /// Diffusion solve of the cloud field (`cloud_field.wesl` diffusion_*, sor_*).
     pub cloud_field_diffusion: BindGroupLayoutDescriptor,
+    /// Sun optical-depth grid pass (`cloud_field.wesl` sun_od): the field's extinction volume
+    /// (filterable), the light, the grid buffer being built and the cycle's build cell.
+    pub cloud_sun_od: BindGroupLayoutDescriptor,
     /// Near-field froxel passes (`volumetrics.wesl`): material, shadow, scattering, integrate.
     pub volumetrics_material: BindGroupLayoutDescriptor,
     pub volumetrics_shadow: BindGroupLayoutDescriptor,
@@ -587,6 +596,12 @@ impl AtmosphereBindGroupLayouts {
                         68,
                         texture_3d(TextureSampleType::Float { filterable: true }),
                     ),
+                    // Sun optical-depth grid, the published buffer (`cloud_field.wesl` sun_od,
+                    // CLOUD_SUN_OD_GRID).
+                    (
+                        69,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
                 )),
             )
         };
@@ -759,6 +774,81 @@ impl AtmosphereBindGroupLayouts {
             volumetrics_shadow,
             volumetrics_scattering,
             volumetrics_integrate,
+            cloud_sun_od: BindGroupLayoutDescriptor::new(
+                "cloud_sun_od_bind_group_layout",
+                &BindGroupLayoutEntries::with_indices(
+                    ShaderStages::COMPUTE,
+                    (
+                        (0, uniform_buffer::<GpuAtmosphere>(true)),
+                        (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                        (3, uniform_buffer::<ViewUniform>(true)),
+                        (4, uniform_buffer::<GpuLights>(true)),
+                        (12, sampler(SamplerBindingType::Filtering)),
+                        (20, uniform_buffer::<GpuCloudLayers>(true)),
+                        // The procedural density's inputs, as the shadow map's layout binds
+                        // them: weather noise + sampler, shape, detail, profile, scheme noise,
+                        // weather windows, voxel cloud + sampler.
+                        (
+                            21,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (22, sampler(SamplerBindingType::Filtering)),
+                        (
+                            24,
+                            texture_3d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        // STBN: the march's phase per voxel.
+                        (
+                            25,
+                            texture_2d_array(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            33,
+                            texture_3d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            34,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            35,
+                            texture_3d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            36,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            37,
+                            texture_2d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            64,
+                            texture_3d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (65, sampler(SamplerBindingType::Filtering)),
+                        // The field's extinction (`cloud_field.wesl` init), read trilinearly.
+                        (
+                            47,
+                            texture_3d(TextureSampleType::Float { filterable: true }),
+                        ),
+                        (
+                            80,
+                            texture_storage_3d(
+                                TextureFormat::Rgba16Float,
+                                StorageTextureAccess::WriteOnly,
+                            ),
+                        ),
+                        (
+                            81,
+                            texture_storage_3d(
+                                TextureFormat::R32Float,
+                                StorageTextureAccess::ReadWrite,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
             cloud_field_edt: BindGroupLayoutDescriptor::new(
                 "cloud_field_edt_bind_group_layout",
                 &BindGroupLayoutEntries::with_indices(
@@ -1358,6 +1448,8 @@ pub(crate) struct AtmosphereLutPipelines {
     pub cloud_field_edt_y: CachedComputePipelineId,
     pub cloud_field_edt_z: CachedComputePipelineId,
     pub cloud_field_escape: CachedComputePipelineId,
+    /// Sun optical-depth grid (`cloud_field.wesl` sun_od, the shadow map's layout).
+    pub cloud_sun_od: CachedComputePipelineId,
     pub weather_window: CachedComputePipelineId,
     pub cloud_shadow_mips: CachedComputePipelineId,
     /// Diffusion solve: source, red and black SOR sweeps, publish, reset (`cloud_field.wesl`).
@@ -1496,6 +1588,7 @@ impl FromWorld for AtmosphereLutPipelines {
             .chain(cloud_reference_def())
             .chain(cloud_term_defs())
             .chain(cloud_sky_sh_defs())
+            .chain(cloud_sun_od_defs())
             .chain(atm_dbg_defs())
             .collect(),
             ..default()
@@ -1516,6 +1609,7 @@ impl FromWorld for AtmosphereLutPipelines {
                 .chain(cloud_reference_def())
                 .chain(cloud_term_defs())
                 .chain(cloud_sky_sh_defs())
+                .chain(cloud_sun_od_defs())
                 .chain(atm_dbg_defs())
                 .collect(),
                 ..default()
@@ -1539,6 +1633,7 @@ impl FromWorld for AtmosphereLutPipelines {
                     layout: vec![layout.clone()],
                     shader: load_embedded_asset!(world, "cloud_field.wesl"),
                     entry_point: Some(entry.into()),
+                    shader_defs: atm_dbg_defs(),
                     ..default()
                 })
             };
@@ -1565,6 +1660,11 @@ impl FromWorld for AtmosphereLutPipelines {
                 "cloud_far_grid_pipeline",
                 &layouts.cloud_shadow_map,
                 "far_grid",
+            ),
+            cloud_sun_od: field(
+                "cloud_sun_od_pipeline",
+                &layouts.cloud_sun_od,
+                "sun_od",
             ),
             cloud_column_map,
             cloud_ground_sky,
@@ -1902,6 +2002,13 @@ pub struct AtmosphereTextures {
     pub cloud_field_sdf: CachedTexture,
     pub cloud_field_ext: CachedTexture,
     pub cloud_field_esc: CachedTexture,
+    /// Sun optical-depth grid (`cloud_field.wesl` sun_od), double-buffered: one is read by the
+    /// cloud pass while the other is rebuilt over [`CLOUD_SUN_OD_CYCLE`] frames
+    /// (`PerViewLutState::sun_od_front_b`); `state` holds the cycle's build cell. 1x1x1 when
+    /// off (`cloud_sun_od_enabled`).
+    pub cloud_sun_od_a: CachedTexture,
+    pub cloud_sun_od_b: CachedTexture,
+    pub cloud_sun_od_state: CachedTexture,
     /// Far empty-space grid (`cloud_field.wesl` far_grid): per cell (occupied, world cell tag).
     pub cloud_far_grid: CachedTexture,
     /// Vertical cloud optical depth over the ground around the camera (`cloud_shadow_map.wesl`
@@ -2078,6 +2185,50 @@ pub(super) fn prepare_atmosphere_textures(
         let cloud_field_b = field_tex("cloud_field_b", TextureFormat::Rgba16Float);
         let cloud_field_sdf = field_tex("cloud_field_sdf", TextureFormat::Rgba16Float);
         let cloud_field_ext = field_tex("cloud_field_ext", TextureFormat::Rgba16Float);
+        // Sun optical-depth grid: RGBA16F like the field volumes (core WGSL has no r16float
+        // storage format, and r32float is not filterable without FLOAT32_FILTERABLE; see
+        // `volumetrics_shadow`); 16 MB per buffer at 256 x 256 x 32.
+        let sun_od_extent = |full: Extent3d| {
+            if cloud_sun_od_enabled() {
+                cloud_extent(full)
+            } else {
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                }
+            }
+        };
+        let mut sun_od_tex = |label: &'static str, size: Extent3d, format: TextureFormat| {
+            textures.get(TextureDescriptor {
+                label: Some(label),
+                size: sun_od_extent(size),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                format,
+                usage: TextureUsages::STORAGE_BINDING
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        let sun_od_size = Extent3d {
+            width: CLOUD_SUN_OD_RES_XY,
+            height: CLOUD_SUN_OD_RES_XY,
+            depth_or_array_layers: CLOUD_SUN_OD_RES_Z,
+        };
+        let cloud_sun_od_a = sun_od_tex("cloud_sun_od_a", sun_od_size, TextureFormat::Rgba16Float);
+        let cloud_sun_od_b = sun_od_tex("cloud_sun_od_b", sun_od_size, TextureFormat::Rgba16Float);
+        let cloud_sun_od_state = sun_od_tex(
+            "cloud_sun_od_state",
+            Extent3d {
+                width: 2,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureFormat::R32Float,
+        );
         // Escape probability at half the horizontal resolution (`cloud_field.wesl` escape).
         let cloud_field_esc = textures.get(TextureDescriptor {
             label: Some("cloud_field_esc"),
@@ -2438,6 +2589,9 @@ pub(super) fn prepare_atmosphere_textures(
                 cloud_field_sdf,
                 cloud_field_ext,
                 cloud_field_esc,
+                cloud_sun_od_a,
+                cloud_sun_od_b,
+                cloud_sun_od_state,
                 cloud_far_grid,
                 cloud_column_map,
                 cloud_ground_sky,
@@ -2652,6 +2806,10 @@ pub(crate) struct AtmosphereBindGroups {
     /// The cloud shadow map's layout with its storage slot on the column map.
     pub cloud_column_map: Option<BindGroup>,
     pub cloud_ground_sky: Option<BindGroup>,
+    /// Sun optical-depth grid pass (`cloud_field.wesl` sun_od): [writes the back buffer, writes
+    /// the front buffer]. The front one serves a view's first, full build, which the cloud pass
+    /// reads in the same frame. Dynamic offsets: atmosphere, settings, view, lights, cloud layer.
+    pub cloud_sun_od: Option<[BindGroup; 2]>,
     /// Temporal filter bind group; present when cloud_shadow_temporal_enabled.
     pub cloud_shadow_temporal: Option<BindGroup>,
     pub render_sky_clouds: Option<BindGroup>,
@@ -2841,6 +2999,8 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
             field_tolerance: params.history_angle_scale
                 * (CLOUD_FIELD_EXTENT_M / CLOUD_FIELD_RES_XY as f32)
                 / 8.0,
+            sun_od_tolerance: params.history_angle_scale
+                * (CLOUD_FIELD_EXTENT_M / CLOUD_SUN_OD_RES_XY as f32),
         };
         let mut buffer = UniformBuffer::from(params);
         buffer.write_buffer(&render_device, &render_queue);
@@ -2856,10 +3016,17 @@ pub(super) fn prepare_cloud_shadow_temporal_params(
 /// the angle over the last 16 frames (rad), and the angle at which the solve's source goes stale
 /// by 1/8 of a field voxel (rad): voxel x |mu| / layer thickness / 8, the 8-frame slice cycle's
 /// share of the voxel (see [`CloudShadowTemporalParams::history_angle_scale`]).
+///
+/// `sun_od_tolerance`: the angle at which the sun optical-depth grid (`cloud_field.wesl` sun_od)
+/// goes stale by one of its voxels: a voxel's sun ray runs at most L = H / |mu| to the layer
+/// top (H the layer thickness), and a turn by d_theta moves its far end by L d_theta, one grid
+/// voxel v when d_theta = v |mu| / H = v x `history_angle_scale`. Past it over the last 16
+/// frames the 8-frame cycle cannot follow and the grid is rebuilt in full each frame (`node.rs`).
 #[derive(Component, Clone, Copy, Default)]
 pub struct CloudLightTurn {
     pub recent: f32,
     pub field_tolerance: f32,
+    pub sun_od_tolerance: f32,
 }
 
 /// Per-view uniform for [`CloudShadowTemporalParams`].
@@ -3022,6 +3189,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             Option<&CloudReferenceAccumulator>,
             Option<&super::volumetrics::VolumetricsUniform>,
             Option<&crate::ViewClusterBindings>,
+            &ExtractedView,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
     >,
@@ -3065,11 +3233,12 @@ pub(super) fn prepare_atmosphere_bind_groups(
     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
     medium_sampler: Res<ScatteringMediumSampler>,
     pipeline_cache: Res<PipelineCache>,
-    (cloud_layer_uniforms, fbm_noise_texture, perlin_worley_noise_texture, detail_noise_texture): (
+    (cloud_layer_uniforms, fbm_noise_texture, perlin_worley_noise_texture, detail_noise_texture, per_view): (
         Res<ComponentUniforms<GpuCloudLayers>>,
         Res<FbmNoiseTexture>,
         Res<PerlinWorleyNoiseTexture>,
         Res<DetailNoiseTexture>,
+        Res<super::node::PerViewLutState>,
     ),
     mut commands: Commands,
 ) -> Result<(), BevyError> {
@@ -3129,6 +3298,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
         reference_accumulator,
         volumetrics_uniform,
         cluster_bindings,
+        view,
     ) in &views
     {
         let Some(depth_view) = view_depth_texture
@@ -3275,6 +3445,13 @@ pub(super) fn prepare_atmosphere_bind_groups(
         };
         // `column_read` (63): the ground column map as read by `ground_sky`; never the texture the
         // group writes through 13.
+        // Sun optical-depth grid: the buffer the cloud pass reads this frame and the one the
+        // grid pass rebuilds (`PerViewLutState::sun_od_front_b`).
+        let (sun_od_front, sun_od_back) = if per_view.sun_od_front_b(view.retained_view_entity) {
+            (&textures.cloud_sun_od_b, &textures.cloud_sun_od_a)
+        } else {
+            (&textures.cloud_sun_od_a, &textures.cloud_sun_od_b)
+        };
         let cloud_density_bind_group = |label: &'static str,
                                         trace_storage: &TextureView,
                                         column_read: &TextureView| {
@@ -3328,6 +3505,43 @@ pub(super) fn prepare_atmosphere_bind_groups(
             &textures.cloud_ground_sky.default_view,
             &textures.cloud_column_map.default_view,
         );
+        let cloud_sun_od = cloud_layer_binding
+            .as_ref()
+            .filter(|_| cloud_sun_od_enabled())
+            .map(|cloud_layer_binding| {
+                let group = |label: &'static str, write: &TextureView| {
+                    render_device.create_bind_group(
+                        label,
+                        &pipeline_cache.get_bind_group_layout(&layouts.cloud_sun_od),
+                        &BindGroupEntries::with_indices((
+                            (0, atmosphere_binding.clone()),
+                            (1, settings_binding.clone()),
+                            (3, view_binding.clone()),
+                            (4, lights_binding.clone()),
+                            (12, &atmosphere_sampler.0),
+                            (20, cloud_layer_binding.clone()),
+                            (21, &fbm_noise_texture.texture.default_view),
+                            (22, &**cloud_noise_sampler),
+                            (24, &perlin_worley_noise_texture.texture.default_view),
+                            (25, stbn_view.as_ref()),
+                            (33, &detail_noise_texture.texture.default_view),
+                            (34, &fbm_noise_texture.profile.default_view),
+                            (35, &fbm_noise_texture.scheme_noise.default_view),
+                            (36, &textures.weather_window_art.default_view),
+                            (37, &textures.weather_window_physical.default_view),
+                            (64, voxel_view),
+                            (65, &**voxel_sampler),
+                            (47, &textures.cloud_field_ext.default_view),
+                            (80, write),
+                            (81, &textures.cloud_sun_od_state.default_view),
+                        )),
+                    )
+                };
+                [
+                    group("cloud_sun_od_back_bind_group", &sun_od_back.default_view),
+                    group("cloud_sun_od_front_bind_group", &sun_od_front.default_view),
+                ]
+            });
 
         // Temporal filter: curr=tmp (or cloud_shadow_map when no filter), prev=history, out=cloud_shadow_map.
         let cloud_shadow_temporal = (cloud_shadow_map.is_some() && temporal_enabled)
@@ -3696,6 +3910,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                         (59, &textures.cloud_field_diff.default_view),
                         (61, &textures.cloud_far_grid.default_view),
                         (68, &textures.cloud_field_diff_amb.default_view),
+                        (69, &sun_od_front.default_view),
                     )),
                 )
             });
@@ -3881,6 +4096,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             cloud_shadow_map,
             cloud_column_map,
             cloud_ground_sky,
+            cloud_sun_od,
             cloud_shadow_temporal,
             render_sky_clouds,
             render_sky_haze,
@@ -4097,6 +4313,28 @@ pub(crate) fn cloud_sky_sh_defs() -> Vec<bevy_shader::ShaderDefVal> {
     match std::env::var("CLOUD_SKY_SH_BOUNDARY").as_deref() {
         Ok("1") | Ok("on") | Ok("true") => vec!["CLOUD_SKY_SH_BOUNDARY".into()],
         _ => Vec::new(),
+    }
+}
+
+/// `CLOUD_SUN_OD_GRID` (default on; `CLOUD_SUN_OD_GRID=0` off): the cloud pass's light march
+/// keeps two local taps and reads the rest of the sun optical depth from the pre-summed grid
+/// (`cloud_field.wesl` sun_od, Nubis Cubed 2:09:52); off, the former 12 taps + long tap. The
+/// grid's pass and buffers follow the same switch ([`cloud_sun_od_enabled`]).
+pub(crate) fn cloud_sun_od_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("CLOUD_SUN_OD_GRID").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
+pub(crate) fn cloud_sun_od_defs() -> Vec<bevy_shader::ShaderDefVal> {
+    if cloud_sun_od_enabled() {
+        vec!["CLOUD_SUN_OD_GRID".into()]
+    } else {
+        Vec::new()
     }
 }
 

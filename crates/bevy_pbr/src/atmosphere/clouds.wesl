@@ -1117,6 +1117,53 @@ fn cloud_field_origin_from_cell(cell: vec2<f32>) -> vec2<f32> {
     return cell * cloud_field_voxel_m() - 0.5 * CLOUD_FIELD_EXTENT_M;
 }
 
+// Sun optical-depth grid (`cloud_field.wesl` sun_od, `cloud_lighting.wesl`): Nubis Cubed's
+// 256 x 256 x 32 pre-summed light-march volume (Schneider, Advances 2023, 2:09:52) over the
+// field's extent (93.75 m voxels) and the layer (the field's slices). Indexed with the field's
+// build cell and `cloud_field_uvw`. Must match `resources.rs`.
+const CLOUD_SUN_OD_RES_XY: u32 = 256u;
+const CLOUD_SUN_OD_RES_Z: u32 = CLOUD_FIELD_RES_Z;
+// The cloud pass's light taps (`cloud_lighting.wesl`): 12 taps growing x1.4 from 20 m, jittered;
+// shared with the grid, whose march continues the same sequence.
+const CLOUD_LIGHT_TAP_STEP_M: f32 = 20.0;
+const CLOUD_LIGHT_TAP_GROWTH: f32 = 1.4;
+const CLOUD_LIGHT_TAP_LOD: f32 = 0.25;
+const CLOUD_LIGHT_LONG_TAP_M: f32 = 1500.0;
+// Taps the cloud pass keeps in front of the grid (Nubis Cubed 2:09:52: "the first two samples
+// are taken as we did before").
+const CLOUD_SUN_OD_LOCAL_TAPS: u32 = 2u;
+
+fn cloud_sun_od_voxel_m() -> f32 {
+    return CLOUD_FIELD_EXTENT_M / f32(CLOUD_SUN_OD_RES_XY);
+}
+
+/// The distance along a direction with vertical cosine `mu` over which it crosses one voxel of
+/// a grid with horizontal voxels `vox` and vertical `dz`: the grid's march step (one field
+/// voxel over the extinction volume), and the consumer's jitter range (one grid voxel: the
+/// grid is read somewhere within the first voxel sunward of its local taps; banding rule: no
+/// fixed quadrature point, see the plan report, item 2).
+fn cloud_sun_od_step_m(mu: f32, vox: f32, dz: f32) -> f32 {
+    let horiz = sqrt(max(1.0 - mu * mu, 0.0));
+    return 1.0 / max(length(vec2(horiz / vox, mu / dz)), 1e-6);
+}
+
+/// Density LOD of the grid's tap `k` of the light-tap sequence: the LOD that tap had in the
+/// cloud pass for its finest consumer, a sample at mip 0 (`cloud_lighting.wesl`: mip + 0.25 k;
+/// the grid serves every view distance, so it carries the detail the nearest cloud needs). The
+/// grid voxel's own footprint, log2(1 + 93.75 / 8.8) = 3.5 by the mip convention
+/// (mip = log2(1 + d / 4 km) for a half-res pixel of 2.2 mrad at d, `cloud_shape_from_column`),
+/// blurs a cloud's sunlit edge over ~50 m of clear air, which the voxel marches integrate: at
+/// this scene's extinction (0.4 / m) that added 1.3-3 to the sun optical depth of every rim
+/// sample (ATM_DBG_OUT_SUN_TAU against ATM_DBG_LIGHT_BRUTE, hero:35), the rims -44 %.
+/// `ATM_DBG_SUN_OD_VOXEL_LOD` keeps that choice for comparison.
+fn cloud_sun_od_lod(k: u32) -> f32 {
+    @if(ATM_DBG_SUN_OD_VOXEL_LOD) {
+        return log2(1.0 + cloud_sun_od_voxel_m() / (4000.0 * 2.2e-3));
+    }
+    return CLOUD_LIGHT_TAP_LOD * f32(k);
+}
+
+
 /// Normalised field coordinate of an atmosphere-space point (through the cloud frame); outside
 /// [0,1]^3 = not covered. `cell` is the stored build cell (`cloud_field_sdf.ba`).
 fn cloud_field_uvw(p: vec3<f32>, cell: vec2<f32>) -> vec3<f32> {
