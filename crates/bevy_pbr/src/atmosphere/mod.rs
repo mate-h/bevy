@@ -148,6 +148,7 @@ impl Plugin for AtmospherePlugin {
         load_shader_library!(app, "bindings.wesl");
         load_shader_library!(app, "shadows.wesl");
         load_shader_library!(app, "clouds.wesl");
+        load_shader_library!(app, "cloud_lighting.wesl");
         load_shader_library!(app, "froxel_lookup.wesl");
         load_shader_library!(app, "froxels.wesl");
 
