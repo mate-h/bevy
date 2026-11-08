@@ -963,6 +963,10 @@ pub fn render_sky(
             ("field_diff", &textures.cloud_field_diff.texture, 8, "rgba16f"),
             ("field_diff_u", &textures.cloud_field_diff_u.texture, 0, "f32"),
             ("field_diff_src", &textures.cloud_field_diff_src.texture, 0, "f32"),
+            // The sun optical-depth grid's two buffers (`cloud_field.wesl` sun_od): r = int
+            // density ds along the light, g = the centre's density, ba = build cell.
+            ("sun_od_a", &textures.cloud_sun_od_a.texture, 0, "rgba16f"),
+            ("sun_od_b", &textures.cloud_sun_od_b.texture, 0, "rgba16f"),
         ] {
             // The diffusion volumes' format changed once already (R32Float -> Rgba32Float with
             // the sky-SH boundary); take the row size from the texture so the dump cannot
