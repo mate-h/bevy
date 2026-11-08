@@ -33,6 +33,8 @@ import bevy_render::maths::{E, powsafe};
 
 @if(ENVIRONMENT_MAP) import package::light_probe::environment_map;
 
+@if(VOLUMETRICS_APPLY_MESH) import package::atmosphere::froxel_lookup;
+
 @if(TONEMAP_IN_SHADER) import bevy_core_pipeline::tonemapping::{tone_mapping, screen_space_dither};
 
 
@@ -973,6 +975,63 @@ fn premultiply_alpha(standard_material_flags: u32, color: vec4<f32>) -> vec4<f32
 }
 }
 
+/// The near-field froxel volumetrics' aerial perspective for an alpha-blended fragment
+/// (`atmosphere/volumetrics.rs`; `VOLUMETRICS_APPLY_MESH` is set only for the alpha-blended
+/// pipelines of views whose froxel grid runs): color x T + L, with (L, T) the integrated volume
+/// at the fragment's view uv and camera distance, one trilinear lookup and a fused multiply-add
+/// (W14 p.44: "a simple bilinear look-up from a 3D texture and a fused multiply-add", for any
+/// number of transparent layers), dithered by +-0.5 slice with the view's blue noise as
+/// `render_sky`'s composite is. The in-scatter is pre-exposed like the sky, as this pass's output
+/// is. Opaque fragments get theirs from `render_sky`; `Add` blending keeps only the transmittance
+/// (its background already holds the in-scatter).
+@if(VOLUMETRICS_APPLY_MESH)
+fn apply_froxel_volumetrics(
+    material_flags: u32,
+    color: vec4<f32>,
+    world_position: vec3<f32>,
+    frag_coord: vec2<f32>,
+) -> vec4<f32> {
+    let params = view_bindings::volumetrics_params;
+    if (params.enabled == 0u) {
+        return color;
+    }
+    // Camera distance in the atmosphere's frame (the grid's metres; `world_to_atmosphere` may
+    // scale) and the fragment's uv in the view's viewport, which is the grid's uv.
+    let to_fragment = world_position - view_bindings::view.world_position;
+    let t = length((view_bindings::atmosphere_data.atmosphere.world_to_atmosphere * vec4(to_fragment, 0.0)).xyz);
+    let uv = (frag_coord - view_bindings::view.viewport.xy) / view_bindings::view.viewport.zw;
+    let dither = froxel_mesh_noise(vec2<i32>(frag_coord)) - 0.5;
+    let c = froxel_lookup::froxel_integrated_coord(params, t, dither);
+    let v = froxel_lookup::froxel_integrated_fade(
+        textureSampleLevel(view_bindings::volumetrics_integrated, view_bindings::linear_sampler, vec3(uv, c.x), 0.0),
+        c.y,
+    );
+    // The in-scatter of the layer's own coverage: `Blend` colours are multiplied by alpha in the
+    // blend state, `Premultiplied` ones here, `Add` ones add to a background that holds it.
+    let alpha_mode = material_flags & pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
+    var inscatter_weight = 1.0;
+    if (alpha_mode == pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_PREMULTIPLIED) {
+        inscatter_weight = color.a;
+    } else if (alpha_mode == pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_ADD) {
+        inscatter_weight = 0.0;
+    }
+    return vec4(color.rgb * v.a + v.rgb * inscatter_weight, color.a);
+}
+
+/// `froxels.wesl` `froxel_noise` through the mesh view's bindings: the STBN layer of this frame
+/// at the pixel when the blue-noise texture is bound, interleaved gradient noise otherwise.
+@if(VOLUMETRICS_APPLY_MESH)
+fn froxel_mesh_noise(px: vec2<i32>) -> f32 {
+    @if(BLUE_NOISE_TEXTURE) {
+    let dims = textureDimensions(view_bindings::blue_noise_texture);
+    if (all(dims > vec2(1u))) {
+        let layer = i32(view_bindings::view.frame_count % u32(textureNumLayers(view_bindings::blue_noise_texture)));
+        return textureLoad(view_bindings::blue_noise_texture, (px % vec2<i32>(dims) + vec2<i32>(dims)) % vec2<i32>(dims), layer, 0).r;
+    }
+    }
+    return utils::interleaved_gradient_noise(vec2<f32>(px), view_bindings::view.frame_count % 64u);
+}
+
 /// fog, alpha premultiply
 /// for non-hdr cameras, tonemapping and debanding
 fn main_pass_post_lighting_processing(
@@ -992,6 +1051,14 @@ fn main_pass_post_lighting_processing(
             pbr_input.frag_coord.xy,
         );
     }
+
+    @if(VOLUMETRICS_APPLY_MESH)
+    output_color = apply_froxel_volumetrics(
+        pbr_input.material.flags,
+        output_color,
+        pbr_input.world_position.xyz,
+        pbr_input.frag_coord.xy,
+    );
 
 @if(TONEMAP_IN_SHADER) {
     output_color = tone_mapping(output_color, view_bindings::view.color_grading);

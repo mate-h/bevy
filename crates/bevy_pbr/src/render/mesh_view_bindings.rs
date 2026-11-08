@@ -117,6 +117,7 @@ bitflags::bitflags! {
         const DISTANCE_FOG                     = 1 << 14;
         const AREA_LIGHT_LUTS                  = 1 << 15;
         const VIEW_TRANSMISSION_TEXTURE        = 1 << 16;
+        const VOLUMETRICS                      = 1 << 17;
     }
 }
 
@@ -166,6 +167,9 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
         }
         if value.contains(MeshPipelineKey::ATMOSPHERE) {
             result |= MeshPipelineViewLayoutKey::ATMOSPHERE;
+        }
+        if value.contains(MeshPipelineKey::VOLUMETRICS_APPLY_MESH) {
+            result |= MeshPipelineViewLayoutKey::VOLUMETRICS;
         }
 
         if cfg!(feature = "bluenoise_texture") {
@@ -494,6 +498,21 @@ fn layout_entries(
         ));
     }
 
+    // Froxel volumetrics (`atmosphere/volumetrics.rs`): the grid's params and its integrated
+    // volume (in-scatter, transmittance), for the transparent meshes' aerial perspective.
+    if layout_key.contains(MeshPipelineViewLayoutKey::VOLUMETRICS) {
+        entries = entries.extend_with_indices((
+            (
+                34,
+                uniform_buffer::<crate::atmosphere::volumetrics::GpuVolumetricsParams>(false),
+            ),
+            (
+                35,
+                texture_3d(TextureSampleType::Float { filterable: true }),
+            ),
+        ));
+    }
+
     // Blue noise
     if layout_key.contains(MeshPipelineViewLayoutKey::STBN) {
         entries = entries.extend_with_indices(((
@@ -692,6 +711,11 @@ pub fn prepare_mesh_view_bind_groups(
             Option<&OrderIndependentTransparencySettingsOffset>,
             Has<ScreenSpaceTransmission>,
         ),
+        (
+            Option<&crate::atmosphere::VolumetricsSettings>,
+            Option<&crate::atmosphere::volumetrics::VolumetricsUniform>,
+            Has<crate::GpuCloudLayers>,
+        ),
     )>,
     (images, fallback_image, fallback_image_zero): (
         Res<RenderAssets<GpuImage>>,
@@ -707,12 +731,13 @@ pub fn prepare_mesh_view_bind_groups(
         Res<ContactShadowsBuffer>,
         Res<OitBuffers>,
     ),
-    (decals_buffer, render_decals, blue_noise, area_light_luts, dfg_lut): (
+    (decals_buffer, render_decals, blue_noise, area_light_luts, dfg_lut, volumetrics_fallback): (
         Res<DecalsBuffer>,
         Res<RenderClusteredDecals>,
         Res<Bluenoise>,
         Res<AreaLightLuts>,
         Res<DfgLut>,
+        Res<crate::atmosphere::volumetrics::VolumetricsFallbackUniform>,
     ),
     linear_sampler: Res<LinearSampler>,
     // TODO: Figure out how to reuse the memory. `BindGroupEntry` is non-send on wasm with atomics.
@@ -762,6 +787,7 @@ pub fn prepare_mesh_view_bind_groups(
                 view_oit_settings_offset,
                 has_transmission,
             ),
+            (volumetrics_settings, volumetrics_uniform, has_cloud_layers),
         ) in &views
         {
             let mut entries = DynamicBindGroupEntries::new();
@@ -855,6 +881,21 @@ pub fn prepare_mesh_view_bind_groups(
                     (29, atmosphere_buffer_binding),
                     (33, &atmosphere_textures.cloud_shadow_map.default_view),
                 ));
+                // The same condition as `check_views_need_specialization`'s
+                // `VOLUMETRICS_APPLY_MESH`; the fallback params (disabled) when the grid's uniform
+                // was not written this frame, so the layout always matches the key.
+                if volumetrics_settings
+                    .is_some_and(|v| v.applies_to_transparents(has_cloud_layers, msaa.samples()))
+                    && let Some(params) = volumetrics_uniform
+                        .and_then(|u| u.buffer.binding())
+                        .or_else(|| volumetrics_fallback.0.binding())
+                {
+                    layout_key |= MeshPipelineViewLayoutKey::VOLUMETRICS;
+                    entries = entries.extend_with_indices((
+                        (34, params),
+                        (35, &atmosphere_textures.volumetrics_integrated.default_view),
+                    ));
+                }
             }
 
             if cfg!(feature = "bluenoise_texture") {
