@@ -72,6 +72,12 @@ pub struct AtmosphereProbeTextures {
     pub cloud_shadow_map: CachedTexture,
     pub weather_window_art: CachedTexture,
     pub weather_window_physical: CachedTexture,
+    /// The cloud field's SDF (its grid cell), escape probability and diffusion solve (sun, and
+    /// sky with CLOUD_SKY_SH_BOUNDARY): the probe lights its clouds with `cloud_lighting.wesl`.
+    pub cloud_field_sdf: CachedTexture,
+    pub cloud_field_esc: CachedTexture,
+    pub cloud_field_diff: CachedTexture,
+    pub cloud_field_diff_amb: CachedTexture,
 }
 
 #[derive(Component)]
@@ -126,10 +132,12 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
         ),
     );
 
-    // Clouds-enabled variant: adds scattering medium LUTs + cloud bindings used by `raymarch_atmosphere()`.
+    // Clouds-enabled variant: adds scattering medium LUTs + cloud bindings used by
+    // `raymarch_atmosphere()` and the cloud lighting (`cloud_lighting.wesl`).
     let environment_clouds = BindGroupLayoutDescriptor::new(
         "environment_bind_group_layout_clouds",
-        &BindGroupLayoutEntries::with_indices(
+        // More entries than one `with_indices` tuple takes (32).
+        &DynamicBindGroupLayoutEntries::new_with_indices(
             ShaderStages::COMPUTE,
             (
                 // uniforms
@@ -189,7 +197,16 @@ pub fn init_atmosphere_probe_layout(mut commands: Commands) {
                     ),
                 ),
             ),
-        ),
+        )
+        .extend_with_indices((
+            // The cloud field (`cloud_field.wesl`), read by the probe's cloud lighting: SDF (the
+            // grid cell), escape probability, the diffusion solve of the sunlight, and of the
+            // sky and ground light (CLOUD_SKY_SH_BOUNDARY; bound regardless).
+            (44, texture_3d(TextureSampleType::Float { filterable: true })),
+            (48, texture_3d(TextureSampleType::Float { filterable: true })),
+            (59, texture_3d(TextureSampleType::Float { filterable: true })),
+            (68, texture_3d(TextureSampleType::Float { filterable: true })),
+        )),
     );
 
     commands.insert_resource(AtmosphereProbeLayouts {
@@ -328,7 +345,8 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
             Some(render_device.create_bind_group(
                 "environment_bind_group_clouds",
                 &pipeline_cache.get_bind_group_layout(&layouts.environment_clouds),
-                &BindGroupEntries::with_indices((
+                // More entries than one `with_indices` tuple takes (32).
+                &DynamicBindGroupEntries::new_with_indices((
                     // uniforms
                     (0, atmosphere_uniforms.binding().unwrap()),
                     (1, settings_uniforms.binding().unwrap()),
@@ -361,6 +379,13 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
                     (37, &textures.weather_window_physical.default_view),
                     // output
                     (13, &textures.environment),
+                ))
+                .extend_with_indices((
+                    // The cloud field, for the cloud lighting (`cloud_lighting.wesl`).
+                    (44, &textures.cloud_field_sdf.default_view),
+                    (48, &textures.cloud_field_esc.default_view),
+                    (59, &textures.cloud_field_diff.default_view),
+                    (68, &textures.cloud_field_diff_amb.default_view),
                 )),
             ))
         })();
@@ -423,6 +448,10 @@ pub(super) fn prepare_probe_textures(
             cloud_shadow_map: view_textures.cloud_shadow_map.clone(),
             weather_window_art: view_textures.weather_window_art.clone(),
             weather_window_physical: view_textures.weather_window_physical.clone(),
+            cloud_field_sdf: view_textures.cloud_field_sdf.clone(),
+            cloud_field_esc: view_textures.cloud_field_esc.clone(),
+            cloud_field_diff: view_textures.cloud_field_diff.clone(),
+            cloud_field_diff_amb: view_textures.cloud_field_diff_amb.clone(),
         });
         // Filter the faces at the pace they are rendered.
         commands.entity(probe).insert(EnvironmentMapFilterSlicing {
@@ -449,7 +478,13 @@ pub fn init_atmosphere_probe_pipeline(
         label: Some("environment_pipeline_clouds".into()),
         layout: vec![layouts.environment_clouds.clone()],
         shader: load_embedded_asset!(asset_server.as_ref(), "environment.wesl"),
-        shader_defs: vec!["CLOUDS_ENABLED".into(), "ATMOSPHERE_NO_SHADOW_MAPS".into(), "ATMOSPHERE_ENV_PROBE".into()],
+        // `CLOUD_TERMS` and `CLOUD_SKY_SH_BOUNDARY` as for the cloud pass: the probe's clouds
+        // take the same lighting terms (`cloud_lighting.wesl`).
+        shader_defs: vec!["CLOUDS_ENABLED".into(), "ATMOSPHERE_NO_SHADOW_MAPS".into(), "ATMOSPHERE_ENV_PROBE".into()]
+            .into_iter()
+            .chain(crate::atmosphere::resources::cloud_term_defs())
+            .chain(crate::atmosphere::resources::cloud_sky_sh_defs())
+            .collect(),
         ..default()
     });
 
@@ -567,7 +602,10 @@ pub fn atmosphere_environment(
         &ViewUniformOffset,
         &ViewLightsUniformOffset,
         Option<&DynamicUniformIndex<GpuCloudLayers>>,
+        &AtmosphereTextures,
+        &bevy_render::view::ExtractedView,
     )>,
+    lut_state: Res<super::node::PerViewLutState>,
     probe_query: Query<(
         Entity,
         &AtmosphereProbeBindGroups,
@@ -592,10 +630,20 @@ pub fn atmosphere_environment(
         view_uniforms_offset,
         lights_uniforms_offset,
         cloud_layer_offset,
+        textures,
+        extracted_view,
     ) = view.into_inner();
+    // The probe's cloud lighting reads the view's cloud field (`cloud_lighting.wesl`): like the
+    // main view's sky (node.rs), no clouds until the field has been built once (an unbuilt field
+    // reads as zero escape probability, f_ms / (1 - f_ms) ~ 3e6); the clear sky until then.
+    let field_built = lut_state.field_built(
+        extracted_view.retained_view_entity,
+        textures.cloud_field_sdf.texture.id(),
+    );
 
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
+    let timing_device = ctx.render_device().clone();
     let time_span = diagnostics.time_span(ctx.command_encoder(), "atmosphere_environment");
 
     for (probe, bind_groups, env_map_light, probe_is_view) in probe_query.iter() {
@@ -604,7 +652,8 @@ pub fn atmosphere_environment(
         if probe_view(probe, probe_is_view, &probe_source) != Some(this_view) {
             continue;
         }
-        let use_clouds = cloud_layer_offset.is_some() && bind_groups.environment_clouds.is_some();
+        let use_clouds =
+            cloud_layer_offset.is_some() && bind_groups.environment_clouds.is_some() && field_built;
 
         let pipeline = if use_clouds {
             pipeline_cache.get_compute_pipeline(pipelines.environment_clouds)
@@ -619,7 +668,8 @@ pub fn atmosphere_environment(
         let command_encoder = ctx.command_encoder();
         let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("environment_pass"),
-            timestamp_writes: None,
+            // `ATMOSPHERE_GPU_TIMING`: the probe's cost per frame (`gpu_timing.rs`).
+            timestamp_writes: super::gpu_timing::compute(&timing_device, "environment"),
         });
 
         pass.set_pipeline(pipeline);
