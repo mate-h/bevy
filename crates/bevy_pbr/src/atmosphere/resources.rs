@@ -4316,16 +4316,26 @@ pub(crate) fn cloud_sky_sh_defs() -> Vec<bevy_shader::ShaderDefVal> {
     }
 }
 
-/// `CLOUD_SUN_OD_GRID` (default on; `CLOUD_SUN_OD_GRID=0` off): the cloud pass's light march
-/// keeps two local taps and reads the rest of the sun optical depth from the pre-summed grid
-/// (`cloud_field.wesl` sun_od, Nubis Cubed 2:09:52); off, the former 12 taps + long tap. The
-/// grid's pass and buffers follow the same switch ([`cloud_sun_od_enabled`]).
+/// `CLOUD_SUN_OD_GRID=1` (default off): the cloud pass's light march keeps two local taps and
+/// reads the rest of the sun optical depth from the pre-summed grid (`cloud_field.wesl` sun_od,
+/// Nubis Cubed 2:09:52); off, the 12 taps + long tap. The grid's pass and buffers follow the
+/// same switch ([`cloud_sun_od_enabled`]).
+///
+/// Off by default from the measurement (hero:35, 720p, M1 Pro, xctrace, old/new alternated,
+/// clouds_raymarch median per execution): old 6.77 / 6.39 / 6.70 ms, grid 7.04 / 6.99 ms, with
+/// the former march compiled out of the shader (ATM_DBG_SUN_OD_ONLY) 6.41 ms, plus the grid
+/// pass's 0.40 ms; GPU busy (union) old 14.4 / 15.0 / 16.1, grid 15.5 / 16.2, compiled out 15.4
+/// ms per frame. The light taps are not the cloud pass's cost: taking them out of the shader
+/// pays the grid pass back and no more (within the run-to-run noise of the old runs), and
+/// keeping the former march as the out-of-field fallback costs ~0.6 ms of the pass even where
+/// it is not taken (the register budget is the worse path's). The image with the grid is
+/// closer to the dense light march than the taps (sunlit rims +0.2 % against +16 %).
 pub(crate) fn cloud_sun_od_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        !matches!(
+        matches!(
             std::env::var("CLOUD_SUN_OD_GRID").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
+            Ok("1") | Ok("on") | Ok("true")
         )
     })
 }
