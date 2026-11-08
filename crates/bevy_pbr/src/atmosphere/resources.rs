@@ -4005,6 +4005,8 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 /// - `ATM_DBG_MIP0`: full-resolution cloud noise at any distance.
 /// - `ATM_DBG_OUT_H`: write height-in-layer / profile / depth instead of cloud colour.
 /// - `ATM_DBG_NO_SDF_SKIP`: disable cloud-SDF empty-space skipping.
+/// - `ATM_DBG_NO_NVDF_SKIP`: keep the coarse field's skip but not the voxel cloud's own (NVDF
+///   signed distance) leaps inside its box.
 /// - `ATM_DBG_NO_FAR_GRID`: disable the far empty-space grid's leaps over clear cells.
 /// - `ATM_DBG_NO_CLOUD_MOTION`: reproject the cloud history without the wind displacement.
 /// - `ATM_DBG_NO_THIN_SHADOW`: no thin-layer (cirrus) shadow in the cloud shadow map's alpha.

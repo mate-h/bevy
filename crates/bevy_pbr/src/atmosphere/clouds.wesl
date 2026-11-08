@@ -644,7 +644,8 @@ struct CloudColumn {
     weather: vec4<f32>,
     /// (dimensional profile, liquid water / the layer's).
     vertical: vec2<f32>,
-    /// The point is in the voxel cloud (`voxel_cloud_at`): weather and profile come from its data.
+    /// The point is in the voxel cloud's box (`voxel_cloud_uvw`): weather and profile come from
+    /// its data.
     voxel: bool,
 }
 
@@ -652,17 +653,24 @@ struct CloudColumn {
 /// at position * 0.01 (Guerrilla's VoxelCloudSampler), a 100 m tile for clouds of ~8 m voxels.
 const VOXEL_DETAIL_TILE_M: f32 = 100.0;
 
-/// The voxel cloud's data at an atmosphere-space point: (dimensional profile, detail type, density
-/// scale, signed distance), all 0 outside its box or without a voxel cloud. The box is fixed in the
-/// world (the wind moves only its detail noise). Sampled at the top level: the data is ~8 m voxels.
-fn voxel_cloud_at(world_pos: vec3<f32>) -> vec4<f32> {
+/// The voxel cloud's texture coordinates of an atmosphere-space point inside its box, or
+/// `vec3(-1.0)` outside it or without a voxel cloud. The box is fixed in the world (the wind moves
+/// only its detail noise).
+fn voxel_cloud_uvw(world_pos: vec3<f32>) -> vec3<f32> {
     if (cloud_layer.voxel_enabled == 0u) {
-        return vec4(0.0);
+        return vec3(-1.0);
     }
     let uvw = (cloud_layer.voxel_uvw_from_atmosphere * vec4(world_pos, 1.0)).xyz;
     if (any(uvw < vec3(0.0)) || any(uvw > vec3(1.0))) {
-        return vec4(0.0);
+        return vec3(-1.0);
     }
+    return uvw;
+}
+
+/// The voxel cloud's data at texture coordinates from `voxel_cloud_uvw`: (dimensional profile,
+/// detail type, density scale, signed distance). Sampled at the top level: the data is ~8 m
+/// voxels.
+fn voxel_cloud_at(uvw: vec3<f32>) -> vec4<f32> {
     return textureSampleLevel(voxel_cloud_data, voxel_cloud_sampler, uvw, 0.0);
 }
 
@@ -683,16 +691,66 @@ fn voxel_cloud_near(world_pos: vec3<f32>, footprint: f32) -> bool {
     return all(uvw > -pad) && all(uvw < vec3(1.0) + pad);
 }
 
+// The NVDF's signed distance (A channel): the Nubis Voxel Clouds Pack stores the field data's
+// "signed distance field from the range -256 to 4096 but ranged to 0-1" (pack NVDFs/Readme.txt;
+// Nubis Cubed, Advances 2023, "Field Data NVDF ... -256 m to 4096 m"), in metres of the pack's
+// 4 km / 512 voxel domain (`VoxelCloud::NUBIS_PACK_VOXEL_SIZE`). `tools/nvdf_to_ktx2.py` keeps
+// the pack's 8-bit code as is (R8G8B8A8_UNORM, no BC1 trick), so the decode is
+// code * (4096 + 256) - 256, and the code's step is one `NVDF_SDF_QUANTUM_M` = 4352 / 255 m
+// (17.07 m, more than two 7.8 m voxels).
+const NVDF_SDF_MIN_M: f32 = -256.0;
+const NVDF_SDF_MAX_M: f32 = 4096.0;
+const NVDF_SDF_QUANTUM_M: f32 = (NVDF_SDF_MAX_M - NVDF_SDF_MIN_M) / 255.0;
+const NVDF_PACK_VOXEL_M: f32 = 4000.0 / 512.0;
+/// `voxel_cloud_sdf` outside the voxel cloud's box or without a voxel cloud: the NVDF knows
+/// nothing there (the box is cropped to the cloud plus a margin).
+const VOXEL_SDF_UNKNOWN: f32 = 1e9;
+
+/// Signed distance (m, negative inside the cloud) to the voxel cloud from its NVDF, at an
+/// atmosphere-space point inside its box; `VOXEL_SDF_UNKNOWN` outside. The pack's metres are
+/// scaled to the world by the box's voxel size over the pack's (the smallest axis of a
+/// non-uniform scale, a lower bound of the distance). Positive distances are capped by the
+/// distance to the box's side: the field is a distance to this cloud only, and the sky's clouds
+/// beyond the box are the coarse SDF's (`cloud_distance`). Nubis Cubed GetVoxelCloudDistance.
+fn voxel_cloud_sdf(world_pos: vec3<f32>) -> f32 {
+    if (cloud_layer.voxel_enabled == 0u) {
+        return VOXEL_SDF_UNKNOWN;
+    }
+    let m = cloud_layer.voxel_uvw_from_atmosphere;
+    let uvw = (m * vec4(world_pos, 1.0)).xyz;
+    if (any(uvw < vec3(0.0)) || any(uvw > vec3(1.0))) {
+        return VOXEL_SDF_UNKNOWN;
+    }
+    let code = voxel_cloud_at(uvw).a;
+    let sdf_pack_m = code * (NVDF_SDF_MAX_M - NVDF_SDF_MIN_M) + NVDF_SDF_MIN_M;
+    // Box extent in metres along each texture axis: 1 / |d uvw_i / d p| (`voxel_cloud_near`).
+    let extent_m = 1.0 / vec3(
+        length(vec3(m[0].x, m[1].x, m[2].x)),
+        length(vec3(m[0].y, m[1].y, m[2].y)),
+        length(vec3(m[0].z, m[1].z, m[2].z)),
+    );
+    let voxel_m = extent_m / vec3<f32>(textureDimensions(voxel_cloud_data, 0));
+    let scale = min(min(voxel_m.x, voxel_m.y), voxel_m.z) / NVDF_PACK_VOXEL_M;
+    let sdf_m = sdf_pack_m * scale;
+    let border = min(min(min(uvw.x, 1.0 - uvw.x) * extent_m.x, min(uvw.y, 1.0 - uvw.y) * extent_m.y),
+        min(uvw.z, 1.0 - uvw.z) * extent_m.z);
+    return select(sdf_m, min(sdf_m, border), sdf_m > 0.0);
+}
+
 fn cloud_column_at(r: f32, world_pos: vec3<f32>) -> CloudColumn {
     let layer_thickness = cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start;
     let height_in_layer = r - cloud_layer.cloud_layer_start;
     let h = clamp(height_in_layer / max(1.0, layer_thickness), 0.0, 1.0);
     let sample_pos = cloud_sample_pos(world_pos, r);
-    // Inside the voxel cloud its data replaces the sky's weather and profile (Nubis Cubed: the
-    // modeling data gives the dimensional profile directly; liquid water and droplets at the
-    // layer's reference).
-    let voxel = voxel_cloud_at(world_pos);
-    if (voxel.x > 0.0) {
+    // Inside the voxel cloud's box its data replaces the sky's weather and profile (Nubis Cubed:
+    // the modeling data gives the dimensional profile directly; liquid water and droplets at the
+    // layer's reference). The whole box, its empty voxels included: the box is the NVDF's domain
+    // and its signed distance (`voxel_cloud_sdf`) is the distance to the only cloud in it, so the
+    // march can leap through its empty space by that distance (clouds_raymarch.wesl). Sky clouds
+    // used to fill the box's empty voxels, where the leap would have skipped them.
+    let uvw = voxel_cloud_uvw(world_pos);
+    if (uvw.x >= 0.0) {
+        let voxel = voxel_cloud_at(uvw);
         return CloudColumn(sample_pos, h, vec4(1.0, voxel.y, voxel.z, 1.0), vec2(voxel.x, 1.0), true);
     }
     // Nubis detail type (0 wispy, 1 billowy) and density scale: authored weather fields; with

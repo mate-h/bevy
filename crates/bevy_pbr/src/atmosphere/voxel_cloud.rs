@@ -21,7 +21,10 @@ use bevy_transform::components::{GlobalTransform, Transform};
 ///
 /// The cloud renderer takes the profile, type and density scale from the data inside the box and
 /// erodes them with the detail noise as Nubis Cubed's voxel sampler does (`clouds.wesl`,
-/// `cloud_column_at`). The voxel cloud belongs to the atmosphere's [`VolumetricCloudLayer`]
+/// `cloud_column_at`). The box is the voxel cloud's domain: the layer's sky clouds do not enter
+/// it, and the march leaps through its empty voxels by the signed distance (`voxel_cloud_sdf`,
+/// decoded as `code * 4352 - 256` m in the pack's voxel units, scaled by `voxel_size` over
+/// [`Self::NUBIS_PACK_VOXEL_SIZE`]). The voxel cloud belongs to the atmosphere's [`VolumetricCloudLayer`]
 /// (`crate::VolumetricCloudLayer`): it uses the layer's optical properties and density, and
 /// must lie within its altitude range; without a layer it is not drawn. One voxel cloud is
 /// rendered (the first).
