@@ -23,6 +23,13 @@ import package::atmosphere::{
         CLOUD_FIELD_RES_Z, cloud_shadow_lod, CLOUD_SHADOW_WARP_A,
     },
 };
+import package::atmosphere::clouds::{CLOUD_LIGHT_TAP_STEP_M, CLOUD_LIGHT_TAP_GROWTH, CLOUD_LIGHT_TAP_LOD, CLOUD_LIGHT_LONG_TAP_M};
+@if(CLOUD_SUN_OD_GRID)
+import package::atmosphere::clouds::{
+    cloud_sun_od_step_m, cloud_sun_od_voxel_m, CLOUD_SUN_OD_RES_XY, CLOUD_SUN_OD_RES_Z,
+    CLOUD_SUN_OD_LOCAL_TAPS, cloud_layer_segment, cloud_field_origin_from_cell, cloud_field_frame_xz,
+    CLOUD_FIELD_EXTENT_M,
+};
 
 // Escape probability of multiply scattered light (r) and the vertical optical depths to the
 // layer top (g) and bottom (b) (cloud_field.wesl `escape`; cell from cloud_field_sdf).
@@ -30,6 +37,54 @@ import package::atmosphere::{
 // Diffuse sunlight of the cloud field per unit sun irradiance, U = 4 pi J_diff / E (r), and its
 // build cell (gb) (cloud_field.wesl diffusion solve).
 @group(0) @binding(59) var cloud_field_diff: texture_3d<f32>;
+// Sun optical depth of the cloud field (`cloud_field.wesl` sun_od): r = int density ds along the
+// first light from the voxel centre to its exit from the layer or the field, g = the density at
+// the centre, ba = build cell.
+@if(CLOUD_SUN_OD_GRID)
+@group(0) @binding(69) var cloud_sun_od: texture_3d<f32>;
+
+/// The grid's integral at `p` (density x metres along `l` from p to the exit) and the distance
+/// from p to that exit. One voxel is read: the nearest to p displaced by `jitter` (uniform in
+/// [0, 1)^3) less half a voxel, so over the frames the temporal reconstruction averages the
+/// voxels' *transmittances* with the trilinear weights (the probability that the displaced
+/// point falls nearest to each voxel is its tent weight): a stochastic trilinear filter in the
+/// domain the sun term is linear in, the mean the cloud pass's own jittered taps converge to.
+/// Hero:35, sun optical depth of the rim samples (brute dense march 0.73, the former taps
+/// 0.84): a trilinear read of the integrals gave 1.5 (the integral is convex across a sunlit
+/// edge, 0 outside and growing inside, so its average lies above its value: Jensen; rims -32 %),
+/// a trilinear read of the transmittances 1.0 but every interior sample within a voxel of an
+/// edge leaked light (one clear neighbour dominates the mean: top pixels +143 %), the nearest
+/// voxel 0.96 and the image within 4 % of the former taps' everywhere, but blocky. The voxel's
+/// integral is carried to p along the light by its first-order term, tau_i - rho_i (p - c_i).l,
+/// floored at 0 (an integral cannot be negative), the offset in the grid's own axes (the
+/// field's x/z and the radius: the up vector does not turn within a voxel). The exit is
+/// geometry (the layer shell, `cloud_layer_segment`, and the field's horizontal square), not
+/// stored: the cloud shadow map is read there.
+@if(CLOUD_SUN_OD_GRID)
+fn cloud_sun_od_read(p: vec3<f32>, l: vec3<f32>, mu: f32, uvw: vec3<f32>, cell: vec2<f32>, jitter: vec3<f32>) -> vec2<f32> {
+    let res = vec3(f32(CLOUD_SUN_OD_RES_XY), f32(CLOUD_SUN_OD_RES_XY), f32(CLOUD_SUN_OD_RES_Z));
+    let vox = cloud_sun_od_voxel_m();
+    let dz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_SUN_OD_RES_Z);
+    let st = uvw * res - 0.5;
+    let c = clamp(vec3<i32>(round(st + jitter - 0.5)), vec3(0), vec3<i32>(res) - 1);
+    let v = textureLoad(cloud_sun_od, c, 0);
+    // (p - c_i) in metres: grid x -> atmosphere x, grid y -> atmosphere z, grid z -> radius.
+    let d = (st - vec3<f32>(c)) * vec3(vox, vox, dz);
+    let along = d.x * l.x + d.y * l.z + d.z * mu;
+    let od = max(v.r - v.g * along, 0.0);
+    var s_exit = 0.0;
+    let seg = cloud_layer_segment(p, l);
+    if (seg.z > 0.5) {
+        s_exit = seg.y;
+    }
+    let origin = cloud_field_origin_from_cell(cell);
+    let fxz = cloud_field_frame_xz(p);
+    let inv = 1.0 / select(l.xz, vec2(1e-9), abs(l.xz) < vec2(1e-9));
+    let t0 = (origin - fxz) * inv;
+    let t1 = (origin + CLOUD_FIELD_EXTENT_M - fxz) * inv;
+    s_exit = max(min(s_exit, min(max(t0.x, t1.x), max(t0.y, t1.y))), 0.0);
+    return vec2(od, s_exit);
+}
 
 /// The cloud field's diffusion solution at p (0 outside the grid).
 fn cloud_field_diffuse(p: vec3<f32>) -> f32 {
@@ -115,10 +170,16 @@ fn cloud_escape_and_column(p: vec3<f32>) -> vec3<f32> {
 // first two samples are taken as before"; the cloud shadow map covers the long range).
 // 12 taps growing x1.4 from 20 m (~2.8 km) with a gentler LOD ramp: the old 6 doubling taps
 // (1.26 km) under-estimated sun optical depth (single scatter +25-40% vs CLOUD_REFERENCE).
-const LIGHT_TAP_STEP_M: f32 = 20.0;
-const LIGHT_TAP_GROWTH: f32 = 1.4;
-const LIGHT_TAP_LOD: f32 = 0.25;
-const LIGHT_LONG_TAP_M: f32 = 1500.0;
+const LIGHT_TAP_STEP_M: f32 = CLOUD_LIGHT_TAP_STEP_M;
+const LIGHT_TAP_GROWTH: f32 = CLOUD_LIGHT_TAP_GROWTH;
+const LIGHT_TAP_LOD: f32 = CLOUD_LIGHT_TAP_LOD;
+const LIGHT_LONG_TAP_M: f32 = CLOUD_LIGHT_LONG_TAP_M;
+// CLOUD_SUN_OD_GRID: the local taps kept in front of the sun optical-depth grid (Nubis Cubed,
+// Schneider, Advances 2023, 2:09:52: "the first two samples are taken as we did before. But the
+// remaining samples are pre-computed in a separate pass and stored in a 256 by 256 by 32 voxel
+// grid that we sample after the first two samples").
+@if(CLOUD_SUN_OD_GRID)
+const LIGHT_GRID_LOCAL_TAPS: u32 = CLOUD_SUN_OD_LOCAL_TAPS;
 
 fn cloud_phase(cos_theta: f32) -> f32 {
     // Droplet Mie phase (Jendersie & d'Eon 2023 HG + Draine fit, d = 20 um; functions.wesl).
@@ -470,21 +531,94 @@ fn cloud_sample_lighting(
             // decorrelated from the view-step jitter (r), advanced by the lit-sample
             // index so the lit samples of one ray do not share phases either.
             let xi = fract(tap_jitter + f32(lit_i * (n_taps + 1u)) * GOLDEN_RATIO_FRAC);
+            // CLOUD_SUN_OD_GRID: the sun optical-depth grid (`cloud_field.wesl` sun_od) in
+            // place of taps 3-12 and the long tap, for the first directional light (the grid is
+            // marched along it, as the shadow map is) where the grid point lies within the
+            // field's horizontal extent. The split along the sun ray from the sample p:
+            //
+            //   p --- tap 0 ---|--- tap 1 (+ xi_g voxel) ---|=== grid: int density ds ===|~~ shadow map ~~> sun
+            //   0             20 m                 s_g = 48 m + xi_g ds_vox          p_exit = p_g + l s_exit
+            //   [ fine density, mip + 0.25 k,     [ the voxel marches (grid pass:       [ beyond the field
+            //     jittered, as before ]             4 fine taps, then the field's         or the layer: the
+            //                                       extinction) read at p_g, each          thin layers' alpha
+            //                                       carried to p_g by its density ]        and far cumulus ]
+            //
+            // No segment is counted twice and none is skipped: tap 1's interval is stretched to
+            // end exactly at the grid point, the grid integrates from its read point onward
+            // (`cloud_sun_od_read`), and the shadow map is read where the sun ray leaves the
+            // layer shell or the field (s_exit, geometry), the role the point beyond the former
+            // taps had: the map's model gives the optical depth between the sun and that point,
+            // so a ray that left through the layer top adds only the thin layers (alpha) and
+            // the map's far cumulus, and one that left through the field's side adds the
+            // cumulus beyond the field. The grid point is jittered along the sun by up to one
+            // grid voxel with the taps' own phase xi_g (banding: the plan report's item 2
+            // forbids a fixed quadrature point); tap 1 absorbs the jittered length so the
+            // estimate stays unbiased (a one-sample estimate of a variable interval, as the
+            // taps are).
+            var use_grid = false;
+            var s_grid = 0.0;
+            var p_grid = p;
+            var uvw_grid = vec3(0.0);
+            var cell_grid = vec2(0.0);
+            var jitter_grid = vec3(0.0);
+            @if(CLOUD_SUN_OD_GRID) {
+                let hz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_SUN_OD_RES_Z);
+                let ds_vox = cloud_sun_od_step_m(mu_light, cloud_sun_od_voxel_m(), hz);
+                let xi_g = fract(xi + f32(LIGHT_GRID_LOCAL_TAPS) * GOLDEN_RATIO_FRAC);
+                // The read's displacement within the voxel (`cloud_sun_od_read`): the lit
+                // sample's phase spread over three axes by the R2 sequence (Roberts 2018, "The
+                // Unreasonable Effectiveness of Quasirandom Sequences": fract(x + k alpha), alpha
+                // from the plastic constant), as the taps spread it by the golden ratio over one.
+                jitter_grid = fract(vec3(xi) + vec3(0.8191725, 0.6710436, 0.5497005));
+                // The two local taps' span (the former first two intervals) plus the jitter.
+                s_grid = LIGHT_TAP_STEP_M * (1.0 + LIGHT_TAP_GROWTH) + xi_g * ds_vox;
+                p_grid = p + l * s_grid;
+                cell_grid = textureLoad(cloud_sun_od, vec3(0), 0).ba;
+                uvw_grid = cloud_field_uvw(p_grid, cell_grid);
+                use_grid = light_i == 0u && all(uvw_grid.xy >= vec2(0.0)) && all(uvw_grid.xy <= vec2(1.0));
+                @if(ATM_DBG_LIGHT_BRUTE) { use_grid = false; }
+                if (use_grid) {
+                    n_taps = LIGHT_GRID_LOCAL_TAPS;
+                }
+            }
             for (var k = 0u; k < n_taps; k++) {
                 let xi_k = fract(xi + f32(k) * GOLDEN_RATIO_FRAC);
-                let pk = p + l * (tap_t + xi_k * tap_dt);
+                var dt = tap_dt;
+                @if(CLOUD_SUN_OD_GRID) {
+                    // The last local tap runs to the grid point.
+                    if (use_grid && k + 1u == n_taps) {
+                        dt = s_grid - tap_t;
+                    }
+                }
+                let pk = p + l * (tap_t + xi_k * dt);
                 let dk = get_cloud_medium_density_lod(length(pk), pk, mip + tap_lod * f32(k));
-                light_od += dk * tap_dt;
-                tap_t += tap_dt;
+                light_od += dk * dt;
+                tap_t += dt;
                 tap_dt *= tap_growth;
             }
-            // The long tap is interval n_taps of the same sequence.
-            let xi_far = fract(xi + f32(n_taps) * GOLDEN_RATIO_FRAC);
-            let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * xi_far);
-            let d_far = get_cloud_medium_density_lod(length(p_far), p_far, mip + 3.0);
-            light_od += d_far * LIGHT_LONG_TAP_M;
-            let p_beyond = p + l * (tap_t + LIGHT_LONG_TAP_M);
-            t_far = sample_cloud_shadow_map(p_beyond, l, false, false);
+            if (use_grid) {
+                @if(CLOUD_SUN_OD_GRID) {
+                    var p_exit = p_grid;
+                    // Within the layer: the grid; a grid point already above the layer top (or
+                    // below its base, the sun under the horizon) has left the shell, as the
+                    // grid's own march would have at once: nothing more to add.
+                    if (uvw_grid.z >= 0.0 && uvw_grid.z <= 1.0) {
+                        var g = cloud_sun_od_read(p_grid, l, mu_light, uvw_grid, cell_grid, jitter_grid);
+                        @if(ATM_DBG_SUN_OD_GRID_ZERO) { g = vec2(0.0, g.y); }
+                        light_od += g.x;
+                        p_exit = p_grid + l * g.y;
+                    }
+                    t_far = sample_cloud_shadow_map(p_exit, l, false, false);
+                }
+            } else {
+                // The long tap is interval n_taps of the same sequence.
+                let xi_far = fract(xi + f32(n_taps) * GOLDEN_RATIO_FRAC);
+                let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * xi_far);
+                let d_far = get_cloud_medium_density_lod(length(p_far), p_far, mip + 3.0);
+                light_od += d_far * LIGHT_LONG_TAP_M;
+                let p_beyond = p + l * (tap_t + LIGHT_LONG_TAP_M);
+                t_far = sample_cloud_shadow_map(p_beyond, l, false, false);
+            }
         } else {
             // CLOUD_LIGHT_SHADOW_MAP: the cloud shadow map at the sample itself (coarse
             // density, 1 texel per 4x4 tile per frame, temporally filtered; `cloud_shadow_map.wesl`),
