@@ -2,7 +2,8 @@ import bevy_render::view::View;
 
 import package::{
     render::mesh_view_types::Lights,
-    atmosphere::types::{Atmosphere, AtmosphereSettings, AtmosphereTransforms}
+    atmosphere::types::{Atmosphere, AtmosphereSettings, AtmosphereTransforms},
+    light_probe::environment_sh::EnvironmentMapSh,
 };
 
 @group(0) @binding(0) var<uniform> atmosphere: Atmosphere;
@@ -34,6 +35,19 @@ import package::{
 // Cloud field (`cloud_field.wesl`): r = signed distance (m), g = blurred cloud column optical
 // depth (cloud AO for ground skylight).
 @group(0) @binding(44) var cloud_field_sdf: texture_3d<f32>;
+
+// The sky's spherical harmonics: the atmosphere probe's `EnvironmentMapSh`
+// (`light_probe/environment_sh.wesl`), the raymarched sky with its clouds as seen from the
+// camera, projected once per frame; pre-exposed like the sky-view LUT (the probe's exposure is
+// the view's that renders it). One global probe: the irradiance at the camera, not at a cloud's
+// altitude. Zero without a probe. Read by the cloud field's diffusion solve (CLOUD_SKY_SH_BOUNDARY).
+@if(CLOUD_SKY_SH_BOUNDARY)
+@group(0) @binding(66) var<storage, read> sky_sh: EnvironmentMapSh;
+// Diffuse sky and ground light of the cloud field (`cloud_field.wesl` diffusion_publish):
+// rgb = 4 pi J pre-exposed, a = 1 where the solve has a value (0 far from cloud), so rgb / a is
+// the solution interpolated over the cells that have one.
+@if(CLOUD_SKY_SH_BOUNDARY)
+@group(0) @binding(68) var cloud_field_diff_amb: texture_3d<f32>;
 
 // Spatio-temporal blue noise for per-frame stratification
 @if(CLOUDS_ENABLED)

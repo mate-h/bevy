@@ -10,11 +10,22 @@
 //   diffusion_source / sor_red / sor_black / diffusion_publish: the diffuse (multiply scattered)
 //          sunlight of the cloud field from a delta-Eddington diffusion solve (see `sor`).
 
-import package::atmosphere::bindings::{atmosphere, view, lights, settings, cloud_shadow_map, cloud_field_sdf};
+import bevy_render::maths::PI;
+import package::atmosphere::bindings::{atmosphere, view, lights, settings, cloud_shadow_map, cloud_field_sdf, atmosphere_lut_sampler};
 import package::atmosphere::functions::CLOUD_MIE_MEAN_COS;
 // The diffusion source's sun optical depth (its pipelines alone set CLOUDS_ENABLED).
 @if(CLOUDS_ENABLED)
 import package::atmosphere::functions::{cloud_shadow_frame, cloud_shadow_transmittance, cloud_thin_shadow_weight};
+// The sky and ground light entering the diffusion solve (CLOUD_SKY_SH_BOUNDARY): the sky's
+// harmonics, the ground's sun (transmittance LUT) and skylight (the ground skylight column map).
+@if(CLOUD_SKY_SH_BOUNDARY)
+import package::atmosphere::bindings::sky_sh;
+@if(CLOUD_SKY_SH_BOUNDARY)
+import package::atmosphere::functions::{sample_transmittance_lut, cloud_column_map, sample_sky_view_lut};
+@if(CLOUD_SKY_SH_BOUNDARY)
+import package::atmosphere::clouds::{cloud_column_map_origin, CLOUD_COLUMN_MAP_EXTENT_M};
+@if(CLOUD_SKY_SH_BOUNDARY)
+import package::light_probe::environment_sh::{sh9_irradiance, excess_light_irradiance};
 import package::atmosphere::clouds::{
     cloud_layer,
     cloud_column_at,
@@ -261,11 +272,30 @@ fn edt_z(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: 
 // escape series gives 0.44 x (.clouds-handoff/validation/iprt_c2/c2_field.py, c2_sor.py).
 // Red-black successive over-relaxation in place, warm-started from the previous frame: 32
 // iterations converge from zero (0.3 %), 1-2 track a sun moved by 2 degrees.
-@group(0) @binding(55) var diff_src: texture_storage_3d<r32float, read_write>;
-@group(0) @binding(56) var diff_u: texture_storage_3d<r32float, read_write>;
+//
+// Sky and ground light (CLOUD_SKY_SH_BOUNDARY; diff_src.gba, diff_u.gba, absolute radiance x 4 pi,
+// r stays the sun's per unit irradiance): the same equation with no volume source, driven by the
+// diffuse light entering through the open faces. The Marshak condition states the incoming
+// hemispheric flux: with the P1 radiance I = (U + 3 F.w) / (4 pi), the flux into the cloud through
+// a face of outward normal n is U / 4 - F.n / 2 = F_in, so the net outward flux is
+// F.n = U / 2 - 2 F_in (F_in = 0 is the condition above). With the half-cell ghost value U_f
+// (F.n = 2 D (U_c - U_f) / h) this gives F.n = 2 D (U_c - 4 F_in) / (h + 4 D): the face's usual
+// diagonal term plus a source 8 D F_in / (h (h + 4 D)) per unit volume, which
+// `diffusion_boundary_source` writes into diff_src.gba (the operator is the sun's, so one SOR
+// sweep solves both). F_in is the irradiance on the face from the clear air outside it
+// (`diffusion_face_irradiance`). Check: an isotropic radiance L on every face of a conservative
+// cloud gives U = 4 pi L with F.n = 0 everywhere, the uniform field it must be. The cloud pass
+// reads U.gba / (4 pi) as its ambient mean intensity where the solve has a value, in place of the
+// two-stream slab term, so sky and ground light enter once (clouds_raymarch.wesl).
+@group(0) @binding(55) var diff_src: texture_storage_3d<rgba32float, read_write>;
+@group(0) @binding(56) var diff_u: texture_storage_3d<rgba32float, read_write>;
 @group(0) @binding(57) var out_field_diff: texture_storage_3d<rgba16float, write>;
+// The sky and ground light's solution for the cloud pass (rgb: 4 pi J pre-exposed, a: 1 where
+// the solve has a value).
+@if(CLOUD_SKY_SH_BOUNDARY)
+@group(0) @binding(67) var out_field_diff_amb: texture_storage_3d<rgba16float, write>;
 // The solution and source moved with the grid (z < RES_Z: U, above: the source).
-@group(0) @binding(58) var diff_tmp: texture_storage_3d<r32float, read_write>;
+@group(0) @binding(58) var diff_tmp: texture_storage_3d<rgba32float, read_write>;
 // (0, 1): the build cell the solution and source are indexed by; (2, 3): the pending shift.
 @group(0) @binding(60) var diff_state: texture_storage_3d<r32float, read_write>;
 
@@ -314,7 +344,7 @@ fn diffusion_source_cell(id: vec3<u32>) {
     }
     let e = textureLoad(in_field_ext, id, 0);
     let gg = diff_g();
-    var src = 0.0;
+    var src = vec4(0.0);
     if (e.r > DIFF_SIGMA_MIN && lights.n_directional_lights > 0u) {
         let l = lights.directional_lights[0].direction_to_light;
         let vox = cloud_field_voxel_m();
@@ -338,9 +368,134 @@ fn diffusion_source_cell(id: vec3<u32>) {
         let r = cloud_layer.cloud_layer_start + (f32(id.z) + 0.5) * e.g;
         let p = vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y);
         tau += diffusion_sun_tau_beyond(p + l * t, l);
-        src = (1.0 + gg.y) * gg.x * e.r * exp(-gg.x * tau);
+        src.x = (1.0 + gg.y) * gg.x * e.r * exp(-gg.x * tau);
     }
-    textureStore(diff_src, id, vec4(src));
+    @if(CLOUD_SKY_SH_BOUNDARY) {
+        if (e.r > DIFF_SIGMA_MIN) {
+            src = vec4(src.x, diffusion_boundary_source(id, e));
+        }
+    }
+    textureStore(diff_src, id, src);
+}
+
+/// E / pi of the sky's harmonics (and excess lights) at the atmosphere-space normal `n`, in
+/// absolute units (the probe is pre-exposed by the view that renders it, taken as this view).
+/// `ATM_DBG_SKY_SH_LUT_TOP`: the clear sky-view LUT at radius `r` instead (the slab term's
+/// source), cosine-weighted quadrature of the hemisphere around `n` (mu = sqrt(1 - u) for
+/// stratified u, golden-angle azimuths: the plain mean of the samples is E / pi, as
+/// `sample_sky_irradiance` in clouds_raymarch.wesl), so that the boundary formulation can be
+/// measured apart from the probe's position at the camera.
+@if(CLOUD_SKY_SH_BOUNDARY)
+fn sky_sh_irradiance_over_pi(n: vec3<f32>, r: f32) -> vec3<f32> {
+    @if(ATM_DBG_SKY_SH_LUT_TOP) {
+        let t = normalize(cross(n, select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), abs(n.x) > 0.9)));
+        let b = cross(n, t);
+        var sum = vec3(0.0);
+        for (var i = 0u; i < 16u; i++) {
+            let u = (f32(i) + 0.5) / 16.0;
+            let mu = sqrt(1.0 - u);
+            let s = sqrt(u);
+            let a = f32(i) * 2.399963;
+            sum += sample_sky_view_lut(r, n * mu + (t * cos(a) + b * sin(a)) * s);
+        }
+        return sum / 16.0;
+    }
+    // Environment maps are oriented in world space.
+    let n_world = normalize((atmosphere.atmosphere_to_world * vec4(n, 0.0)).xyz);
+    var e = sh9_irradiance(sky_sh.coefficients, n_world);
+    for (var i = 0u; i < sky_sh.excess_count; i++) {
+        e += excess_light_irradiance(sky_sh.excess_directions[i].xyz, sky_sh.excess_radiances[i].rgb, n_world);
+    }
+    return e / view.exposure;
+}
+
+/// Radiant exitance of the Lambertian ground under the cell at atmosphere-space `xz`:
+/// albedo (E_sun V + E_sky), V the cloud shadow map's sun transmittance at the ground point
+/// (the thin layers included), E_sky the ground skylight column map (cloud-occluded, converged;
+/// the sky's harmonics at the camera where the map does not reach). The same quantities the
+/// cloud pass's two-stream ground term uses (`ground_rad` in clouds_raymarch.wesl), at one point
+/// per 187 m cell instead of its disc averages: the solve spreads it over the cloud.
+@if(CLOUD_SKY_SH_BOUNDARY)
+fn diffusion_ground_exitance(xz: vec2<f32>) -> vec3<f32> {
+    let r_g = atmosphere.inner_radius;
+    let p_g = vec3(xz.x, sqrt(max(r_g * r_g - dot(xz, xz), 0.0)), xz.y);
+    let up_g = normalize(p_g);
+    var e_sun = vec3(0.0);
+    if (lights.n_directional_lights > 0u) {
+        let l = lights.directional_lights[0].direction_to_light;
+        let mu_g = dot(l, up_g);
+        let vis = exp(-diffusion_sun_tau_beyond(p_g, l));
+        e_sun = lights.directional_lights[0].color.rgb * sample_transmittance_lut(r_g, mu_g) * max(mu_g, 0.0) * vis;
+    }
+    var e_sky = PI * sky_sh_irradiance_over_pi(up_g, r_g);
+    let camera_xz = (atmosphere.world_to_atmosphere * vec4(view.world_position, 1.0)).xz;
+    let uv = (xz - cloud_column_map_origin(camera_xz)) / (2.0 * CLOUD_COLUMN_MAP_EXTENT_M);
+    if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
+        // Stored pre-exposed, as the sky-view LUT.
+        e_sky = textureSampleLevel(cloud_column_map, atmosphere_lut_sampler, uv, 0.0).gba / view.exposure;
+    }
+    return atmosphere.ground_albedo * (e_sun + e_sky);
+}
+
+/// The diffuse irradiance F_in entering a cloud cell through an open face of outward normal
+/// `n` (atmosphere space, `up` the cell's vertical), given the ground's exitance `m_g` below it:
+/// - top (n = up): the sky's irradiance E(up) = pi (E/pi)_SH(up); the clamped cosine at the
+///   zenith normal excludes the probe's lower hemisphere.
+/// - base (n = -up): the ground's exitance (Lambert: pi L_g = albedo (E_sun V + E_sky)).
+/// - sides: the harmonics' irradiance at n, whose lower half is the probe's own ground (the
+///   camera's foot point, one shadow state for the whole field), replaced by the column's
+///   ground: a uniform lower hemisphere of radiance L contributes pi L / 2 to a vertical face
+///   and pi L = E_SH(-up) to the nadir normal, so E(n) = E_SH(n) + (pi L_g - E_SH(-up)) / 2.
+@if(CLOUD_SKY_SH_BOUNDARY)
+fn diffusion_face_irradiance(n: vec3<f32>, up: vec3<f32>, r: f32, m_g: vec3<f32>) -> vec3<f32> {
+    let vertical = dot(n, up);
+    if (vertical > 0.5) {
+        return PI * sky_sh_irradiance_over_pi(up, r);
+    }
+    if (vertical < -0.5) {
+        return m_g;
+    }
+    let e_side = PI * sky_sh_irradiance_over_pi(n, r);
+    let e_nadir = PI * sky_sh_irradiance_over_pi(-up, r);
+    return max(e_side + 0.5 * (m_g - e_nadir), vec3(0.0));
+}
+
+/// The sky and ground light's source of a cloud cell: 8 D F_in / (h (h + 4 D)) summed over its
+/// faces open to clear air or the grid edge (the Marshak derivation above), absolute radiance
+/// units. Face normals: the atmosphere's x/z axes for the horizontal faces (the grid is a
+/// translation of atmosphere space) and the cell's vertical for the top and base.
+@if(CLOUD_SKY_SH_BOUNDARY)
+fn diffusion_boundary_source(id: vec3<u32>, e: vec4<f32>) -> vec3<f32> {
+    let gg = diff_g();
+    let d = 1.0 / (3.0 * gg.x * e.r);
+    let vox = cloud_field_voxel_m();
+    let hz = max(e.g, 1e-3);
+    let xz = cloud_field_frame_to_atmosphere_xz(cloud_field_origin_from_cell(e.ba) + (vec2<f32>(id.xy) + 0.5) * vox);
+    let r = cloud_layer.cloud_layer_start + (f32(id.z) + 0.5) * e.g;
+    let up = normalize(vec3(xz.x, sqrt(max(r * r - dot(xz, xz), 0.0)), xz.y));
+    var m_g = vec3(0.0);
+    var have_ground = false;
+    let c = vec3<i32>(id);
+    var src = vec3(0.0);
+    for (var k = 0; k < 6; k++) {
+        let axis = k / 2;
+        var o = vec3(0);
+        o[axis] = select(-1, 1, (k & 1) == 1);
+        let q = c + o;
+        if (field_in_range(q) && textureLoad(in_field_ext, q, 0).r > DIFF_SIGMA_MIN) {
+            continue;
+        }
+        // Grid x, y, z -> atmosphere x, z, up.
+        let n = f32(o[axis]) * select(select(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), axis == 1), up, axis == 2);
+        // The ground's exitance, once, for the base and the sides (not the top).
+        if (!have_ground && (axis != 2 || o.z < 0)) {
+            m_g = diffusion_ground_exitance(xz);
+            have_ground = true;
+        }
+        let h = select(vox, hz, axis == 2);
+        src += 8.0 * d * diffusion_face_irradiance(n, up, r, m_g) / (h * (h + 4.0 * d));
+    }
+    return src;
 }
 
 /// The source of every cell (a full build).
@@ -378,7 +533,8 @@ fn sor(half_id: vec3<u32>, parity: u32) {
     let vox = cloud_field_voxel_m();
     let hz = max(e.g, 1e-3);
     let c = vec3<i32>(id);
-    var sum = 0.0;
+    // r: the sun's U, gba: the sky and ground's; one operator, four right-hand sides.
+    var sum = vec4(0.0);
     var diag = 0.0;
     for (var k = 0; k < 6; k++) {
         let axis = k / 2;
@@ -395,15 +551,16 @@ fn sor(half_id: vec3<u32>, parity: u32) {
         }
         if (dn > 0.0) {
             let cond = 2.0 * d * dn / (d + dn) / (h * h);
-            sum += cond * textureLoad(diff_u, n).r;
+            sum += cond * textureLoad(diff_u, n);
             diag += cond;
         } else {
+            // Marshak face: the incoming light's part is in diff_src.gba (diffusion_boundary_source).
             diag += 1.0 / (h * (h / (2.0 * d) + 2.0));
         }
     }
-    let u = textureLoad(diff_u, c).r;
-    let new_u = (textureLoad(diff_src, c).r + sum) / max(diag, 1e-30);
-    textureStore(diff_u, c, vec4(max(mix(u, new_u, DIFF_OMEGA), 0.0)));
+    let u = textureLoad(diff_u, c);
+    let new_u = (textureLoad(diff_src, c) + sum) / max(diag, 1e-30);
+    textureStore(diff_u, c, max(mix(u, new_u, DIFF_OMEGA), vec4(0.0)));
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -426,7 +583,9 @@ fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
     // g, b: the build cell of the extinction the solve used (cloud_field_uvw), so the cloud pass
     // maps positions with the solution's own cell while the SDF of a new build is pending.
     let e = textureLoad(in_field_ext, id, 0);
-    var u = textureLoad(diff_u, id).r;
+    var u = textureLoad(diff_u, id);
+    // Whether the published cell holds a solution (its own or its cloud neighbours' mean).
+    var valid = 1.0;
     // a: the extinction the solve used (per metre), for the diffuse flux F = -grad U / (3 sigma')
     // the cloud pass takes from this volume; the filled clear cells take their neighbours' mean.
     var sigma = e.r;
@@ -440,10 +599,11 @@ fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
     let qs = vec3<i32>(id) + vec3(vec2<i32>(e.ba - sdf_cell), 0);
     let far = field_in_range(qs) && textureLoad(cloud_field_sdf, qs, 0).r > 2.0 * cloud_field_voxel_m();
     if (e.r <= DIFF_SIGMA_MIN && far) {
-        u = 0.0;
+        u = vec4(0.0);
         sigma = 0.0;
+        valid = 0.0;
     } else if (e.r <= DIFF_SIGMA_MIN) {
-        var sum = 0.0;
+        var sum = vec4(0.0);
         var sum_sigma = 0.0;
         var n = 0.0;
         for (var k = 0; k < 6; k++) {
@@ -452,15 +612,20 @@ fn diffusion_publish(@builtin(global_invocation_id) id: vec3<u32>) {
             let q = vec3<i32>(id) + o;
             let sq = select(0.0, textureLoad(in_field_ext, q, 0).r, field_in_range(q));
             if (sq > DIFF_SIGMA_MIN) {
-                sum += textureLoad(diff_u, q).r;
+                sum += textureLoad(diff_u, q);
                 sum_sigma += sq;
                 n += 1.0;
             }
         }
-        u = select(0.0, sum / max(n, 1.0), n > 0.0);
+        u = select(vec4(0.0), sum / max(n, 1.0), n > 0.0);
         sigma = select(0.0, sum_sigma / max(n, 1.0), n > 0.0);
+        valid = select(0.0, 1.0, n > 0.0);
     }
-    textureStore(out_field_diff, id, vec4(u, e.ba, sigma));
+    textureStore(out_field_diff, id, vec4(u.x, e.ba, sigma));
+    // Pre-exposed for f16 (4 pi J of the sky's radiance exceeds its range), as the sky-view LUT.
+    @if(CLOUD_SKY_SH_BOUNDARY) {
+        textureStore(out_field_diff_amb, id, vec4(u.yzw * view.exposure, valid));
+    }
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -505,10 +670,10 @@ fn diffusion_shift(@builtin(global_invocation_id) id: vec3<u32>) {
     // Cell id of the new grid is cell id + o of the old one (cloud_field_origin_from_cell).
     let q = vec3<i32>(id) + vec3(o, 0);
     let inside = field_in_range(q);
-    let u = select(0.0, textureLoad(diff_u, q).r, inside);
-    let src = select(0.0, textureLoad(diff_src, q).r, inside);
-    textureStore(diff_tmp, vec3<i32>(id), vec4(u));
-    textureStore(diff_tmp, vec3<i32>(id) + vec3(0, 0, i32(CLOUD_FIELD_RES_Z)), vec4(src));
+    let u = select(vec4(0.0), textureLoad(diff_u, q), inside);
+    let src = select(vec4(0.0), textureLoad(diff_src, q), inside);
+    textureStore(diff_tmp, vec3<i32>(id), u);
+    textureStore(diff_tmp, vec3<i32>(id) + vec3(0, 0, i32(CLOUD_FIELD_RES_Z)), src);
 }
 
 @compute @workgroup_size(4, 4, 4)
