@@ -4,7 +4,7 @@ import package::atmosphere::{
     functions::{
         sample_transmittance_lut,
         sample_sky_view_lut, direction_world_to_atmosphere,
-        uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
+        uv_to_ray_direction, uv_to_ndc, jittered_uv_to_unjittered, sample_aerial_view_lut,
         sample_sun_radiance, ndc_to_camera_dist, raymarch_atmosphere,
         get_view_position, max_atmosphere_distance, get_local_r
     },
@@ -53,6 +53,7 @@ struct CloudsTemporalParams {
     new_sample_weight: f32,
     cirrus_min_radius: f32,
     history_exposure_scale: f32,
+    prev_jitter_ndc: vec2<f32>,
 }
 @if(SKY_HAZE_HALF_RES)
 @group(0) @binding(52) var<uniform> haze_temporal: CloudsTemporalParams;
@@ -462,7 +463,11 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     }
     let cloud_dims_u = textureDimensions(cloud_texture);
     let cloud_dims = vec2<f32>(cloud_dims_u);
-    let cloud_coord = in.uv * cloud_dims - 0.5;
+    // The cloud trace is unjittered (`uv_to_ray_direction_unjittered`): sample it where this
+    // pixel's jittered ray lies, so TAA still sees the jittered cloud image it resolves.
+    var cloud_uv = jittered_uv_to_unjittered(in.uv);
+    @if(ATM_DBG_CLOUD_JITTER) { cloud_uv = in.uv; }
+    let cloud_coord = cloud_uv * cloud_dims - 0.5;
     let cloud_base = vec2<i32>(floor(cloud_coord));
     let cloud_frac = cloud_coord - floor(cloud_coord);
     var clouds = vec4(0.0);

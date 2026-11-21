@@ -19,7 +19,7 @@ import package::atmosphere::{
     bindings::{atmosphere, settings, view, lights, atmosphere_lut_sampler, cloud_field_sdf, cloud_shadow_map, medium_density_lut},
     bruneton_functions::{ray_intersects_ground, sample_transmittance_lut_segment, sample_transmittance_lut_segment_tau_red, distance_to_top_atmosphere_boundary},
     functions::{
-        uv_to_ray_direction, uv_to_ndc, ndc_to_camera_dist, get_view_position,
+        uv_to_ray_direction, uv_to_ray_direction_unjittered, uv_to_ndc, ndc_to_camera_dist, get_view_position,
         sample_transmittance_lut, sample_multiscattering_lut, sample_sky_view_lut, direction_world_to_atmosphere, sample_cloud_shadow_map, cloud_shadow_frame, cloud_shadow_ground_uv, cloud_shadow_optical_depth, cloud_far_transmittance,
         hg_phase, cloud_mie_phase, CLOUD_MIE_MEAN_COS, CLOUD_MIE_G_HG, CLOUD_MIE_G_D, CLOUD_MIE_ALPHA, CLOUD_MIE_W_D, sample_aerial_view_lut, raymarch_atmosphere_jittered, sample_density_lut, sample_scattering_lut,
         ABSORPTION_DENSITY, SCATTERING_DENSITY, stbn_vec3, GOLDEN_RATIO_FRAC,
@@ -797,7 +797,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
     // ATM_DBG_OUT_STEPS: (coarse samples, fine samples, lit samples, all steps) of the view march.
     var dbg_steps = vec4(0.0);
 
-    let ray_dir = uv_to_ray_direction(uv);
+    var ray_dir = uv_to_ray_direction_unjittered(uv);
+    @if(ATM_DBG_CLOUD_JITTER) { ray_dir = uv_to_ray_direction(uv); }
     let ray_origin = get_view_position();
     let r = length(ray_origin);
     let mu = dot(ray_dir, normalize(ray_origin));

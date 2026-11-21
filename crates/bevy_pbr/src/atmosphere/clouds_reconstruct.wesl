@@ -9,7 +9,7 @@
 
 import package::atmosphere::{
     bindings::{atmosphere, view, atmosphere_lut_sampler},
-    functions::{uv_to_ray_direction, get_view_position},
+    functions::{uv_to_ray_direction, uv_to_ray_direction_unjittered, get_view_position},
 };
 
 struct CloudsTemporalParams {
@@ -25,6 +25,8 @@ struct CloudsTemporalParams {
     cirrus_min_radius: f32,
     // Current / previous exposure: the history holds exposed radiance.
     history_exposure_scale: f32,
+    // Last frame's TAA jitter in NDC (prev_clip_from_world includes it).
+    prev_jitter_ndc: vec2<f32>,
 }
 
 @group(0) @binding(26) var trace_texture: texture_2d<f32>;
@@ -92,7 +94,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (params.history_valid != 0u) {
         // Reproject with the weighted cloud depth of this pixel's neighbourhood.
         let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
-        let ray_dir = uv_to_ray_direction(uv);
+        var ray_dir = uv_to_ray_direction_unjittered(uv);
+        @if(ATM_DBG_CLOUD_JITTER) { ray_dir = uv_to_ray_direction(uv); }
         let d = select(NO_CLOUD_REPROJECTION_DISTANCE_M, center_depth, center_depth > 0.0);
         // Cloud points moved with the wind since last frame (RDR2 uses the wind as the motion
         // vector of its volumes); clear rays reproject by rotation only. Each layer has its own
@@ -109,7 +112,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let p_atmo = get_view_position() + ray_dir * d - motion;
         let p_world = (atmosphere.atmosphere_to_world * vec4(p_atmo, 1.0)).xyz;
         let prev_clip = params.prev_clip_from_world * vec4(p_world, 1.0);
-        let prev_ndc = prev_clip.xy / prev_clip.w;
+        // The history texels hold unjittered rays: undo last frame's jitter of prev_clip_from_world.
+        var prev_ndc = prev_clip.xy / prev_clip.w + params.prev_jitter_ndc;
+        @if(ATM_DBG_CLOUD_JITTER) { prev_ndc = prev_clip.xy / prev_clip.w; }
         let prev_uv = prev_ndc * vec2(0.5, -0.5) + vec2(0.5);
 
         if (prev_clip.w > 0.0 && all(prev_uv >= vec2(0.0)) && all(prev_uv <= vec2(1.0))) {

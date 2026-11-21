@@ -21,7 +21,7 @@ use bevy_ecs::{
 };
 use bevy_image::ToExtents;
 use bevy_light::atmosphere::ScatteringMedium;
-use bevy_math::{Affine3A, Mat4, UVec2, Vec3, Vec3A, Vec4};
+use bevy_math::{Affine3A, Mat4, UVec2, Vec2, Vec3, Vec3A, Vec4};
 use bevy_platform::collections::HashMap;
 use bevy_render::camera::ExtractedCamera;
 use bevy_render::render_resource::UniformBuffer;
@@ -1054,6 +1054,9 @@ pub struct CloudsTemporalParams {
     /// Current / previous `view.exposure`: the cloud history stores exposed radiance, so it is
     /// rescaled before clamping and blending when the camera's exposure changes.
     pub history_exposure_scale: f32,
+    /// Last frame's TAA jitter in NDC (`TemporalJitter::jitter_projection`'s shift, zero without
+    /// TAA): the cloud trace is unjittered, `prev_clip_from_world` is not.
+    pub prev_jitter_ndc: Vec2,
 }
 
 /// Per-view uniform for [`CloudsTemporalParams`].
@@ -1101,11 +1104,13 @@ pub(super) fn prepare_clouds_temporal_params(
             _ => 0.0,
         });
         let exposure = camera.map_or(1.0, |c| c.exposure);
+        let mut jitter_ndc = Vec2::ZERO;
         let clip_from_world = match temporal_jitter {
             Some(jitter) => {
                 // The jitter is in render pixels, like the view uniform's (`prepare_view_uniforms`).
                 let render_size = resolution_override
                     .map_or(UVec2::new(view.viewport.z, view.viewport.w), |size| **size);
+                jitter_ndc = jitter.offset * Vec2::new(2.0, -2.0) / render_size.as_vec2();
                 let mut clip_from_view = view.clip_from_view;
                 jitter.jitter_projection(&mut clip_from_view, render_size.as_vec2());
                 clip_from_view * view.world_from_view.to_matrix().inverse()
@@ -1123,7 +1128,7 @@ pub(super) fn prepare_clouds_temporal_params(
             textures.clouds_history.texture.id(),
             textures.haze_history_inscattering.texture.id(),
         );
-        let (prev_clip_from_world, history_valid, prev_offset, prev_cirrus_offset, prev_exposure) =
+        let (prev_clip_from_world, history_valid, prev_offset, prev_cirrus_offset, prev_exposure, prev_jitter_ndc) =
             match previous.get(&view.retained_view_entity) {
                 Some(prev) if history_written => (
                     prev.clip_from_world,
@@ -1131,8 +1136,9 @@ pub(super) fn prepare_clouds_temporal_params(
                     prev.offset,
                     prev.cirrus_offset,
                     prev.exposure,
+                    prev.jitter_ndc,
                 ),
-                _ => (clip_from_world, 0, offset, cirrus_offset, exposure),
+                _ => (clip_from_world, 0, offset, cirrus_offset, exposure, jitter_ndc),
             };
         let motion = offset - prev_offset;
         let cirrus_motion = cirrus_offset - prev_cirrus_offset;
@@ -1144,6 +1150,7 @@ pub(super) fn prepare_clouds_temporal_params(
             new_sample_weight: CLOUD_RECON_NEW_SAMPLE_WEIGHT,
             cirrus_min_radius,
             history_exposure_scale: exposure / prev_exposure.max(f32::MIN_POSITIVE),
+            prev_jitter_ndc,
         });
         buffer.write_buffer(&render_device, &render_queue);
         commands
@@ -1156,6 +1163,7 @@ pub(super) fn prepare_clouds_temporal_params(
                 offset,
                 cirrus_offset,
                 exposure,
+                jitter_ndc,
             },
         );
     }
@@ -1168,6 +1176,7 @@ pub struct PreviousCloudFrame {
     offset: Vec3,
     cirrus_offset: Vec3,
     exposure: f32,
+    jitter_ndc: Vec2,
 }
 
 /// The cloud and haze targets each view's `render_sky` wrote, and in which frame: the next

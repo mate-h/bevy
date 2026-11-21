@@ -843,6 +843,19 @@ fn uv_to_ndc(uv: vec2<f32>) -> vec2<f32> {
     return uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
 }
 
+/// This frame's TAA jitter in NDC: `TemporalJitter::jitter_projection` adds it to the
+/// projection's z column, so a point's jittered NDC is its unjittered NDC minus it (perspective).
+/// Zero without TAA.
+fn view_jitter_ndc() -> vec2<f32> {
+    return view.clip_from_view[2].xy - (view.unjittered_clip_from_world * view.world_from_view[2]).xy;
+}
+
+/// The unjittered position (uv) of the ray a jittered full-res pixel at `uv` traces this frame.
+fn jittered_uv_to_unjittered(uv: vec2<f32>) -> vec2<f32> {
+    let j = view_jitter_ndc();
+    return uv + vec2(0.5 * j.x, -0.5 * j.y);
+}
+
 /// Convert ndc space xy coordinate [-1.0 .. 1.0] to uv [0.0 .. 1.0]
 fn ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
     return ndc * vec2(0.5, -0.5) + vec2(0.5);
@@ -858,6 +871,15 @@ fn direction_world_to_atmosphere(dir_ws: vec3<f32>) -> vec3<f32> {
 fn direction_atmosphere_to_world(dir_as: vec3<f32>) -> vec3<f32> {
     let dir_ws = atmosphere_transforms.world_from_atmosphere * vec4(dir_as, 0.0);
     return dir_ws.xyz;
+}
+
+/// The ray through `uv` of the unjittered projection (the cloud trace: its half-res texels keep
+/// one position every frame, so the reconstruction's history lands on texel centres instead of
+/// being bilinearly resampled at the jitter's sub-texel offset each frame, which blurred cloud
+/// edges ~1.6x and cut their local contrast by a third; bevy-20n.4).
+fn uv_to_ray_direction_unjittered(uv: vec2<f32>) -> vec3<f32> {
+    let j = view_jitter_ndc();
+    return uv_to_ray_direction(uv - vec2(0.5 * j.x, -0.5 * j.y));
 }
 
 // Modified from skybox.wesl. For this pass we don't need to apply a separate sky transform or consider camera viewport.
