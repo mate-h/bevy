@@ -55,3 +55,11 @@ assets/textures/GroundSand005/**
 
 # Voxel clouds converted with tools/nvdf_to_ktx2.py (large, not redistributable)
 assets/volumes/nubis/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+.beads/
