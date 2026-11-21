@@ -1072,8 +1072,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 lit_samples[n_lit] = lit;
                 n_lit += 1u;
             } else {
-                // Beyond the list (~1 % of rays): lit like the last kept sample.
-                lit_samples[CLOUD_LIT_SAMPLES - 1u].y += lit.y;
+                // Beyond the list (~1 % of rays): merged into the last kept sample, which moves
+                // to their weight-averaged distance, view optical depth and density, so the
+                // far side of a deep cloud is not lit at the 6th sample's point (review 2g).
+                let last = lit_samples[CLOUD_LIT_SAMPLES - 1u];
+                let wy = last.y + lit.y;
+                let a = select(0.0, lit.y / wy, wy > 0.0);
+                lit_samples[CLOUD_LIT_SAMPLES - 1u] = vec4(mix(last.x, lit.x, a), wy, mix(last.z, lit.z, a), mix(last.w, lit.w, a));
             }
             let w = transmittance * (1.0 - step_t);
             depth_sum += w * t;
