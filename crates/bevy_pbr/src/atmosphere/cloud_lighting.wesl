@@ -581,9 +581,19 @@ fn cloud_sample_lighting(
                     n_taps = LIGHT_GRID_LOCAL_TAPS;
                 }
             }
-            for (var k = 0u; k < n_taps; k++) {
+            // The long tap (without the grid) is interval n_taps of the same sequence: the
+            // loop's last iteration, LIGHT_LONG_TAP_M long at mip + 3. One copy of the density
+            // fetch chain and, below, one shadow-map read for both paths: the separate long tap
+            // and the grid's own read inlined second copies (register spills, bevy-sgl.1).
+            let n_iter = select(n_taps + 1u, n_taps, use_grid);
+            for (var k = 0u; k < n_iter; k++) {
                 let xi_k = fract(xi + f32(k) * GOLDEN_RATIO_FRAC);
                 var dt = tap_dt;
+                var lod = tap_lod * f32(k);
+                if (k == n_taps) {
+                    dt = LIGHT_LONG_TAP_M;
+                    lod = 3.0;
+                }
                 @if(CLOUD_SUN_OD_GRID) {
                     // The last local tap runs to the grid point.
                     if (use_grid && k + 1u == n_taps) {
@@ -591,14 +601,16 @@ fn cloud_sample_lighting(
                     }
                 }
                 let pk = p + l * (tap_t + xi_k * dt);
-                let dk = get_cloud_medium_density_lod(length(pk), pk, mip + tap_lod * f32(k));
+                let dk = get_cloud_medium_density_lod(length(pk), pk, mip + lod);
                 light_od += dk * dt;
                 tap_t += dt;
                 tap_dt *= tap_growth;
             }
+            // Where the sun ray leaves the local march: the shadow map gives the rest.
+            var p_exit = p + l * tap_t;
             if (use_grid) {
                 @if(CLOUD_SUN_OD_GRID) {
-                    var p_exit = p_grid;
+                    p_exit = p_grid;
                     // Within the layer: the grid; a grid point already above the layer top (or
                     // below its base, the sun under the horizon) has left the shell, as the
                     // grid's own march would have at once: nothing more to add.
@@ -608,17 +620,9 @@ fn cloud_sample_lighting(
                         light_od += g.x;
                         p_exit = p_grid + l * g.y;
                     }
-                    t_far = sample_cloud_shadow_map(p_exit, l, false, false);
                 }
-            } else {
-                // The long tap is interval n_taps of the same sequence.
-                let xi_far = fract(xi + f32(n_taps) * GOLDEN_RATIO_FRAC);
-                let p_far = p + l * (tap_t + LIGHT_LONG_TAP_M * xi_far);
-                let d_far = get_cloud_medium_density_lod(length(p_far), p_far, mip + 3.0);
-                light_od += d_far * LIGHT_LONG_TAP_M;
-                let p_beyond = p + l * (tap_t + LIGHT_LONG_TAP_M);
-                t_far = sample_cloud_shadow_map(p_beyond, l, false, false);
             }
+            t_far = sample_cloud_shadow_map(p_exit, l, false, false);
         } else {
             // CLOUD_LIGHT_SHADOW_MAP: the cloud shadow map at the sample itself (coarse
             // density, 1 texel per 4x4 tile per frame, temporally filtered; `cloud_shadow_map.wesl`),

@@ -30,7 +30,7 @@ import package::atmosphere::{
         get_cloud_absorption_coeff, cloud_density_context, cloud_layer, cirrus_slant_optical_depth, CIRRUS_SLICES,
         cloud_field_uvw, cloud_field_voxel_m, CLOUD_FIELD_EXTENT_M, CLOUD_FIELD_RES_Z,
         cloud_profile_lut, CLOUD_PROFILE_TYPE_ROWS, CLOUD_SCHEME_ROW,
-        cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
+        cloud_column_at, CloudColumn, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
         cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
         CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M, cloud_shadow_lod, CLOUD_SHADOW_WARP_A,
         voxel_cloud_sdf, VOXEL_SDF_UNKNOWN, NVDF_SDF_QUANTUM_M, cloud_droplet_extinction_factor,
@@ -143,6 +143,11 @@ const CLOUD_MIN_TRANSMITTANCE: f32 = 0.01;
 // Lit samples recorded per ray for lighting after the march (99 % of rays have at most 6; the
 // march stops below CLOUD_MIN_TRANSMITTANCE); further ones are lit like the last.
 const CLOUD_LIT_SAMPLES: u32 = 6u;
+// The lit samples live in threadgroup memory, one slot per invocation of the 8x8 group
+// (`[k][local_invocation_index]`, so a SIMD group's accesses to one k are contiguous): as a
+// private array they were 24 floats live through the whole view march, part in registers, part
+// on the stack, and set the march loop's register budget (spills, bevy-sgl.1). 6 KB per group.
+var<workgroup> lit_samples: array<array<vec4<f32>, 64>, CLOUD_LIT_SAMPLES>;
 
 // Order in which the 4 pixels of each 2x2 half-res block are traced (shared with reconstruct).
 const CHECKER_OFFSETS: array<vec2<u32>, 4> = array(
@@ -890,8 +895,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // Ground-truth march for skip validation: fine samples everywhere, no budget limit.
         @if(ATM_DBG_NO_COARSE) { max_steps = 16384u; }
 
-        // Lit samples of the march: (t, luminance weight, view optical depth, density).
-        var lit_samples: array<vec4<f32>, CLOUD_LIT_SAMPLES>;
+        // Lit samples of the march (`lit_samples[k][li]`): (t, luminance weight, view optical
+        // depth, density).
         var n_lit = 0u;
 
         loop {
@@ -940,28 +945,35 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                     }
                 }
             }
-            let column = cloud_column_at(r_p, p);
+            // Long fine steps: the step's density is the mean of evenly spaced samples across
+            // it, also when the first is empty, which keeps the step's optical depth unbiased
+            // (audit 24). exp of one jittered sample averages too transparent where the density
+            // varies within the step. Lighting stays one evaluation per step (sigma_s / sigma_t
+            // does not depend on density). The samples share one loop with the step's own column
+            // (k = 0, which the coarse branch reads too): a separate sub-sample loop inlined a
+            // second copy of the column's fetch chain, whose ~400 hoisted invariants sized the
+            // march loop's registers even at one sample per step (spills, bevy-sgl.1).
+            let sub_n = max(settings.cloud_step_samples, 1u);
+            let n_samples = select(1u, sub_n, fine_mode && sub_n > 1u && dt > CLOUD_STEP_SUB_MIN_M);
+            var column: CloudColumn;
+            var density_sum = 0.0;
+            for (var k = 0u; k < n_samples; k++) {
+                let pk = p + ray_dir * (dt * f32(k) / f32(n_samples));
+                let rk = select(length(pk), r_p, k == 0u);
+                let ck = cloud_column_at(rk, pk);
+                if (k == 0u) { column = ck; }
+                if (fine_mode) {
+                    if (CLOUD_USE_NOISE_SHAPE) {
+                        let in_k = rk >= cloud_layer.cloud_layer_start && rk <= cloud_layer.cloud_layer_end;
+                        density_sum += select(0.0, cloud_shape_from_column(ck, mip) * cloud_layer.cloud_density, in_k);
+                    } else {
+                        density_sum += get_cloud_medium_density_lod(rk, pk, mip);
+                    }
+                }
+            }
             if (fine_mode) {
                 @if(ATM_DBG_OUT_STEPS) { dbg_steps.y += 1.0; }
-                if (CLOUD_USE_NOISE_SHAPE) {
-                    density = select(0.0, cloud_shape_from_column(column, mip) * cloud_layer.cloud_density, in_shell);
-                } else {
-                    density = get_cloud_medium_density_lod(r_p, p, mip);
-                }
-                // Long steps: the step's density is the mean of evenly spaced samples across
-                // it, also when the first is empty, which keeps the step's optical depth
-                // unbiased (audit 24). exp of one jittered sample averages too transparent
-                // where the density varies within the step. Lighting stays one evaluation per
-                // step (sigma_s / sigma_t does not depend on density).
-                let sub_n = max(settings.cloud_step_samples, 1u);
-                if (sub_n > 1u && dt > CLOUD_STEP_SUB_MIN_M) {
-                    var density_sum = density;
-                    for (var k = 1u; k < sub_n; k++) {
-                        let pk = p + ray_dir * (dt * f32(k) / f32(sub_n));
-                        density_sum += get_cloud_medium_density_lod(length(pk), pk, mip);
-                    }
-                    density = density_sum / f32(sub_n);
-                }
+                density = select(density_sum, density_sum / f32(n_samples), n_samples > 1u);
                 if (density <= 0.0) {
                     view_od_in_cloud = 0.0;
                     fine_empty += 1u;
@@ -1070,16 +1082,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 density,
             );
             if (n_lit < CLOUD_LIT_SAMPLES) {
-                lit_samples[n_lit] = lit;
+                lit_samples[n_lit][li] = lit;
                 n_lit += 1u;
             } else {
                 // Beyond the list (~1 % of rays): merged into the last kept sample, which moves
                 // to their weight-averaged distance, view optical depth and density, so the
                 // far side of a deep cloud is not lit at the 6th sample's point (review 2g).
-                let last = lit_samples[CLOUD_LIT_SAMPLES - 1u];
+                let last = lit_samples[CLOUD_LIT_SAMPLES - 1u][li];
                 let wy = last.y + lit.y;
                 let a = select(0.0, lit.y / wy, wy > 0.0);
-                lit_samples[CLOUD_LIT_SAMPLES - 1u] = vec4(mix(last.x, lit.x, a), wy, mix(last.z, lit.z, a), mix(last.w, lit.w, a));
+                lit_samples[CLOUD_LIT_SAMPLES - 1u][li] = vec4(mix(last.x, lit.x, a), wy, mix(last.z, lit.z, a), mix(last.w, lit.w, a));
             }
             let w = transmittance * (1.0 - step_t);
             depth_sum += w * t;
@@ -1094,7 +1106,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // which any of a SIMD group's 32 rays was lit ran the whole lighting for the group (about
         // half the steps for ~1 lit sample per ray), and its registers sized the whole loop.
         for (var lit_i = 0u; lit_i < n_lit; lit_i++) {
-            let lit = lit_samples[lit_i];
+            let lit = lit_samples[lit_i][li];
             let t = lit.x;
             let p = ray_origin + ray_dir * t;
             let lighting = cloud_sample_lighting(p, ray_dir, lit.z, cloud_mip_from_distance(t),
