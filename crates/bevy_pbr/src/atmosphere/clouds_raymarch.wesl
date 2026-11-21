@@ -919,6 +919,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
             // The column (weather, lean, profile) both branches need, once for every ray of the
             // SIMD group before they diverge (`CloudColumn`).
             let in_shell = r_p >= cloud_layer.cloud_layer_start && r_p <= cloud_layer.cloud_layer_end;
+            // Far empty-space grid (coarse mode): leave a clear cell in one step, before the
+            // column, so leaping rays skip its fetch chain (review 2d; a SIMD group of far rays
+            // in clear cells skips it entirely). The leap is certified
+            // clear, so a hit after it does not step back over it (which would land in the
+            // same cell, leap to the same hit and loop): only the jittered fraction of a step
+            // past the cell's side is uncertain. The jitter keeps the fine runs that start
+            // there from lining up on the world-fixed cell sides (bands).
+            @if(!ATM_DBG_NO_FAR_GRID) {
+                if (!fine_mode) {
+                    let leap = cloud_far_leap(p, r_p, ray_dir);
+                    if (leap > dt) {
+                        reentry_i += 1u;
+                        let phase = fract(cloud_march_jitter(t, jitter, jitter_static) + f32(reentry_i) * GOLDEN_RATIO_FRAC);
+                        let past = phase * dist_step;
+                        t += leap + past;
+                        last_leap = past;
+                        continue;
+                    }
+                }
+            }
             let column = cloud_column_at(r_p, p);
             if (fine_mode) {
                 @if(ATM_DBG_OUT_STEPS) { dbg_steps.y += 1.0; }
@@ -956,22 +976,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
                 }
                 fine_empty = 0u;
             } else {
-                // Far empty-space grid: leave a clear cell in one step. The leap is certified
-                // clear, so a hit after it does not step back over it (which would land in the
-                // same cell, leap to the same hit and loop): only the jittered fraction of a step
-                // past the cell's side is uncertain. The jitter keeps the fine runs that start
-                // there from lining up on the world-fixed cell sides (bands).
-                @if(!ATM_DBG_NO_FAR_GRID) {
-                    let leap = cloud_far_leap(p, r_p, ray_dir);
-                    if (leap > dt) {
-                        reentry_i += 1u;
-                        let phase = fract(cloud_march_jitter(t, jitter, jitter_static) + f32(reentry_i) * GOLDEN_RATIO_FRAC);
-                        let past = phase * dist_step;
-                        t += leap + past;
-                        last_leap = past;
-                        continue;
-                    }
-                }
                 // The fine density's near-camera reshape raises small densities (pow 0.5), so the
                 // bound gets it too, or thin near-camera cloud failed the coarse test (audit 25).
                 @if(ATM_DBG_OUT_STEPS) { dbg_steps.x += 1.0; }
