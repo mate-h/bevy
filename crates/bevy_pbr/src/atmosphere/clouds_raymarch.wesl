@@ -375,7 +375,9 @@ fn ref_cloud_density(p: vec3<f32>) -> f32 {
 // flight continued past a segment's null-collision budget (exact, no truncation).
 var<private> ref_caps: vec4<f32>;
 const REF_NULL_CANDIDATES: u32 = 8192u;
-const REF_SEGMENTS: u32 = 64u;
+// Boundary crossings per flight: the shell spheres, and with the local majorants every far-grid
+// cell (1.5 km, 8 slabs) a ray crosses, ~100-200 along a low-sun ray through the shell.
+const REF_SEGMENTS: u32 = 4096u;
 const REF_SUN_CANDIDATES: u32 = 65536u;
 const REF_MAX_BOUNCES: u32 = 16384u;
 // Beyond this many events, each further event also survives with REF_DEEP_SURVIVAL (unbiased
@@ -408,6 +410,60 @@ fn ref_air(r: f32) -> mat2x3<f32> {
     return mat2x3<f32>(sample_density_lut(r, ABSORPTION_DENSITY), sample_density_lut(r, SCATTERING_DENSITY));
 }
 
+// Local cloud majorants (CLOUD_REFERENCE): the far empty-space grid's cells (`cloud_far_grid`,
+// CLOUD_FAR_GRID_CELL_M boxes in the cloud frame's x/z times CLOUD_FAR_GRID_RES_Z spherical slabs
+// of the layer) split each flight through the cloud shell, and a cell the grid marks certainly
+// clear (`cloud_possible_footprint` failing over footprints that cover it) has cloud majorant 0.
+// Null-collision tracking stays exact with any majorant that bounds the medium over its segment;
+// the shell-wide bound made a low-sun ray through ~100 km of mostly clear shell draw a candidate
+// (and evaluate the full cloud density) every few metres. Cells outside the grid's window or not
+// built for that world cell keep the shell-wide bound. CLOUD_REF_NO_GRID turns it off (A/B).
+
+/// Distance from p0 + d t to the next crossing of a far-grid x or z face (cloud frame), > 0 in
+/// float: each face is solved from the ray's origin (like `ref_sphere_after`), and a face not
+/// strictly beyond t is replaced by the next one, so t always advances. Stepping from the current
+/// position with a small nudge stalled once t or the cloud-frame offset grew large (the nudge
+/// fell under one ulp; review Nov 21).
+fn ref_grid_xz_exit(p0: vec3<f32>, d: vec3<f32>, t: f32) -> f32 {
+    let o = cloud_field_frame_xz(p0);
+    let dd = d.xz;
+    var best = 1e30;
+    for (var a = 0; a < 2; a++) {
+        let di = dd[a];
+        if (abs(di) < 1e-9) { continue; }
+        let s = sign(di);
+        let x = o[a] + di * t;
+        var k = select(ceil(x / CLOUD_FAR_GRID_CELL_M) - 1.0, floor(x / CLOUD_FAR_GRID_CELL_M) + 1.0, di > 0.0);
+        var cand = (k * CLOUD_FAR_GRID_CELL_M - o[a]) / di;
+        for (var i = 0; i < 4 && cand <= t; i++) {
+            k += s;
+            cand = (k * CLOUD_FAR_GRID_CELL_M - o[a]) / di;
+        }
+        best = min(best, cand - t);
+    }
+    return best;
+}
+
+/// Distance from p0 + d t to the next crossing of one of the far grid's interior slab spheres.
+fn ref_grid_slab_after(p0: vec3<f32>, d: vec3<f32>, t: f32) -> f32 {
+    let dz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_FAR_GRID_RES_Z);
+    var b = 1e30;
+    for (var k = 1; k < CLOUD_FAR_GRID_RES_Z; k++) {
+        b = min(b, ref_sphere_after(p0, d, cloud_layer.cloud_layer_start + f32(k) * dz, t));
+    }
+    return b;
+}
+
+/// Whether the far-grid cell holding q (a segment's midpoint) is certainly clear of cloud.
+fn ref_grid_clear(q: vec3<f32>) -> bool {
+    let r = length(q);
+    let cell = cloud_far_grid_cell(cloud_field_frame_xz(q));
+    let dz = (cloud_layer.cloud_layer_end - cloud_layer.cloud_layer_start) / f32(CLOUD_FAR_GRID_RES_Z);
+    let slab = clamp(i32(floor((r - cloud_layer.cloud_layer_start) / dz)), 0, CLOUD_FAR_GRID_RES_Z - 1);
+    let v = textureLoad(cloud_far_grid, vec3<i32>(cloud_far_grid_texel(cell), slab), 0).rg;
+    return v.x == 1u && v.y == cloud_far_grid_tag(cell);
+}
+
 struct RefFlight {
     t: f32,
     // 0 = reached t_max, 1 = air scatter, 2 = cloud scatter, 3 = absorbed, 4 = ground, 5 = space
@@ -436,15 +492,27 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
         if (t_top < tb) { tb = t_top; ev = 5u; }
         var t_shell = min(ref_sphere_after(p0, d, r_cs, t), ref_sphere_after(p0, d, r_ce, t));
         if (t_shell < tb) { tb = t_shell; ev = 6u; }
-        let pm = p + d * (0.5 * tb);
+        var pm = p + d * (0.5 * tb);
         let rm = length(pm);
         // The top of the atmosphere at the end of a segment in vacuum is entry from space, crossed
         // like the shell boundaries; from inside it is escape (audit 36).
         if (ev == 5u && rm > atmosphere.outer_radius) { ev = 6u; }
         let in_shell = rm > r_cs && rm < r_ce;
+        // Cloud majorant of this segment: the shell-wide bound, or 0 in a far-grid cell that is
+        // certainly clear (the segment then ends at the cell's faces; see `ref_grid_xz_exit`).
+        var cloud_maj = 0.0;
+        @if(!CLOUD_REF_NO_CLOUDS) {
+            if (in_shell) {
+                cloud_maj = sigma_t_c * ref_cloud_bound;
+                @if(!CLOUD_REF_NO_GRID) {
+                    let t_cell = min(ref_grid_slab_after(p0, d, t), ref_grid_xz_exit(p0, d, t));
+                    if (t_cell < tb) { tb = t_cell; ev = 6u; pm = p + d * (0.5 * tb); }
+                    if (ref_grid_clear(pm)) { cloud_maj = 0.0; }
+                }
+            }
+        }
         // Vacuum outside the atmosphere: no collisions (the density LUT clamps to the top value).
-        var maj = select(air_max, 0.0, rm > atmosphere.outer_radius);
-        @if(!CLOUD_REF_NO_CLOUDS) { if (in_shell) { maj += sigma_t_c * ref_cloud_bound; } }
+        let maj = select(air_max, 0.0, rm > atmosphere.outer_radius) + cloud_maj;
         var tt = 0.0;
         var reached = maj <= 0.0;
         for (var i = 0u; i < REF_NULL_CANDIDATES && !reached; i++) {
@@ -456,7 +524,7 @@ fn ref_flight(p0: vec3<f32>, d: vec3<f32>, t_max: f32, ch: u32, air_max: f32, ra
             let a_air = air[0][ch];
             let s_air = air[1][ch];
             var dens = 0.0;
-            if (in_shell) { dens = ref_cloud_density(q); }
+            if (cloud_maj > 0.0) { dens = ref_cloud_density(q); }
             let s_cl = dens * sigma_s_c;
             let t_cl = dens * sigma_t_c;
             if (ratio) {
@@ -542,16 +610,35 @@ fn ref_sun_vis(p: vec3<f32>, l: vec3<f32>, ch: u32) -> f32 {
     @if(!CLOUD_REF_NO_CLOUDS) {
     let seg = cloud_layer_segment(p, l);
     if (seg.z > 0.5 && v > 0.0 && ref_cloud_bound > 0.0) {
-        // Ratio tracking with the cloud majorant sigma_t * ref_cloud_bound.
+        // Ratio tracking with the cloud majorant sigma_t * ref_cloud_bound, per far-grid cell:
+        // certainly clear cells are crossed without candidates (local majorant 0). Candidates are
+        // a memoryless Poisson process, so restarting them at each cell face is exact.
         let sigma_t_c = get_cloud_scattering_coeff() + get_cloud_absorption_coeff();
         var t = max(seg.x, 0.0);
         let t_end = min(seg.y, settings.cloud_max_distance);
-        var done = false;
-        for (var i = 0u; i < REF_SUN_CANDIDATES; i++) {
-            t += -log(1.0 - ref_rand()) / (sigma_t_c * ref_cloud_bound);
-            if (t >= t_end || v < 1e-6) { done = true; break; }
-            v *= 1.0 - ref_cloud_density(p + l * t) / ref_cloud_bound;
+        var done = t >= t_end;
+        var n = 0u;
+        for (var s = 0u; s < REF_SEGMENTS && !done; s++) {
+            var tb = t_end - t;
+            var clear = false;
+            @if(!CLOUD_REF_NO_GRID) {
+                tb = min(tb, min(ref_grid_slab_after(p, l, t), ref_grid_xz_exit(p, l, t)));
+                clear = ref_grid_clear(p + l * (t + 0.5 * tb));
+            }
+            if (!clear) {
+                var tt = 0.0;
+                loop {
+                    tt += -log(1.0 - ref_rand()) / (sigma_t_c * ref_cloud_bound);
+                    if (tt >= tb || v < 1e-6) { break; }
+                    n++;
+                    if (n >= REF_SUN_CANDIDATES) { ref_caps.z = 1.0; done = true; break; }
+                    v *= 1.0 - ref_cloud_density(p + l * (t + tt)) / ref_cloud_bound;
+                }
+            }
+            t += tb;
+            if (t >= t_end || v < 1e-6) { done = true; }
         }
+        // Segment budget used up before the layer's exit: the sun ray was truncated (review 1a).
         if (!done) { ref_caps.z = 1.0; }
     }
     }

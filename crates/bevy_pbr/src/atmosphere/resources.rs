@@ -4197,6 +4197,11 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
     if std::env::var("CLOUD_REF_NO_CLOUDS").is_ok() {
         defs.push("CLOUD_REF_NO_CLOUDS".into());
     }
+    // The reference's cloud majorant everywhere in the shell instead of per far-grid cell (the
+    // local majorants' A/B check).
+    if std::env::var("CLOUD_REF_NO_GRID").is_ok() {
+        defs.push("CLOUD_REF_NO_GRID".into());
+    }
     defs.extend(atm_dbg_defs());
     defs
 }
