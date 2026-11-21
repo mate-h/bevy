@@ -138,6 +138,35 @@ pub fn extract_cloud_influences(
     extracted.0 = all;
 }
 
+/// Upper bound of the droplet number `weather_window.wesl` composes anywhere: interval
+/// arithmetic over the influences in order, each mixing `mode(base, value)` with the base by a
+/// weight in [0, 1] (so the result lies between the two), clamped to >= 1 as the shader does.
+/// Influences that set no droplet number leave it alone.
+pub fn droplet_number_max<'a>(default: f32, influences: impl Iterator<Item = &'a CloudInfluence>) -> f32 {
+    let (mut lo, mut hi) = (default, default);
+    for i in influences {
+        let Some(v) = i.values.droplet_number else {
+            continue;
+        };
+        if i.opacity <= 0.0 {
+            continue;
+        }
+        let (a, b) = match i.blend {
+            CloudBlend::Normal => (v, v),
+            CloudBlend::Add => (lo + v, hi + v),
+            CloudBlend::Subtract => (lo - v, hi - v),
+            CloudBlend::Multiply => {
+                let p = [lo * v, hi * v];
+                (p[0].min(p[1]), p[0].max(p[1]))
+            }
+            CloudBlend::Max => (lo.max(v), hi.max(v)),
+            CloudBlend::Min => (lo.min(v), hi.min(v)),
+        };
+        (lo, hi) = (lo.min(a), hi.max(b));
+    }
+    hi.max(1.0)
+}
+
 /// `weather_window.wesl` WeatherWindowParams for one view, as raw f32 words (u32 fields bit
 /// cast): origin, droplet number, influence count; the map frame (advection offset, scale); then
 /// per influence 5 x vec4: centre xz and x axis xz (atmosphere space); half extents, feather,

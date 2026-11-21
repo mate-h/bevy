@@ -33,7 +33,7 @@ import package::atmosphere::{
         cloud_column_at, cloud_coarse_from_column, cloud_shape_from_column, CLOUD_USE_NOISE_SHAPE,
         cloud_field_frame_xz, cloud_far_grid_cell, cloud_far_grid_texel, cloud_far_grid_tag,
         CLOUD_FAR_GRID_RES_Z, CLOUD_FAR_GRID_CELL_M, cloud_shadow_lod, CLOUD_SHADOW_WARP_A,
-        voxel_cloud_sdf, VOXEL_SDF_UNKNOWN, NVDF_SDF_QUANTUM_M,
+        voxel_cloud_sdf, VOXEL_SDF_UNKNOWN, NVDF_SDF_QUANTUM_M, cloud_droplet_extinction_factor,
     },
 };
 
@@ -349,6 +349,9 @@ fn ref_compute_bounds(li: u32) {
     var shape = 1.0;
     if (cloud_layer.profile_mode == 0u) {
         shape *= bounds.w / max(cloud_layer.liquid_water, 1e-9) * ref_wg_magnitude[0];
+        // The droplets' extinction per liquid water (`cloud_droplet_extinction_factor`) at the
+        // window's largest droplet number (bevy-e3a.5: above the default it exceeded the bound).
+        shape *= cloud_droplet_extinction_factor(max(cloud_layer.droplet_number_max, cloud_layer.droplet_number));
     }
     ref_cloud_bound = max(cloud_layer.cloud_density, 0.0) * shape;
 }

@@ -374,6 +374,7 @@ pub fn extract_atmosphere(
         Query<(RenderEntity, Option<&AtmosphereSettings>, &GlobalTransform), With<Camera3d>>,
     >,
     voxel_clouds: Extract<Query<(&VoxelCloud, &GlobalTransform)>>,
+    influences: Extract<Query<&CloudInfluence>>,
     images: Extract<Res<bevy_asset::Assets<Image>>>,
     mut extracted_voxel_cloud: ResMut<voxel_cloud::ExtractedVoxelCloud>,
 ) {
@@ -463,6 +464,10 @@ pub fn extract_atmosphere(
         if has_layers {
             let mut layers =
                 GpuCloudLayers::new(cloud_layer, &thin_layers, wind, profiles, atmo.inner_radius);
+            let mut ordered: Vec<_> = influences.iter().collect();
+            ordered.sort_by_key(|i| i.order);
+            layers.droplet_number_max =
+                weather::droplet_number_max(layers.droplet_number, ordered.into_iter());
             layers.weather_window_origin = weather_window_origin(
                 extracted_world_to_atmosphere.transform_point3(cam_world),
                 &layers,
@@ -1474,8 +1479,12 @@ pub struct GpuCloudLayers {
     pub weather_window_origin: Vec2,
     /// Default cloud droplet number concentration of the physical channels (cm^-3): the layer's
     /// reference microphysics, LWC 1 g/m^3 at r_e 10 um, k N_d = 239 with k = 0.8 (Martin et al.
-    /// 1994). Not read by the clouds yet.
+    /// 1994).
     pub droplet_number: f32,
+    /// Upper bound of the droplet number anywhere in the weather window (the default and every
+    /// [`CloudInfluence`](weather::CloudInfluence)'s blend, `weather::droplet_number_max`): the
+    /// reference tracer's density majorant scales by its droplet extinction factor.
+    pub droplet_number_max: f32,
     /// Number of valid entries of [`GpuCloudLayers::thin`].
     pub thin_count: u32,
     /// Thin layers, lowest mid level first.
@@ -1567,6 +1576,7 @@ impl GpuCloudLayers {
             shape_noise_scale: c.shape_noise_scale.max(1.0),
             weather_window_origin: Vec2::ZERO,
             droplet_number: 299.0,
+            droplet_number_max: 299.0,
             thin_count: thin_count as u32,
             thin: thin_array,
             voxel_uvw_from_atmosphere: Mat4::IDENTITY,

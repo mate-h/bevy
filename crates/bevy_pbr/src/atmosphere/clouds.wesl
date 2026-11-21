@@ -34,6 +34,7 @@ struct GpuCloudLayers {
     shape_noise_scale: f32,
     weather_window_origin: vec2<f32>,
     droplet_number: f32,
+    droplet_number_max: f32,
     // Thin layers (ThinCloudLayer, mod.rs GpuCloudLayers), lowest mid level first.
     thin_count: u32,
     thin: array<GpuThinCloudLayer, 4>,
