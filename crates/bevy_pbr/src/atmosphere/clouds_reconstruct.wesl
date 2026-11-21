@@ -123,7 +123,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             history = vec4(history.rgb * params.history_exposure_scale, history.a);
             let prev_px = vec2<i32>(min(prev_uv * vec2<f32>(size), vec2<f32>(size) - 1.0));
             let history_depth = textureLoad(history_depth_texture, prev_px, 0).r;
-            let clamped = clamp(history, c_min, c_max);
+            var clamped = clamp(history, c_min, c_max);
+            @if(ATM_DBG_NO_RECON_CLAMP) { clamped = history; }
             if (traced_now) {
                 result = mix(clamped, center, params.new_sample_weight);
             } else {

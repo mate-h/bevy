@@ -1631,6 +1631,7 @@ impl FromWorld for AtmosphereLutPipelines {
             shader_defs: vec!["ATMOSPHERE_NO_SHADOW_MAPS".into()]
                 .into_iter()
                 .chain(cloud_reference_def())
+                .chain(atm_dbg_defs())
                 .collect(),
             ..default()
         });
@@ -4257,6 +4258,14 @@ fn cloud_reference_def() -> Vec<bevy_shader::ShaderDefVal> {
 ///   its escape probability, density) at each pixel's first in-cloud sample instead of cloud colour.
 /// - `ATM_DBG_OUT_SUN_TAU`: write (sun optical depth of the light taps plus the map beyond, the
 ///   cloud shadow map's alone at the sample, the diffusion solution, density) there instead.
+/// - `ATM_DBG_CLOUD_JITTER`: trace the clouds with the TAA-jittered rays (the old path; their
+///   history was resampled at the jitter's sub-texel offset every frame).
+/// - `ATM_DBG_NO_RECON_CLAMP`: the cloud reconstruction keeps the reprojected history unclamped
+///   (edge-width test, bevy-20n.4; ghosts under motion).
+/// - `ATM_DBG_OUT_MS`: write the multiple-scattering switch (cloud_lighting.wesl): the
+///   luminance-weighted fraction of lit samples where the field solve won over the escape series,
+///   the mean |relative jump| between the two branches, the fraction inside the field's grid, and
+///   the weight (bevy-1u6.2 seam measurement).
 /// - `ATM_DBG_OUT_STEPS`: write the view march's sample counts (coarse, fine, lit, all steps)
 ///   instead of cloud colour (cost profiling).
 /// - `ATM_DBG_REF_CAPS`: with `CLOUD_REFERENCE`, the fraction of samples that reached the

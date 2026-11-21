@@ -851,6 +851,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         // ATM_DBG_OUT_SUN_OD: (sun optical depth local, the field's diffusion solution, the
         // field's escape probability, density) at the first in-cloud sample.
         var dbg_sun = vec4(-1.0);
+        var dbg_ms = vec4(0.0);
         var depth_weight_sum = 0.0;
         var depth_sum = 0.0;
         var luminance = vec3(0.0);
@@ -1101,6 +1102,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
             @if(ATM_DBG_OUT_SUN_OD || ATM_DBG_OUT_SUN_TAU) {
                 if (dbg_sun.x < 0.0) { dbg_sun = lighting.dbg; }
             }
+            // ATM_DBG_OUT_MS: luminance-weighted (field branch fraction, |relative jump| between
+            // the branches, inside-field fraction, weight), normalised at the end.
+            @if(ATM_DBG_OUT_MS) {
+                let d = lighting.dbg;
+                if (d.x >= 0.0) {
+                    let w = lit.y;
+                    let jump = abs(d.z - d.y) / max(max(d.y, d.z), 1e-6);
+                    dbg_ms += w * vec4(d.x, jump, d.w, 1.0);
+                }
+            }
             luminance += lit.y * lighting.radiance;
         }
 
@@ -1137,6 +1148,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_
         result = vec4(lum * view.exposure, transmittance);
         @if(ATM_DBG_OUT_SUN_OD) { result = dbg_sun; }
         @if(ATM_DBG_OUT_SUN_TAU) { result = dbg_sun; }
+        @if(ATM_DBG_OUT_MS) { result = vec4(dbg_ms.xyz / max(dbg_ms.w, 1e-9), dbg_ms.w); }
         @if(ATM_DBG_OUT_H) {
             let ph = ray_origin + ray_dir * weighted_depth;
             let ch = cloud_density_context(length(ph), ph);

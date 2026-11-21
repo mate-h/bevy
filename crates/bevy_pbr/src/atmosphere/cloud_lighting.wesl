@@ -697,6 +697,20 @@ fn cloud_sample_lighting(
                 @if(ATM_DBG_NO_DIFF_FLUX) { u_diff.x = u_diff.y; }
                 let t_delta = exp(-(1.0 - CLOUD_MIE_MEAN_COS * CLOUD_MIE_MEAN_COS) * tau_sun);
                 let beam_fwd = max(t_delta - t_cloud, 0.0);
+                // A hard switch: the branches disagree by ~2-3x where they meet (the field's flux
+                // term and the forward beam's phase are view dependent, the comparison is not),
+                // but a +-20 % blend with a 2 km field-edge fade changed the image gradient along
+                // the switch lines by <= 1 % in hero, sun, backlit and up (bevy-1u6.2/.3): no
+                // visible seam. ATM_DBG_OUT_MS shows it: (field won, the series' source, the
+                // field's with its forward beam, units of U; p inside the field's grid).
+                @if(ATM_DBG_OUT_MS) {
+                    if (light_i == 0u) {
+                        let uvw = cloud_field_uvw(p, textureLoad(cloud_field_diff, vec3(0), 0).gb);
+                        let inside = all(uvw.xy >= vec2(0.0)) && all(uvw.xy <= vec2(1.0));
+                        dbg = vec4(select(0.0, 1.0, u_diff.y + beam_fwd > ms_vol), ms_vol,
+                            u_diff.x + 4.0 * PI * beam_fwd * cloud_phase(cos_theta), select(0.0, 1.0, inside));
+                    }
+                }
                 @if(!ATM_DBG_NO_FWD_BEAM) {
                     if (u_diff.y + beam_fwd > ms_vol) {
                         ms_vol = u_diff.x;
