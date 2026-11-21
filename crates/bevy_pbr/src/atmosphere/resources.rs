@@ -4339,12 +4339,13 @@ pub(crate) fn cloud_sky_sh_defs() -> Vec<bevy_shader::ShaderDefVal> {
     }
 }
 
-/// `CLOUD_SUN_OD_GRID=1` (default off): the cloud pass's light march keeps two local taps and
+/// `CLOUD_SUN_OD_GRID` (default on, `=0` off): the cloud pass's light march keeps two local taps and
 /// reads the rest of the sun optical depth from the pre-summed grid (`cloud_field.wesl` sun_od,
 /// Nubis Cubed 2:09:52); off, the 12 taps + long tap. The grid's pass and buffers follow the
 /// same switch ([`cloud_sun_od_enabled`]).
 ///
-/// Off by default from the measurement (hero:35, 720p, M1 Pro, xctrace, old/new alternated,
+/// On by default (2026-11-21): the image matters more than the ~4-5 % (RTX 5090: hero +0.052 ms,
+/// sun +0.066 ms of ~1.1 ms). It was off from the measurement (hero:35, 720p, M1 Pro, xctrace, old/new alternated,
 /// clouds_raymarch median per execution): old 6.77 / 6.39 / 6.70 ms, grid 7.04 / 6.99 ms, with
 /// the former march compiled out of the shader (ATM_DBG_SUN_OD_ONLY) 6.41 ms, plus the grid
 /// pass's 0.40 ms; GPU busy (union) old 14.4 / 15.0 / 16.1, grid 15.5 / 16.2, compiled out 15.4
@@ -4356,9 +4357,9 @@ pub(crate) fn cloud_sky_sh_defs() -> Vec<bevy_shader::ShaderDefVal> {
 pub(crate) fn cloud_sun_od_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("CLOUD_SUN_OD_GRID").as_deref(),
-            Ok("1") | Ok("on") | Ok("true")
+            Ok("0") | Ok("off") | Ok("false")
         )
     })
 }
