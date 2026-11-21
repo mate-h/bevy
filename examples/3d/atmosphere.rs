@@ -73,7 +73,6 @@ use bevy::{
         CloudBlend, CloudInfluence, CloudInfluenceShape, CloudInfluenceValues, CloudLayerOf,
         CloudProfiles, ThinCloudLayer, VolumetricCloudLayer, VoxelCloud,
         AtmosphereDebugView, AtmosphereDebugViewPlugin,
-        DefaultOpaqueRendererMethod,
         VolumetricCloudSettings, VolumetricsSettings,
     },
     post_process::bloom::Bloom,
@@ -121,7 +120,6 @@ fn main() {
         focused_mode: update_mode,
         unfocused_mode: update_mode,
     })
-    .insert_resource(DefaultOpaqueRendererMethod::deferred())
         .insert_resource(ClearColor(
             // Debug: `ATMOSPHERE_CLEAR=r,g,b` (linear) to test background leakage through the
             // sky's dual-source transmittance blend.
