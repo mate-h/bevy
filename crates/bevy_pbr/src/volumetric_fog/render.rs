@@ -3,7 +3,9 @@
 use core::array;
 
 use bevy_asset::{load_embedded_asset, AssetId, AssetServer, Handle};
-use bevy_camera::{Camera3d, MainPassResolutionOverride, Viewport};
+use bevy_camera::{
+    visibility::InheritedVisibility, Camera3d, MainPassResolutionOverride, Viewport,
+};
 use bevy_color::ColorToComponents as _;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -45,7 +47,18 @@ use bevy_transform::components::GlobalTransform;
 use bevy_utils::prelude::default;
 use bitflags::bitflags;
 
-use crate::{MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, ViewKeyCache};
+use crate::{
+    MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, ViewKeyCache,
+    VolumetricsSettings,
+};
+
+/// Whether a view's fog is rendered by the atmosphere's froxel grid instead of this pass: the
+/// camera has [`VolumetricsSettings`] enabled (the grid voxelizes the view's `FogVolume`s and
+/// scatters its `VolumetricLight` point and spot lights; the per-pixel pass would draw the same
+/// volumes a second time).
+fn froxels_take_over(settings: Option<&VolumetricsSettings>) -> bool {
+    settings.is_some_and(|s| s.enabled)
+}
 
 use super::FogAssets;
 
@@ -239,10 +252,20 @@ pub fn init_volumetric_fog_pipeline(
 
 /// Extracts [`VolumetricFog`], [`FogVolume`], and [`VolumetricLight`]s
 /// from the main world to the render world.
+///
+/// Fog volumes respect the [`Visibility`] component: volumes with
+/// [`Visibility::Hidden`] are not extracted.
 pub fn extract_volumetric_fog(
     mut commands: Commands,
     view_targets: Extract<Query<(RenderEntity, &VolumetricFog)>>,
-    fog_volumes: Extract<Query<(RenderEntity, &FogVolume, &GlobalTransform)>>,
+    fog_volumes: Extract<
+        Query<(
+            RenderEntity,
+            &FogVolume,
+            &GlobalTransform,
+            Option<&InheritedVisibility>,
+        )>,
+    >,
     volumetric_lights: Extract<Query<(RenderEntity, &VolumetricLight)>>,
 ) {
     if volumetric_lights.is_empty() {
@@ -253,7 +276,9 @@ pub fn extract_volumetric_fog(
                 .remove::<(VolumetricFog, ViewVolumetricFogPipelines, ViewVolumetricFog)>();
         }
         for (entity, ..) in fog_volumes.iter() {
-            commands.entity(entity).remove::<FogVolume>();
+            commands
+                .entity(entity)
+                .remove::<(FogVolume, GlobalTransform)>();
         }
         return;
     }
@@ -265,12 +290,18 @@ pub fn extract_volumetric_fog(
             .insert(*volumetric_fog);
     }
 
-    for (entity, fog_volume, fog_transform) in fog_volumes.iter() {
-        commands
-            .get_entity(entity)
-            .expect("Fog volume entity wasn't synced.")
-            .insert((*fog_volume).clone())
-            .insert(*fog_transform);
+    for (entity, fog_volume, fog_transform, inherited_visibility) in fog_volumes.iter() {
+        if inherited_visibility.map_or(true, |v| v.get()) {
+            commands
+                .get_entity(entity)
+                .expect("Fog volume entity wasn't synced.")
+                .insert((*fog_volume).clone())
+                .insert(*fog_transform);
+        } else {
+            commands
+                .entity(entity)
+                .remove::<(FogVolume, GlobalTransform)>();
+        }
     }
 
     for (entity, volumetric_light) in volumetric_lights.iter() {
@@ -586,7 +617,7 @@ pub fn prepare_volumetric_fog_pipelines(
     mut pipelines: ResMut<SpecializedRenderPipelines<VolumetricFogPipeline>>,
     volumetric_lighting_pipeline: Res<VolumetricFogPipeline>,
     fog_assets: Res<FogAssets>,
-    view_targets: Query<(Entity, &ExtractedView), With<VolumetricFog>>,
+    view_targets: Query<(Entity, &ExtractedView, Option<&VolumetricsSettings>), With<VolumetricFog>>,
     meshes: Res<RenderAssets<RenderMesh>>,
     view_key_cache: Res<ViewKeyCache>,
 ) {
@@ -595,7 +626,11 @@ pub fn prepare_volumetric_fog_pipelines(
         return;
     };
 
-    for (entity, view) in view_targets.iter() {
+    for (entity, view, volumetrics) in view_targets.iter() {
+        if froxels_take_over(volumetrics) {
+            commands.entity(entity).remove::<ViewVolumetricFogPipelines>();
+            continue;
+        }
         let Some(mesh_pipeline_key) = view_key_cache.get(&view.retained_view_entity) else {
             continue;
         };
@@ -632,7 +667,12 @@ pub fn prepare_volumetric_fog_pipelines(
 pub fn prepare_volumetric_fog_uniforms(
     mut commands: Commands,
     mut volumetric_lighting_uniform_buffer: ResMut<VolumetricFogUniformBuffer>,
-    view_targets: Query<(Entity, &ExtractedView, &VolumetricFog)>,
+    view_targets: Query<(
+        Entity,
+        &ExtractedView,
+        &VolumetricFog,
+        Option<&VolumetricsSettings>,
+    )>,
     fog_volumes: Query<(Entity, &FogVolume, &GlobalTransform)>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -652,7 +692,12 @@ pub fn prepare_volumetric_fog_uniforms(
         return;
     };
 
-    for (view_entity, extracted_view, volumetric_fog) in view_targets.iter() {
+    for (view_entity, extracted_view, volumetric_fog, volumetrics) in view_targets.iter() {
+        if froxels_take_over(volumetrics) {
+            // The froxel grid renders this view's fog volumes (`VolumetricsSettings`).
+            commands.entity(view_entity).remove::<ViewVolumetricFog>();
+            continue;
+        }
         let world_from_view = extracted_view.world_from_view.affine();
 
         let mut view_fog_volumes = vec![];

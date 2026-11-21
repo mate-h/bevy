@@ -129,6 +129,7 @@ pub struct ExtractedDirectionalLight {
     pub occlusion_culling: bool,
     pub sun_disk_angular_size: f32,
     pub sun_disk_intensity: f32,
+    pub angular_size: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wesl!
@@ -169,6 +170,8 @@ pub struct GpuDirectionalLight {
     decal_index: u32,
     sun_disk_angular_size: f32,
     sun_disk_intensity: f32,
+    cos_angular_radius: f32,
+    sin_angular_radius: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wesl!
@@ -871,6 +874,13 @@ pub fn extract_lights(
             occlusion_culling,
             sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
             sun_disk_intensity: sun_disk.unwrap_or_default().intensity,
+            // One sun, one size: a light that draws a `SunDisk` in the atmosphere is shaded as a
+            // disk of the same angular size unless `DirectionalLight::angular_size` says otherwise.
+            angular_size: if directional_light.angular_size > 0.0 {
+                directional_light.angular_size
+            } else {
+                sun_disk.map_or(0.0, |disk| disk.angular_size)
+            },
         };
 
         let mut entity_commands = commands
@@ -1275,7 +1285,12 @@ pub fn prepare_lights(
     //   lights are chosen if the light count limit is exceeded.
     directional_light_entities.sort_by_cached_key(|entity| {
         let light = directional_lights.get(*entity).unwrap().2;
-        (light.volumetric, light.shadow_maps_enabled, *entity)
+        // `Reverse`: ascending order would put lights *without* these first.
+        (
+            core::cmp::Reverse(light.volumetric),
+            core::cmp::Reverse(light.shadow_maps_enabled),
+            *entity,
+        )
     });
 
     if global_clusterable_object_meta.entity_to_index.capacity() < point_light_entities.len() {
@@ -1824,6 +1839,8 @@ pub fn prepare_lights(
                 depth_texture_base_index: num_directional_cascades_enabled_for_this_view as u32,
                 sun_disk_angular_size: light.sun_disk_angular_size,
                 sun_disk_intensity: light.sun_disk_intensity,
+                cos_angular_radius: ops::cos(0.5 * light.angular_size),
+                sin_angular_radius: ops::sin(0.5 * light.angular_size),
                 decal_index: decals
                     .as_ref()
                     .and_then(|decals| decals.get(*light_entity))

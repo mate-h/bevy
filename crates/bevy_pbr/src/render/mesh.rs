@@ -388,6 +388,7 @@ pub fn check_views_need_specialization(
             Has<ScreenSpaceReflectionsUniform>,
             Has<ContactShadows>,
         ),
+        (Option<&VolumetricsSettings>, Has<GpuCloudLayers>),
     )>,
     mut seen_views: Local<HashSet<RetainedViewEntity>>,
 ) {
@@ -407,6 +408,7 @@ pub fn check_views_need_specialization(
         distance_fog,
         (has_environment_maps, has_irradiance_volumes),
         (has_oit, has_atmosphere, has_ssr, has_contact_shadows),
+        (volumetrics, has_cloud_layers),
     ) in views.iter_mut()
     {
         seen_views.insert(view.retained_view_entity);
@@ -452,6 +454,13 @@ pub fn check_views_need_specialization(
 
         if has_atmosphere {
             view_key |= MeshPipelineKey::ATMOSPHERE;
+            // The froxel grid's integrated volume applies to this view's transparent meshes
+            // (`prepare_mesh_view_bind_groups` binds it under the same condition).
+            if volumetrics
+                .is_some_and(|v| v.applies_to_transparents(has_cloud_layers, msaa.samples()))
+            {
+                view_key |= MeshPipelineKey::VOLUMETRICS_APPLY_MESH;
+            }
         }
 
         if has_contact_shadows {
@@ -3127,7 +3136,8 @@ bitflags::bitflags! {
         const INVERT_CULLING                    = 1 << 22;
         const PREPASS_READS_MATERIAL            = 1 << 23;
         const CONTACT_SHADOWS                   = 1 << 24;
-        const LAST_FLAG                         = Self::CONTACT_SHADOWS.bits();
+        const VOLUMETRICS_APPLY_MESH            = 1 << 25; // The view's froxel volumetrics apply to its transparent meshes (`atmosphere/volumetrics.rs`)
+        const LAST_FLAG                         = Self::VOLUMETRICS_APPLY_MESH.bits();
 
         const ALL_PREPASS_BITS                  = Self::DEPTH_PREPASS.bits()
                                                 | Self::NORMAL_PREPASS.bits()
@@ -3722,6 +3732,19 @@ impl SpecializedMeshPipeline for MeshPipeline {
 
         if key.contains(MeshPipelineKey::ATMOSPHERE) {
             shader_defs.push("ATMOSPHERE".into());
+        }
+
+        // Froxel aerial perspective for alpha-blended meshes only (`pbr_functions.wesl`
+        // `apply_froxel_volumetrics`): opaque and alpha-masked meshes get theirs from `render_sky`,
+        // which composites the integrated volume over the depth buffer; `Multiply` blending has
+        // no additive term to carry the in-scatter.
+        if key.contains(MeshPipelineKey::VOLUMETRICS_APPLY_MESH)
+            && matches!(
+                key.intersection(MeshPipelineKey::BLEND_RESERVED_BITS),
+                MeshPipelineKey::BLEND_ALPHA | MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA
+            )
+        {
+            shader_defs.push("VOLUMETRICS_APPLY_MESH".into());
         }
 
         if self.binding_arrays_are_usable {
