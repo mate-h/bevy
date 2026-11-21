@@ -308,9 +308,29 @@ fn cloud_profile_base_m(cloud_type: f32) -> f32 {
     return textureSampleLevel(cloud_profile_lut, noise_sampler_3d, vec2(0.5 / n.x, v), 0.0).a * 1000.0;
 }
 
-/// Cloud type (weather G) at a position, as `sample_weather` reads it.
+/// Cloud type at a position, as `cloud_column_weather` reads it (its `.y`), from the one texture
+/// that holds it: with the lookup profiles the physical window's G inside the window, else the
+/// art weather's G (the window's or the tiled map's). The art G is never changed by the mesoscale
+/// erosion (coverage only), so this skips the coverage's two fetches and the physical lookup's
+/// redundant art read: 1 fetch instead of 3 for the shear lean's base (review 2a, bevy-sgl.6).
 fn cloud_weather_type(world_pos: vec3<f32>) -> f32 {
-    return cloud_column_weather(world_pos).y;
+    let rot = mat2x2<f32>(0.8660254, -0.5, 0.5, 0.8660254);
+    let uv = (rot * world_pos.xz) / max(1.0, cloud_layer.noise_scale);
+    let local = weather_window_local(uv);
+    if (cloud_layer.profile_mode == 0u) {
+        let window_p = f32(textureDimensions(weather_window_physical).x);
+        if (all(local > vec2(1.0)) && all(local < vec2(window_p - 1.0))) {
+            return saturate(textureSampleLevel(weather_window_physical, noise_sampler_3d, local / window_p, 0.0).g);
+        }
+    }
+    let window = f32(textureDimensions(weather_window_art).x);
+    var g: f32;
+    if (all(local > vec2(1.0)) && all(local < vec2(window - 1.0))) {
+        g = textureSampleLevel(weather_window_art, noise_sampler_3d, local / window, 0.0).g;
+    } else {
+        g = textureSampleLevel(noise_texture_2d, noise_sampler_3d, uv, 0.0).g;
+    }
+    return clamp(g, 0.0, 1.0);
 }
 
 /// The weather of a column at a sample position, as every density function reads it:
